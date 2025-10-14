@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# Build outputs
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+
+# IDE files
+.vscode/settings.json
+.DS_Store
+
+# Log files
+*.log
+nohup.out
+
+# Generated files
+backend/downloads/
+backend/training_data/
+backend/whisper_finetuned/
+
+# Large test files
+*.wav
+*.mp3
+*.mid
+test_*.txt
+
+# Temporary files
+*.tmp
+*.temp
