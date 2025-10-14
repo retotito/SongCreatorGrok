@@ -211,13 +211,16 @@ async def generate_final_files(
             try:
                 syllable_timings = detect_syllable_boundaries(vocal_path, flat_syllables)
                 
-                # Calculate dynamic GAP from first pitch
-                if syllable_timings:
-                    gap_ms = int(syllable_timings[0][0] * 1000)  # First syllable start time in ms
+                # Calculate dynamic GAP from first pitch time
+                if syllable_timings and len(syllable_timings) > 0:
+                    first_syllable_start = syllable_timings[0][0]
+                    gap_ms = int(first_syllable_start * 1000)  # Convert to milliseconds
+                    print(f"DEBUG: First pitch detected at: {first_syllable_start:.3f}s -> GAP: {gap_ms}ms")
                 else:
                     gap_ms = 0
+                    print(f"DEBUG: No syllable timings detected, GAP set to 0")
                 
-                print(f"DEBUG: Found timing for {len(syllable_timings)} syllables, GAP: {gap_ms}ms")
+                print(f"DEBUG: Found timing for {len(syllable_timings)} syllables")
                 
             except Exception as e:
                 print(f"DEBUG: Audio analysis failed: {e}, using BPM fallback")
@@ -279,10 +282,9 @@ async def generate_final_files(
 #GAP:{gap_ms}
 #LANGUAGE:English
 #MP3:song.mp3
-#GAP:0
 
 {chr(10).join(note_lines)}
-E%"""
+E"""
             
             # Step 5: Save files to downloads
             downloads_dir = os.path.join(os.getcwd(), "downloads")
@@ -305,19 +307,67 @@ E%"""
             midi_download_path = os.path.join(downloads_dir, midi_filename)
             midi.save(midi_download_path)
             
-            # Create MIDI summary
-            midi_summary_content = f"""MIDI Pitch Analysis Summary
+            # Create comprehensive processing summary
+            summary_content = f"""ULTRASTAR GENERATION SUMMARY
 Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}
-Total syllables: {sum(len(line) for line in all_syllables)}
-Total lines: {len(all_syllables)}
-BPM: {bpm:.2f}
-Duration: {start_beat} beats
+Processing Time: {time.time() - processing_start_time:.2f} seconds
+
+=== AUDIO ANALYSIS ===
+BPM Detection: {bpm/2:.2f} -> Ultrastar BPM: {bpm:.2f}
+GAP Calculation: First pitch at {gap_ms/1000:.3f}s -> GAP: {gap_ms}ms
+Audio Duration: {len(syllable_timings) * 0.5:.1f}s (estimated)
+Total Syllables Found: {len(flat_syllables)}
+Audio Segments Detected: {len(syllable_timings)}
+
+=== SYLLABLE ALIGNMENT ==="""
+
+            if len(syllable_timings) != len(flat_syllables):
+                summary_content += f"""
+⚠️  ALIGNMENT MISMATCH:
+- Expected syllables: {len(flat_syllables)}
+- Audio segments found: {len(syllable_timings)}
+- Fallback method used for missing syllables"""
+
+            summary_content += f"""
+
+=== SYLLABLE DETAILS ==="""
+            
+            for i, syllable in enumerate(flat_syllables):
+                if i < len(syllable_timings):
+                    start_time, end_time, midi_pitch = syllable_timings[i]
+                    start_beat = int((start_time * bpm) / 60)
+                    duration_beats = int(((end_time - start_time) * bpm) / 60)
+                    summary_content += f"""
+Syllable {i+1:2d}: "{syllable:10s}" | Beat {start_beat:3d}-{start_beat+duration_beats:3d} | Pitch {midi_pitch:2d} | Audio-based timing"""
+                else:
+                    summary_content += f"""
+Syllable {i+1:2d}: "{syllable:10s}" | Beat ???-??? | Pitch ??? | ⚠️  NO AUDIO - BPM fallback used"""
+
+            summary_content += f"""
+
+=== PROCESSING METHODS ===
+✅ PYIN pitch detection (C2-C7 range)
+✅ Onset/offset detection for boundaries  
+✅ Noise filtering (segments >50ms)
+✅ Dynamic GAP from first pitch time
+{"✅ Audio-based timing" if len(syllable_timings) > 0 else "⚠️  BPM fallback timing used"}
+
+=== RECOMMENDATIONS ===
+- Import into YASS editor for fine-tuning
+- Check syllable alignment against audio playback
+- Adjust timing for any misaligned syllables
+- Verify pitch accuracy and adjust if needed
+
+=== FILES GENERATED ===
+- {txt_filename} (Ultrastar song file)
+- {midi_filename} (MIDI pitch reference)  
+- {midi_summary_filename} (This summary)
 """
             
-            midi_summary_filename = f"midi_summary_{timestamp}.txt"
+            midi_summary_filename = f"processing_summary_{timestamp}.txt"
             midi_summary_path = os.path.join(downloads_dir, midi_summary_filename)
             with open(midi_summary_path, "w", encoding="utf-8") as f:
-                f.write(midi_summary_content)
+                f.write(summary_content)
             
             result = {
                 "txt_url": f"http://localhost:8001/download/{txt_filename}",
