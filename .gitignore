@@ -22,14 +22,16 @@ nohup.out
 
 # Generated files
 backend/downloads/
+backend/uploads/
+backend/corrections/
+backend/reference_songs/
 backend/training_data/
 backend/whisper_finetuned/
 
 # Large test files
-*.wav
-*.mp3
+frontendTest/*.wav
+frontendTest/*.mp3
 *.mid
-test_*.txt
 
 # Temporary files
 *.tmp

@@ -65,12 +65,12 @@ To ensure consistency and avoid breaking changes, here's a clear definition of t
 - **Manual editing expected**: YASS editor can refine timing and pitch post-generation
 
 ## Checklist for Improvements:
-- [ ] Implement onset/offset detection for syllable boundaries.
-- [ ] Group consecutive pitch detections, filter noise < 50ms.
-- [ ] Calculate dynamic GAP from first pitch time.
+- [x] Implement onset/offset detection for syllable boundaries.
+- [x] Group consecutive pitch detections, filter noise < 50ms.
+- [x] Calculate dynamic GAP from first pitch time.
 - [ ] Add break line padding (2-8 beats) to prevent word concatenation.
-- [ ] Implement fallback timing for unrecognized syllables.
-- [ ] Use median/average pitch for multi-pitch syllables.
+- [x] Implement fallback timing for unrecognized syllables.
+- [x] Use median/average pitch for multi-pitch syllables.
 - [ ] Ensure overall length matches audio duration (within 10s tolerance).
 - [ ] Validate break line timing against reference files.
 - [ ] Test edge cases: silent sections, pitch detection failures.

@@ -4,12 +4,14 @@
 		{
 			"label": "Start Frontend Dev Server",
 			"type": "shell",
-			"command": "npm run dev"
+			"command": "cd frontend && npm run dev",
+			"problemMatcher": []
 		},
 		{
 			"label": "Start Backend Server",
 			"type": "shell",
-			"command": "cd backend && /Users/retokupfer/projects/SongCreatorGrok/.venv/bin/python3 main.py"
+			"command": "cd backend && ${workspaceFolder}/.venv/bin/python3 main.py",
+			"problemMatcher": []
 		}
 	]
 }

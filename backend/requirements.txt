@@ -1,18 +1,29 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
-yt-dlp==2023.11.16
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+
+# Audio processing
+librosa==0.10.2
+soundfile==0.12.1
+numpy>=1.24.0
+
+# Pitch detection
+crepe==0.0.16
+tensorflow>=2.0.0
+
+# Forced alignment
+montreal-forced-aligner==3.1.3
+
+# Vocal separation
 demucs==4.0.1
-librosa==0.10.1
-torch==2.1.1
-torchaudio==2.1.1
-transformers==4.35.2
-scipy==1.10.1
-numpy==1.26.4
-openai-whisper==20231117
-pyphen
-mido
-whisper-timestamped
-pytest==7.4.3
-pretty-midi==0.2.10
+
+# MIDI
+mido==1.3.2
+
+# Syllable splitting fallback
+pyphen==0.16.0
+
+# Utilities
+aiofiles==24.1.0
+pydantic>=2.0.0

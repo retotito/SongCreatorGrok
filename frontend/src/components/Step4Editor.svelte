@@ -1,0 +1,626 @@
+<script>
+  import { onMount, onDestroy } from 'svelte';
+  import { sessionId, generationResult, editorState, referenceData, errorMessage } from '../stores/appStore.js';
+  import { getEditorData, getAudioUrl, getReferenceNotes } from '../services/api.js';
+
+  // Canvas refs
+  let canvasEl;
+  let ctx;
+
+  // Data
+  let notes = [];
+  let referenceNotes = [];
+  let showReference = true;
+  let bpm = 272;
+  let gapMs = 0;
+  let audioDuration = 0;
+  let vocalUrl = '';
+
+  // View state
+  let scrollX = 0;
+  let zoom = 2;           // pixels per beat
+  let viewHeight = 400;
+  let noteHeight = 8;
+
+  // Pitch range (MIDI)
+  let minPitch = 36;     // C2
+  let maxPitch = 96;     // C7
+
+  // Interaction
+  let selectedNote = null;
+  let dragMode = null;     // 'move' | 'resize-left' | 'resize-right'
+  let dragStart = { x: 0, y: 0 };
+  let isDragging = false;
+
+  // Playback
+  let audioEl;
+  let isPlaying = false;
+  let playbackBeat = 0;
+  let animFrame;
+
+  // Parse Ultrastar content into notes array
+  function parseUltrastar(content) {
+    const lines = content.split('\n');
+    const parsed = [];
+    let id = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(':') || trimmed.startsWith('F:')) {
+        const isRap = trimmed.startsWith('F:');
+        const prefix = isRap ? 'F:' : ':';
+        const parts = trimmed.substring(prefix.length).trim().split(/\s+/);
+        
+        if (parts.length >= 4) {
+          const startBeat = parseInt(parts[0]);
+          const duration = parseInt(parts[1]);
+          const pitch = parseInt(parts[2]);
+          const syllable = parts.slice(3).join(' ');
+
+          parsed.push({
+            id: id++,
+            startBeat,
+            duration,
+            pitch,
+            syllable,
+            isRap,
+            confidence: 1.0,
+            original: { startBeat, duration, pitch },
+          });
+        }
+      } else if (trimmed.startsWith('-')) {
+        // Break line — store for rendering
+        const parts = trimmed.substring(1).trim().split(/\s+/);
+        parsed.push({
+          id: id++,
+          type: 'break',
+          startBeat: parseInt(parts[0]) || 0,
+          endBeat: parseInt(parts[1]) || null,
+        });
+      }
+    }
+
+    return parsed;
+  }
+
+  // Calculate pitch range from notes
+  function updatePitchRange() {
+    const pitchNotes = notes.filter(n => n.pitch !== undefined && n.type !== 'break');
+    if (pitchNotes.length === 0) return;
+    
+    const pitches = pitchNotes.map(n => n.pitch);
+    minPitch = Math.max(24, Math.min(...pitches) - 6);
+    maxPitch = Math.min(108, Math.max(...pitches) + 6);
+  }
+
+  // Beat to X pixel
+  function beatToX(beat) {
+    return (beat * zoom) - scrollX;
+  }
+
+  // X pixel to beat
+  function xToBeat(x) {
+    return (x + scrollX) / zoom;
+  }
+
+  // Pitch to Y pixel
+  function pitchToY(pitch) {
+    const range = maxPitch - minPitch;
+    const ratio = (maxPitch - pitch) / range;
+    return ratio * (viewHeight - 40) + 20;
+  }
+
+  // Y pixel to pitch
+  function yToPitch(y) {
+    const range = maxPitch - minPitch;
+    const ratio = (y - 20) / (viewHeight - 40);
+    return Math.round(maxPitch - ratio * range);
+  }
+
+  // Note name helper
+  function noteName(midi) {
+    const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    return `${names[midi % 12]}${Math.floor(midi / 12) - 1}`;
+  }
+
+  // ──── Drawing ────────────────────────────────
+  function draw() {
+    if (!ctx || !canvasEl) return;
+
+    const w = canvasEl.width;
+    const h = canvasEl.height;
+
+    // Clear
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid lines (pitch)
+    const pitchRange = maxPitch - minPitch;
+    for (let p = minPitch; p <= maxPitch; p++) {
+      const y = pitchToY(p);
+      const isC = p % 12 === 0;
+      
+      ctx.strokeStyle = isC ? '#333' : '#1a1a2e';
+      ctx.lineWidth = isC ? 1 : 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+
+      // Pitch labels (only C notes)
+      if (isC) {
+        ctx.fillStyle = '#555';
+        ctx.font = '10px monospace';
+        ctx.fillText(noteName(p), 2, y - 2);
+      }
+    }
+
+    // Grid lines (beats)
+    const startBeat = Math.floor(xToBeat(0));
+    const endBeat = Math.ceil(xToBeat(w));
+    
+    for (let b = startBeat; b <= endBeat; b++) {
+      const x = beatToX(b);
+      const isMeasure = b % Math.round(bpm / 60) === 0;
+      
+      ctx.strokeStyle = isMeasure ? '#2a2a4e' : '#161625';
+      ctx.lineWidth = isMeasure ? 1 : 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+
+    // Draw reference notes (ghost overlay)
+    if (showReference && referenceNotes.length > 0) {
+      for (const note of referenceNotes) {
+        if (note.type === 'break') continue;
+
+        const x = beatToX(note.start_beat);
+        const y = pitchToY(note.pitch);
+        const width = note.duration * zoom;
+
+        // Ghost outline style
+        ctx.strokeStyle = '#66bb6a88';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
+        ctx.setLineDash([]);
+
+        // Faint fill
+        ctx.fillStyle = '#66bb6a11';
+        ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
+      }
+    }
+
+    // Draw notes
+    for (const note of notes) {
+      if (note.type === 'break') {
+        // Draw break line
+        const x = beatToX(note.startBeat);
+        ctx.strokeStyle = '#c6282855';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        continue;
+      }
+
+      const x = beatToX(note.startBeat);
+      const y = pitchToY(note.pitch);
+      const width = note.duration * zoom;
+
+      // Note rectangle
+      const isSelected = selectedNote === note.id;
+      const hasChanged = note.original && (
+        note.startBeat !== note.original.startBeat ||
+        note.duration !== note.original.duration ||
+        note.pitch !== note.original.pitch
+      );
+
+      if (note.isRap) {
+        ctx.fillStyle = isSelected ? '#ff980088' : '#ff980044';
+        ctx.strokeStyle = '#ff9800';
+      } else if (hasChanged) {
+        ctx.fillStyle = isSelected ? '#fdd83588' : '#fdd83544';
+        ctx.strokeStyle = '#fdd835';
+      } else {
+        ctx.fillStyle = isSelected ? '#4fc3f788' : '#4fc3f744';
+        ctx.strokeStyle = '#4fc3f7';
+      }
+
+      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
+      ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
+
+      // Syllable text
+      if (zoom > 1 && width > 10) {
+        ctx.fillStyle = '#eee';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(note.syllable.trim(), x + 2, y + 3);
+      }
+    }
+
+    // Playback cursor
+    if (isPlaying) {
+      const cx = beatToX(playbackBeat);
+      ctx.strokeStyle = '#ff5252';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, 0);
+      ctx.lineTo(cx, h);
+      ctx.stroke();
+    }
+  }
+
+  // ──── Interaction ────────────────────────────
+  function handleMouseDown(event) {
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+
+    const beat = xToBeat(mx);
+    const pitch = yToPitch(my);
+
+    // Find clicked note
+    let found = null;
+    for (const note of notes) {
+      if (note.type === 'break') continue;
+      
+      const nx = beatToX(note.startBeat);
+      const ny = pitchToY(note.pitch);
+      const nw = note.duration * zoom;
+
+      if (mx >= nx && mx <= nx + nw && my >= ny - noteHeight / 2 && my <= ny + noteHeight / 2) {
+        found = note;
+
+        // Detect resize zones (edges)
+        if (mx - nx < 5) dragMode = 'resize-left';
+        else if (nx + nw - mx < 5) dragMode = 'resize-right';
+        else dragMode = 'move';
+
+        break;
+      }
+    }
+
+    if (found) {
+      selectedNote = found.id;
+      isDragging = true;
+      dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration };
+    } else {
+      selectedNote = null;
+    }
+
+    draw();
+  }
+
+  function handleMouseMove(event) {
+    if (!isDragging || selectedNote === null) return;
+
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+
+    const note = notes.find(n => n.id === selectedNote);
+    if (!note || note.type === 'break') return;
+
+    const dx = mx - dragStart.x;
+    const dy = my - dragStart.y;
+
+    if (dragMode === 'move') {
+      note.startBeat = Math.max(0, Math.round(dragStart.beat + dx / zoom));
+      note.pitch = Math.max(minPitch, Math.min(maxPitch, yToPitch(dragStart.y + dy)));
+    } else if (dragMode === 'resize-right') {
+      note.duration = Math.max(1, Math.round(dragStart.duration + dx / zoom));
+    } else if (dragMode === 'resize-left') {
+      const newStart = Math.max(0, Math.round(dragStart.beat + dx / zoom));
+      const diff = note.startBeat - newStart;
+      note.startBeat = newStart;
+      note.duration = Math.max(1, note.duration + diff);
+    }
+
+    editorState.update(s => ({ ...s, hasChanges: true }));
+    notes = [...notes]; // trigger reactivity
+    draw();
+  }
+
+  function handleMouseUp() {
+    isDragging = false;
+    dragMode = null;
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    
+    if (event.ctrlKey || event.metaKey) {
+      // Zoom
+      zoom = Math.max(0.5, Math.min(20, zoom + event.deltaY * -0.01));
+    } else {
+      // Scroll
+      scrollX = Math.max(0, scrollX + event.deltaX + event.deltaY);
+    }
+
+    draw();
+  }
+
+  // ──── Playback ───────────────────────────────
+  function togglePlayback() {
+    if (!audioEl) return;
+
+    if (isPlaying) {
+      audioEl.pause();
+      isPlaying = false;
+      cancelAnimationFrame(animFrame);
+    } else {
+      audioEl.play();
+      isPlaying = true;
+      updatePlayback();
+    }
+  }
+
+  function stopPlayback() {
+    if (audioEl) {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+    }
+    isPlaying = false;
+    playbackBeat = 0;
+    cancelAnimationFrame(animFrame);
+    draw();
+  }
+
+  function updatePlayback() {
+    if (!isPlaying) return;
+
+    const currentTime = audioEl.currentTime;
+    const gapSec = gapMs / 1000;
+    playbackBeat = Math.max(0, ((currentTime - gapSec) * bpm) / 60);
+
+    // Auto-scroll to follow playback
+    const cursorX = beatToX(playbackBeat);
+    const canvasWidth = canvasEl?.width || 800;
+    if (cursorX > canvasWidth * 0.7) {
+      scrollX = (playbackBeat * zoom) - canvasWidth * 0.3;
+    }
+
+    draw();
+    animFrame = requestAnimationFrame(updatePlayback);
+  }
+
+  // ──── Lifecycle ──────────────────────────────
+  async function loadData() {
+    if (!$generationResult) return;
+
+    try {
+      const data = await getEditorData($sessionId);
+      
+      notes = parseUltrastar(data.ultrastar_content);
+      bpm = data.bpm;
+      gapMs = data.gap_ms;
+      audioDuration = data.audio_duration;
+      vocalUrl = data.vocal_url;
+
+      // Load reference notes if available
+      if ($referenceData.uploaded) {
+        try {
+          const refData = await getReferenceNotes($sessionId);
+          referenceNotes = refData.notes || [];
+        } catch (e) {
+          referenceNotes = [];
+        }
+      }
+
+      updatePitchRange();
+      draw();
+    } catch (err) {
+      errorMessage.set(err.message);
+    }
+  }
+
+  onMount(() => {
+    if (canvasEl) {
+      ctx = canvasEl.getContext('2d');
+      canvasEl.width = canvasEl.parentElement.clientWidth;
+      canvasEl.height = viewHeight;
+      loadData();
+    }
+  });
+
+  onDestroy(() => {
+    cancelAnimationFrame(animFrame);
+  });
+
+  // Reload when we enter this step
+  $: if ($generationResult && canvasEl) {
+    loadData();
+  }
+</script>
+
+<div class="step-content">
+  <h2>Step 4: Piano Roll Editor</h2>
+
+  <div class="toolbar">
+    <div class="playback-controls">
+      <button class="tool-btn" on:click={togglePlayback}>
+        {isPlaying ? '⏸ Pause' : '▶ Play'}
+      </button>
+      <button class="tool-btn" on:click={stopPlayback}>⏹ Stop</button>
+    </div>
+
+    <div class="zoom-controls">
+      <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 0.5); draw(); }}>−</button>
+      <span class="zoom-label">Zoom: {zoom.toFixed(1)}x</span>
+      <button class="tool-btn" on:click={() => { zoom = Math.min(20, zoom + 0.5); draw(); }}>+</button>
+    </div>
+
+    {#if referenceNotes.length > 0}
+      <div class="ref-toggle">
+        <label>
+          <input type="checkbox" bind:checked={showReference} on:change={draw} />
+          📚 Reference
+        </label>
+      </div>
+    {/if}
+
+    <div class="info">
+      {#if selectedNote !== null}
+        {@const note = notes.find(n => n.id === selectedNote)}
+        {#if note && note.type !== 'break'}
+          <span class="note-info">
+            {note.syllable.trim()} | Beat {note.startBeat} | Dur {note.duration} | {noteName(note.pitch)}
+          </span>
+        {/if}
+      {/if}
+    </div>
+  </div>
+
+  <div class="canvas-container">
+    <canvas
+      bind:this={canvasEl}
+      on:mousedown={handleMouseDown}
+      on:mousemove={handleMouseMove}
+      on:mouseup={handleMouseUp}
+      on:mouseleave={handleMouseUp}
+      on:wheel={handleWheel}
+    ></canvas>
+  </div>
+
+  <div class="legend">
+    <span class="legend-item"><span class="dot blue"></span> Normal note</span>
+    <span class="legend-item"><span class="dot yellow"></span> Edited note</span>
+    <span class="legend-item"><span class="dot orange"></span> Rap note</span>
+    <span class="legend-item"><span class="dot red-line"></span> Break line</span>
+    {#if referenceNotes.length > 0}
+      <span class="legend-item"><span class="dot green-dash"></span> Reference note</span>
+    {/if}
+  </div>
+
+  <!-- Hidden audio element for playback -->
+  {#if vocalUrl}
+    <audio bind:this={audioEl} src={vocalUrl} preload="auto"></audio>
+  {/if}
+
+  <div class="help">
+    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Scroll to pan • Ctrl+Scroll to zoom</p>
+  </div>
+</div>
+
+<style>
+  .step-content {
+    max-width: 100%;
+    margin: 0 auto;
+  }
+
+  h2 { color: #4fc3f7; margin-bottom: 1rem; }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 8px 8px 0 0;
+    flex-wrap: wrap;
+  }
+
+  .playback-controls, .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .tool-btn {
+    padding: 0.4rem 0.8rem;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  .tool-btn:hover { background: #333; }
+
+  .zoom-label {
+    color: #888;
+    font-size: 0.8rem;
+    min-width: 60px;
+    text-align: center;
+  }
+
+  .info {
+    flex: 1;
+    text-align: right;
+  }
+
+  .note-info {
+    color: #4fc3f7;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+  }
+
+  .canvas-container {
+    border: 1px solid #333;
+    border-top: none;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+
+  canvas {
+    display: block;
+    width: 100%;
+  }
+
+  .legend {
+    display: flex;
+    gap: 1.5rem;
+    padding: 0.5rem;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    font-size: 0.8rem;
+    color: #888;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+
+  .dot.blue { background: #4fc3f7; }
+  .dot.yellow { background: #fdd835; }
+  .dot.orange { background: #ff9800; }
+  .dot.red-line { background: #c62828; width: 2px; height: 12px; }
+  .dot.green-dash { background: #66bb6a; width: 10px; height: 10px; border: 1px dashed #66bb6a; background: transparent; }
+
+  .ref-toggle {
+    font-size: 0.8rem;
+    color: #66bb6a;
+  }
+
+  .ref-toggle input[type="checkbox"] {
+    margin-right: 0.3rem;
+  }
+
+  .help {
+    margin-top: 0.75rem;
+    color: #666;
+    font-size: 0.8rem;
+    text-align: center;
+  }
+
+  .help strong { color: #888; }
+</style>
