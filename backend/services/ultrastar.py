@@ -57,8 +57,10 @@ def generate_ultrastar(
         confidence = timing.get("confidence", 0.5)
         
         # Convert time to beats relative to GAP
-        start_beat = max(0, int(((start_sec - gap_sec) * bpm) / 60))
-        end_beat = max(start_beat + 1, int(((end_sec - gap_sec) * bpm) / 60))
+        # Standard Ultrastar: beats are quarter-beats (16th note resolution)
+        # Formula: beat = (time - gap) * BPM * 4 / 60 = (time - gap) * BPM / 15
+        start_beat = max(0, int(((start_sec - gap_sec) * bpm) / 15))
+        end_beat = max(start_beat + 1, int(((end_sec - gap_sec) * bpm) / 15))
         duration_beats = max(1, end_beat - start_beat)
         
         # Ensure beats don't overlap with previous note

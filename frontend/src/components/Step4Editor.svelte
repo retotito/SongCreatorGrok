@@ -16,9 +16,13 @@
   let audioDuration = 0;
   let vocalUrl = '';
 
+  // Reference metadata (for coordinate conversion)
+  let refBpm = 0;
+  let refGapMs = 0;
+
   // View state
   let scrollX = 0;
-  let zoom = 2;           // pixels per beat
+  let zoom = 20;          // pixels per beat (default zoomed in)
   let viewHeight = 400;
   let noteHeight = 8;
 
@@ -103,17 +107,19 @@
     return (x + scrollX) / zoom;
   }
 
-  // Pitch to Y pixel
+  // Pitch to Y pixel (piano area only, excluding time axis at bottom)
   function pitchToY(pitch) {
     const range = maxPitch - minPitch;
+    const pianoH = viewHeight - 22; // exclude time axis
     const ratio = (maxPitch - pitch) / range;
-    return ratio * (viewHeight - 40) + 20;
+    return ratio * (pianoH - 40) + 20;
   }
 
   // Y pixel to pitch
   function yToPitch(y) {
     const range = maxPitch - minPitch;
-    const ratio = (y - 20) / (viewHeight - 40);
+    const pianoH = viewHeight - 22;
+    const ratio = (y - 20) / (pianoH - 40);
     return Math.round(maxPitch - ratio * range);
   }
 
@@ -122,6 +128,30 @@
     const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
     return `${names[midi % 12]}${Math.floor(midi / 12) - 1}`;
   }
+
+  // Beat to time (seconds) conversion
+  // Standard Ultrastar: beats are quarter-beats, so time = gap + beat * 15 / BPM
+  function beatToTime(beat) {
+    const gapSec = gapMs / 1000;
+    return gapSec + (beat * 15) / bpm;
+  }
+
+  // Time to beat conversion
+  function timeToBeat(timeSec) {
+    const gapSec = gapMs / 1000;
+    return ((timeSec - gapSec) * bpm) / 15;
+  }
+
+  // Format seconds as m:ss
+  function formatTime(seconds) {
+    if (seconds < 0) seconds = 0;
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  // Time axis height
+  const timeAxisHeight = 22;
 
   // ──── Drawing ────────────────────────────────
   function draw() {
@@ -134,10 +164,14 @@
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, w, h);
 
+    // Reserve bottom strip for time axis
+    const pianoH = h - timeAxisHeight;
+
     // Grid lines (pitch)
     const pitchRange = maxPitch - minPitch;
     for (let p = minPitch; p <= maxPitch; p++) {
       const y = pitchToY(p);
+      if (y > pianoH) continue; // don't draw into time axis
       const isC = p % 12 === 0;
       
       ctx.strokeStyle = isC ? '#333' : '#1a1a2e';
@@ -155,7 +189,7 @@
       }
     }
 
-    // Grid lines (beats)
+    // Grid lines (beats) + time axis labels
     const startBeat = Math.floor(xToBeat(0));
     const endBeat = Math.ceil(xToBeat(w));
     
@@ -167,9 +201,55 @@
       ctx.lineWidth = isMeasure ? 1 : 0.5;
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
+      ctx.lineTo(x, pianoH);
       ctx.stroke();
     }
+
+    // ── Time axis (bottom strip) ──
+    ctx.fillStyle = '#12121e';
+    ctx.fillRect(0, pianoH, w, timeAxisHeight);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, pianoH);
+    ctx.lineTo(w, pianoH);
+    ctx.stroke();
+
+    // Determine a nice time interval based on zoom
+    // At low zoom we want bigger intervals, at high zoom smaller ones
+    const pixelsPerSecond = (bpm / 15) * zoom;
+    let timeStep; // seconds between labels
+    if (pixelsPerSecond > 40) timeStep = 1;
+    else if (pixelsPerSecond > 15) timeStep = 5;
+    else if (pixelsPerSecond > 5) timeStep = 10;
+    else if (pixelsPerSecond > 2) timeStep = 30;
+    else timeStep = 60;
+
+    const startTimeSec = Math.max(0, beatToTime(xToBeat(0)));
+    const endTimeSec = beatToTime(xToBeat(w));
+    const firstTick = Math.ceil(startTimeSec / timeStep) * timeStep;
+
+    ctx.fillStyle = '#888';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+
+    for (let t = firstTick; t <= endTimeSec; t += timeStep) {
+      const beat = timeToBeat(t);
+      const x = beatToX(beat);
+
+      // Tick mark
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, pianoH);
+      ctx.lineTo(x, pianoH + 5);
+      ctx.stroke();
+
+      // Label
+      ctx.fillText(formatTime(t), x, pianoH + 16);
+    }
+
+    ctx.textAlign = 'left'; // Reset
 
     // Draw reference notes (ghost overlay)
     if (showReference && referenceNotes.length > 0) {
@@ -190,6 +270,13 @@
         // Faint fill
         ctx.fillStyle = '#66bb6a11';
         ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
+
+        // Syllable text for reference notes
+        if (zoom > 1 && width > 10 && note.syllable) {
+          ctx.fillStyle = '#66bb6a99';
+          ctx.font = '9px sans-serif';
+          ctx.fillText(note.syllable.trim(), x + 2, y - noteHeight / 2 - 2);
+        }
       }
     }
 
@@ -247,11 +334,12 @@
     // Playback cursor
     if (isPlaying) {
       const cx = beatToX(playbackBeat);
+      const pianoBottom = h - timeAxisHeight;
       ctx.strokeStyle = '#ff5252';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(cx, 0);
-      ctx.lineTo(cx, h);
+      ctx.lineTo(cx, pianoBottom);
       ctx.stroke();
     }
   }
@@ -337,7 +425,7 @@
     
     if (event.ctrlKey || event.metaKey) {
       // Zoom
-      zoom = Math.max(0.5, Math.min(20, zoom + event.deltaY * -0.01));
+      zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
     } else {
       // Scroll
       scrollX = Math.max(0, scrollX + event.deltaX + event.deltaY);
@@ -377,7 +465,7 @@
 
     const currentTime = audioEl.currentTime;
     const gapSec = gapMs / 1000;
-    playbackBeat = Math.max(0, ((currentTime - gapSec) * bpm) / 60);
+    playbackBeat = Math.max(0, ((currentTime - gapSec) * bpm) / 15);
 
     // Auto-scroll to follow playback
     const cursorX = beatToX(playbackBeat);
@@ -392,30 +480,61 @@
 
   // ──── Lifecycle ──────────────────────────────
   async function loadData() {
+    console.log('[Step4] loadData, session:', $sessionId, 'hasResult:', !!$generationResult);
     if (!$generationResult) return;
 
     try {
       const data = await getEditorData($sessionId);
+      console.log('[Step4] Editor data:', { bpm: data.bpm, gap: data.gap_ms, duration: data.audio_duration, contentLen: data.ultrastar_content?.length });
       
       notes = parseUltrastar(data.ultrastar_content);
+      console.log('[Step4] Parsed', notes.length, 'notes/breaks');
       bpm = data.bpm;
       gapMs = data.gap_ms;
       audioDuration = data.audio_duration;
       vocalUrl = data.vocal_url;
+      console.log('[Step4] Vocal URL for playback:', vocalUrl);
 
       // Load reference notes if available
       if ($referenceData.uploaded) {
         try {
           const refData = await getReferenceNotes($sessionId);
-          referenceNotes = refData.notes || [];
+          refBpm = refData.bpm || bpm;
+          refGapMs = refData.gap || 0;
+
+          // Convert reference beats from reference coordinate space to generated coordinate space
+          // Both use standard Ultrastar quarter-beat convention:
+          // refTime = refGapSec + (refBeat * 15 / refBpm)   → real time in seconds
+          // genBeat = (refTime - genGapSec) * genBpm / 15    → beat in generated space
+          const refGapSec = refGapMs / 1000;
+          const genGapSec = gapMs / 1000;
+
+          referenceNotes = (refData.notes || []).map(n => {
+            const realTimeSec = refGapSec + (n.start_beat * 15) / refBpm;
+            const endTimeSec = refGapSec + ((n.start_beat + n.duration) * 15) / refBpm;
+            const genStartBeat = Math.round(((realTimeSec - genGapSec) * bpm) / 15);
+            const genEndBeat = Math.round(((endTimeSec - genGapSec) * bpm) / 15);
+            return {
+              ...n,
+              start_beat: genStartBeat,
+              duration: Math.max(1, genEndBeat - genStartBeat),
+              original_start_beat: n.start_beat,
+              original_duration: n.duration,
+            };
+          });
+
+          console.log('[Step4] Loaded', referenceNotes.length, 'reference notes (converted from BPM', refBpm, 'GAP', refGapMs, 'to BPM', bpm, 'GAP', gapMs, ')');
         } catch (e) {
+          console.warn('[Step4] Failed to load reference notes:', e);
           referenceNotes = [];
         }
       }
 
       updatePitchRange();
+      console.log('[Step4] Pitch range:', minPitch, '-', maxPitch);
       draw();
     } catch (err) {
+      console.error('[Step4] loadData error:', err);
       errorMessage.set(err.message);
     }
   }
@@ -451,9 +570,9 @@
     </div>
 
     <div class="zoom-controls">
-      <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 0.5); draw(); }}>−</button>
+      <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 1); draw(); }}>−</button>
       <span class="zoom-label">Zoom: {zoom.toFixed(1)}x</span>
-      <button class="tool-btn" on:click={() => { zoom = Math.min(20, zoom + 0.5); draw(); }}>+</button>
+      <button class="tool-btn" on:click={() => { zoom = Math.min(100, zoom + 1); draw(); }}>+</button>
     </div>
 
     {#if referenceNotes.length > 0}
@@ -497,6 +616,27 @@
       <span class="legend-item"><span class="dot green-dash"></span> Reference note</span>
     {/if}
   </div>
+
+  <!-- Stats bar for debugging timing -->
+  {#if notes.length > 0}
+    {@const realNotes = notes.filter(n => n.type !== 'break')}
+    {@const firstBeat = realNotes.length > 0 ? realNotes[0].startBeat : 0}
+    {@const lastNote = realNotes.length > 0 ? realNotes[realNotes.length - 1] : null}
+    {@const lastBeat = lastNote ? lastNote.startBeat + lastNote.duration : 0}
+    {@const firstTimeSec = gapMs / 1000 + (firstBeat * 60) / bpm}
+    {@const lastTimeSec = gapMs / 1000 + (lastBeat * 60) / bpm}
+    <div class="stats-bar">
+      <span>Generated: BPM {bpm.toFixed(1)} | GAP {gapMs}ms | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}</span>
+      {#if referenceNotes.length > 0}
+        {@const refRealNotes = referenceNotes.filter(n => !n.type)}
+        {@const refFirst = refRealNotes.length > 0 ? refRealNotes[0] : null}
+        {@const refLast = refRealNotes.length > 0 ? refRealNotes[refRealNotes.length - 1] : null}
+        {@const refFirstTimeSec = refFirst ? (refGapMs / 1000 + (refFirst.original_start_beat * 60) / refBpm) : 0}
+        {@const refLastTimeSec = refLast ? (refGapMs / 1000 + ((refLast.original_start_beat + refLast.original_duration) * 60) / refBpm) : 0}
+        <span>Reference: BPM {refBpm.toFixed(1)} | GAP {refGapMs}ms | {formatTime(refFirstTimeSec)}–{formatTime(refLastTimeSec)}</span>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Hidden audio element for playback -->
   {#if vocalUrl}
@@ -623,4 +763,19 @@
   }
 
   .help strong { color: #888; }
+
+  .stats-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0.75rem;
+    background: #111122;
+    border: 1px solid #333;
+    border-top: none;
+    font-family: 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: #888;
+  }
+  .stats-bar span:first-child { color: #4fc3f7; }
+  .stats-bar span:nth-child(2) { color: #66bb6a; }
 </style>

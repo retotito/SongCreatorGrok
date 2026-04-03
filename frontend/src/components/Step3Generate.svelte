@@ -1,17 +1,19 @@
 <script>
-  import { sessionId, generationResult, referenceData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
+  import { sessionId, generationResult, referenceData, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationComparison, generationShowPreview } from '../stores/appStore.js';
   import { generateUltrastar, compareReference } from '../services/api.js';
 
-  let logMessages = [];
-  let showPreview = false;
-  let comparisonResult = null;
+  // Use store-backed variables so data survives navigation
+  $: logMessages = $generationLog;
+  $: showPreview = $generationShowPreview;
+  $: comparisonResult = $generationComparison;
 
   async function handleGenerate() {
+    console.log('[Step3] handleGenerate, session:', $sessionId);
     errorMessage.set('');
     isProcessing.set(true);
-    logMessages = [];
-    showPreview = false;
-    comparisonResult = null;
+    generationLog.set([]);
+    generationShowPreview.set(false);
+    generationComparison.set(null);
 
     addLog('Starting generation pipeline...');
 
@@ -22,6 +24,7 @@
       addLog('Step 4/4: Generating Ultrastar files...');
 
       const result = await generateUltrastar($sessionId);
+      console.log('[Step3] Generation result:', result);
 
       generationResult.set(result);
 
@@ -32,6 +35,7 @@
       addLog(`   Audio: ${result.audio_duration}s`);
 
       showPreview = true;
+      generationShowPreview.set(true);
       processingStatus.set('Generation complete!');
 
       // Auto-compare with reference if available
@@ -40,6 +44,7 @@
         try {
           const comp = await compareReference($sessionId);
           comparisonResult = comp.comparison;
+          generationComparison.set(comp.comparison);
           referenceData.update(d => ({ ...d, comparison: comp.comparison }));
           
           const s = comp.comparison.summary;
@@ -49,6 +54,16 @@
           addLog(`   Duration bias: ${s.avg_duration_diff > 0 ? '+' : ''}${s.avg_duration_diff} beats (${s.duration_bias})`);
           addLog(`   Timing bias: ${s.avg_start_diff > 0 ? '+' : ''}${s.avg_start_diff} beats (${s.timing_bias})`);
           addLog(`   GAP diff: ${comp.comparison.ai_gap - comp.comparison.ref_gap}ms`);
+          
+          // Lyrics comparison
+          if (comp.comparison.lyrics_comparison) {
+            const lc = comp.comparison.lyrics_comparison;
+            if (lc.exact_match) {
+              addLog(`📝 Lyrics: ✅ match reference exactly`);
+            } else {
+              addLog(`📝 Lyrics: ⚠️ ${Math.round(lc.similarity * 100)}% similar (${lc.matching_lines}/${lc.total_lines_ref} lines match, ${lc.differences.length} differences)`);
+            }
+          }
         } catch (err) {
           addLog(`⚠️ Reference comparison failed: ${err.message}`);
         }
@@ -62,7 +77,7 @@
   }
 
   function addLog(msg) {
-    logMessages = [...logMessages, { time: new Date().toLocaleTimeString(), text: msg }];
+    generationLog.update(logs => [...logs, { time: new Date().toLocaleTimeString(), text: msg }]);
   }
 </script>
 

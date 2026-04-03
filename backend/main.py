@@ -181,8 +181,26 @@ async def preview_audio(session_id: str, audio_type: str):
         raise HTTPException(status_code=400, detail="Invalid audio type")
     
     if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Audio file not found")
+        # Try to find the file with different extension (e.g. .wav vs .mp3)
+        if path:
+            base = os.path.splitext(path)[0]
+            for ext in ['.mp3', '.wav', '.flac', '.ogg']:
+                alt = base + ext
+                if os.path.exists(alt):
+                    path = alt
+                    # Update session so future requests use the correct path
+                    if audio_type == "vocals":
+                        session["vocal_audio"] = path
+                    elif audio_type == "original":
+                        session["original_audio"] = path
+                    log_step("PREVIEW", f"Found {audio_type} at alternate path: {path}")
+                    break
+            else:
+                raise HTTPException(status_code=404, detail=f"Audio file not found: {os.path.basename(path)}")
+        else:
+            raise HTTPException(status_code=404, detail="Audio file not found")
     
+    log_step("PREVIEW", f"Serving {audio_type} audio: {path}")
     return FileResponse(path)
 
 
@@ -392,11 +410,25 @@ async def generate_ultrastar_files(session_id: str):
             language=language,
         )
         
-        # Determine pitch/alignment methods
+        # Determine pitch/alignment methods (from actual results, not just availability)
         from services.pitch_detection import CREPE_AVAILABLE
         from services.alignment import MFA_AVAILABLE
         pitch_method = "CREPE" if CREPE_AVAILABLE else "PYIN (fallback)"
-        align_method = "MFA" if MFA_AVAILABLE else "Even distribution (fallback)"
+        
+        # Check what method was actually used by looking at syllable_timings
+        if syllable_timings:
+            methods_used = set(t.get("method", "unknown") for t in syllable_timings)
+            if "mfa" in methods_used:
+                mfa_count = sum(1 for t in syllable_timings if t.get("method") == "mfa")
+                align_method = f"MFA (chunked, {mfa_count}/{len(syllable_timings)} syllables)"
+            elif "fallback_energy" in methods_used:
+                align_method = "Energy-based fallback (MFA failed)"
+            elif "fallback_even" in methods_used:
+                align_method = "Even distribution fallback"
+            else:
+                align_method = f"Mixed ({', '.join(methods_used)})"
+        else:
+            align_method = "MFA" if MFA_AVAILABLE else "Even distribution (fallback)"
         
         # Generate summary
         summary_content = generate_processing_summary(
@@ -636,10 +668,16 @@ async def upload_reference(session_id: str, reference: UploadFile = File(...)):
     session["reference_filename"] = reference.filename
     
     # Parse to validate
-    from services.reference_comparison import parse_ultrastar_file
+    from services.reference_comparison import parse_ultrastar_file, compare_lyrics
     parsed = parse_ultrastar_file(content)
     
     log_step("REFERENCE", f"Session {session_id}: uploaded reference {reference.filename} ({len(parsed['notes'])} notes)")
+    
+    # Compare lyrics if user has already entered them
+    lyrics_comparison = None
+    user_lyrics = session.get("lyrics")
+    if user_lyrics:
+        lyrics_comparison = compare_lyrics(user_lyrics, content)
     
     return {
         "status": "ok",
@@ -648,6 +686,7 @@ async def upload_reference(session_id: str, reference: UploadFile = File(...)):
         "bpm": parsed["bpm"],
         "gap": parsed["gap"],
         "headers": parsed["headers"],
+        "lyrics_comparison": lyrics_comparison,
     }
 
 
@@ -666,9 +705,16 @@ async def compare_reference(session_id: str):
     if not ref_content:
         raise ServiceError("No reference file", "Upload a reference Ultrastar file first")
     
-    from services.reference_comparison import compare_with_reference, store_comparison
+    from services.reference_comparison import compare_with_reference, store_comparison, compare_lyrics
     
     comparison = compare_with_reference(ai_content, ref_content)
+    
+    # Also compare lyrics
+    user_lyrics = session.get("lyrics")
+    lyrics_comparison = None
+    if user_lyrics:
+        lyrics_comparison = compare_lyrics(user_lyrics, ref_content)
+        comparison["lyrics_comparison"] = lyrics_comparison
     
     # Store for learning
     metadata = {

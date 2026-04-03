@@ -30,6 +30,11 @@ export const lyricsData = writable({
 // Step 3: Generation result
 export const generationResult = writable(null);
 
+// Step 3: Generation log and comparison (preserved across navigation)
+export const generationLog = writable([]);
+export const generationComparison = writable(null);
+export const generationShowPreview = writable(false);
+
 // Step 4: Editor state
 export const editorState = writable({
   notes: [],
@@ -80,6 +85,9 @@ export function resetSession() {
   uploadData.set({ filename: null, hasVocals: false, vocalUrl: null });
   lyricsData.set({ text: '', artist: '', title: '', language: 'en', syllableCount: 0, lineCount: 0, preview: [] });
   generationResult.set(null);
+  generationLog.set([]);
+  generationComparison.set(null);
+  generationShowPreview.set(false);
   editorState.set({ notes: [], hasChanges: false });
   referenceData.set({ uploaded: false, filename: null, notesCount: 0, comparison: null });
   isProcessing.set(false);

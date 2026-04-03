@@ -1,6 +1,7 @@
 """Vocal separation using Demucs v4."""
 
 import os
+import sys
 import subprocess
 import tempfile
 import shutil
@@ -32,9 +33,9 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
     log_step("SEPARATE", f"Starting vocal separation: {os.path.basename(audio_path)}")
     
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Run Demucs
+        # Run Demucs using the same Python that's running the server
         cmd = [
-            "python", "-m", "demucs",
+            sys.executable, "-m", "demucs",
             "--two-stems", "vocals",  # Only separate vocals vs accompaniment
             "-o", temp_dir,
             "--mp3",  # Output as MP3 for smaller size
@@ -48,22 +49,30 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
             raise RuntimeError(f"Demucs failed: {result.stderr}")
         
         # Find the output vocal file
-        # Demucs outputs to: temp_dir/htdemucs/filename/vocals.mp3
+        # Demucs outputs: htdemucs/<song_name>/vocals.mp3 and no_vocals.mp3
         song_name = os.path.splitext(os.path.basename(audio_path))[0]
         
         vocal_path = None
+        all_files = []
         for root, dirs, files in os.walk(temp_dir):
-            for f in files:
-                if "vocals" in f.lower():
-                    vocal_path = os.path.join(root, f)
-                    break
+            for f in sorted(files):
+                full_path = os.path.join(root, f)
+                all_files.append(f)
+                log_step("SEPARATE", f"Found Demucs output: {f} ({os.path.getsize(full_path):,} bytes)")
+                # Match exactly 'vocals.mp3' or 'vocals.wav' — NOT 'no_vocals.mp3'
+                if f.lower().startswith("vocals."):
+                    vocal_path = full_path
+        
+        log_step("SEPARATE", f"All Demucs files: {all_files}")
+        log_step("SEPARATE", f"Selected vocal file: {vocal_path}")
         
         if vocal_path is None:
-            raise RuntimeError("Demucs did not produce a vocals file")
+            raise RuntimeError(f"Demucs did not produce a vocals file. Files found: {all_files}")
         
-        # Copy to output directory
-        output_path = os.path.join(output_dir, f"{song_name}_vocals.wav")
+        # Copy to output directory, preserving the actual extension
+        ext = os.path.splitext(vocal_path)[1] or ".wav"
+        output_path = os.path.join(output_dir, f"{song_name}_vocals{ext}")
         shutil.copy2(vocal_path, output_path)
         
-        log_step("SEPARATE", f"Vocals extracted: {output_path}")
+        log_step("SEPARATE", f"Vocals extracted: {output_path} (from {os.path.basename(vocal_path)})")
         return output_path

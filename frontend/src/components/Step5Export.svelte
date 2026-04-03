@@ -6,13 +6,16 @@
   let exported = false;
 
   async function handleExport() {
+    console.log('[Step5] handleExport, session:', $sessionId);
     isProcessing.set(true);
     errorMessage.set('');
 
     try {
       await exportFiles($sessionId);
+      console.log('[Step5] Export complete');
       exported = true;
     } catch (err) {
+      console.error('[Step5] Export error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
@@ -21,6 +24,7 @@
 
   function downloadFile(type) {
     const url = getDownloadUrl($sessionId, type);
+    console.log('[Step5] Download:', type, url);
     const a = document.createElement('a');
     a.href = url;
     a.download = '';

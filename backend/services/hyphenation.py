@@ -14,6 +14,88 @@ except ImportError:
     PYPHEN_AVAILABLE = False
     log_step("INIT", "pyphen not installed — auto-hyphenation disabled")
 
+# ── Custom override dictionary ──
+# pyphen misses many common English words, especially those starting with
+# short vowel prefixes (a-, e-, o-). This dictionary fixes known problems.
+# Format: lowercase word → hyphenated form
+CUSTOM_HYPHENATION = {
+    # a- prefix words
+    "away": "a-way",
+    "again": "a-gain",
+    "against": "a-gainst",
+    "alone": "a-lone",
+    "alive": "a-live",
+    "above": "a-bove",
+    "about": "a-bout",
+    "around": "a-round",
+    "among": "a-mong",
+    "across": "a-cross",
+    "ahead": "a-head",
+    "aside": "a-side",
+    "asleep": "a-sleep",
+    "awake": "a-wake",
+    "aware": "a-ware",
+    "arise": "a-rise",
+    "arose": "a-rose",
+    "amaze": "a-maze",
+    "amazed": "a-mazed",
+    "amazing": "a-maz-ing",
+    "apart": "a-part",
+    "appear": "ap-pear",
+    "afraid": "a-fraid",
+    "agree": "a-gree",
+    "allow": "al-low",
+    "along": "a-long",
+    # e- prefix words
+    "enough": "e-nough",
+    "eleven": "e-lev-en",
+    "escape": "es-cape",
+    "except": "ex-cept",
+    "elect": "e-lect",
+    "erase": "e-rase",
+    "event": "e-vent",
+    "evolve": "e-volve",
+    "exact": "ex-act",
+    "exist": "ex-ist",
+    # o- prefix words
+    "over": "o-ver",
+    "open": "o-pen",
+    "okay": "o-kay",
+    "obey": "o-bey",
+    # Common multi-syllable words pyphen gets wrong
+    "maybe": "may-be",
+    "nowhere": "no-where",
+    "somewhere": "some-where",
+    "stony": "sto-ny",
+    "bony": "bo-ny",
+    "lonely": "lone-ly",
+    "only": "on-ly",
+    "holy": "ho-ly",
+    "evening": "eve-ning",
+    "even": "e-ven",
+    "every": "ev-er-y",
+    "colour": "col-our",
+    "color": "col-or",
+    "favour": "fa-vour",
+    "favor": "fa-vor",
+    "honour": "hon-our",
+    "honor": "hon-or",
+    "paradise": "par-a-dise",
+    "hallelujah": "hal-le-lu-jah",
+    "anywhere": "an-y-where",
+    "everyone": "ev-er-y-one",
+    "everything": "ev-er-y-thing",
+    "everywhere": "ev-er-y-where",
+    "crazy": "cra-zy",
+    "lazy": "la-zy",
+    "hazy": "ha-zy",
+    "easy": "ea-sy",
+    # Words pyphen over-splits
+    "really": "real-ly",
+    "truly": "tru-ly",
+    "area": "ar-ea",
+}
+
 # Supported languages (pyphen locale codes)
 LANGUAGE_MAP = {
     "en": "en_US",
@@ -107,8 +189,17 @@ def hyphenate_lyrics(lyrics: str, language: str = "en") -> dict:
             # Preserve punctuation
             prefix, core, suffix = _split_punctuation(word)
             if core:
-                hyphenated = dic.inserted(core, hyphen="-")
-                # pyphen sometimes returns the word unchanged
+                # Check custom overrides first (case-insensitive)
+                core_lower = core.lower()
+                if core_lower in CUSTOM_HYPHENATION:
+                    custom = CUSTOM_HYPHENATION[core_lower]
+                    # Preserve original casing of first letter
+                    if core[0].isupper() and custom[0].islower():
+                        custom = custom[0].upper() + custom[1:]
+                    hyphenated = custom
+                else:
+                    hyphenated = dic.inserted(core, hyphen="-")
+                    # pyphen sometimes returns the word unchanged
                 hyphenated_words.append(f"{prefix}{hyphenated}{suffix}")
             else:
                 hyphenated_words.append(word)

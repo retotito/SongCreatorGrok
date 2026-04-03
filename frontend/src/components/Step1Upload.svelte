@@ -18,16 +18,19 @@
   }
 
   async function processUpload(file) {
+    console.log('[Step1] processUpload:', file.name, file.type, file.size, 'bytes');
     errorMessage.set('');
     isProcessing.set(true);
     processingStatus.set('Uploading audio...');
 
     try {
       const result = await uploadAudio(file);
+      console.log('[Step1] Upload result:', result);
       sessionId.set(result.session_id);
       uploadData.update(d => ({ ...d, filename: result.filename }));
       processingStatus.set('Upload complete! Choose an option below.');
     } catch (err) {
+      console.error('[Step1] Upload error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
@@ -35,19 +38,24 @@
   }
 
   async function handleExtractVocals() {
+    console.log('[Step1] handleExtractVocals, session:', $sessionId);
     errorMessage.set('');
     isProcessing.set(true);
     processingStatus.set('Extracting vocals with Demucs (this may take a few minutes)...');
 
     try {
       const result = await extractVocals($sessionId);
+      console.log('[Step1] Extract vocals result:', result);
+      const vocalUrl = getAudioUrl($sessionId, 'vocals');
+      console.log('[Step1] Vocal preview URL:', vocalUrl);
       uploadData.update(d => ({
         ...d,
         hasVocals: true,
-        vocalUrl: getAudioUrl($sessionId, 'vocals'),
+        vocalUrl,
       }));
       processingStatus.set('Vocals extracted! Preview below or continue.');
     } catch (err) {
+      console.error('[Step1] Extract vocals error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
@@ -57,6 +65,7 @@
   async function handleUploadVocals(event) {
     const file = event.target.files?.[0];
     if (!file) return;
+    console.log('[Step1] handleUploadVocals:', file.name);
 
     errorMessage.set('');
     isProcessing.set(true);
@@ -64,13 +73,16 @@
 
     try {
       await uploadCorrectedVocals($sessionId, file);
+      const vocalUrl = getAudioUrl($sessionId, 'vocals');
+      console.log('[Step1] Uploaded vocals, preview URL:', vocalUrl);
       uploadData.update(d => ({
         ...d,
         hasVocals: true,
-        vocalUrl: getAudioUrl($sessionId, 'vocals'),
+        vocalUrl,
       }));
       processingStatus.set('Vocals uploaded! Preview below or continue.');
     } catch (err) {
+      console.error('[Step1] Upload vocals error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
@@ -130,10 +142,12 @@
   async function handleReferenceUpload(event) {
     const file = event.target.files?.[0];
     if (!file || !$sessionId) return;
+    console.log('[Step1] handleReferenceUpload:', file.name);
 
     errorMessage.set('');
     try {
       const result = await uploadReference($sessionId, file);
+      console.log('[Step1] Reference upload result:', result);
       referenceData.set({
         uploaded: true,
         filename: result.filename,
@@ -141,9 +155,20 @@
         bpm: result.bpm,
         gap: result.gap,
         comparison: null,
+        lyricsComparison: result.lyrics_comparison || null,
       });
-      processingStatus.set(`Reference uploaded: ${result.filename} (${result.notes_count} notes)`);
+      if (result.lyrics_comparison) {
+        const lc = result.lyrics_comparison;
+        if (lc.exact_match) {
+          processingStatus.set(`Reference uploaded: ${result.filename} (${result.notes_count} notes) — ✅ Lyrics match!`);
+        } else {
+          processingStatus.set(`Reference uploaded: ${result.filename} (${result.notes_count} notes) — ⚠️ Lyrics ${Math.round(lc.similarity * 100)}% similar`);
+        }
+      } else {
+        processingStatus.set(`Reference uploaded: ${result.filename} (${result.notes_count} notes) — Enter lyrics first to compare`);
+      }
     } catch (err) {
+      console.error('[Step1] Reference upload error:', err);
       errorMessage.set(err.message);
     }
   }
@@ -232,6 +257,39 @@
           <div class="reference-info">
             ✅ {$referenceData.filename} ({$referenceData.notesCount} notes, BPM: {$referenceData.bpm})
           </div>
+          {#if $referenceData.lyricsComparison}
+            <div class="lyrics-comparison" class:match={$referenceData.lyricsComparison.exact_match} class:mismatch={!$referenceData.lyricsComparison.exact_match}>
+              {#if $referenceData.lyricsComparison.exact_match}
+                <span>✅ Lyrics match reference ({$referenceData.lyricsComparison.total_lines_ref} lines)</span>
+              {:else}
+                <span>⚠️ Lyrics differ from reference — {Math.round($referenceData.lyricsComparison.similarity * 100)}% similar ({$referenceData.lyricsComparison.matching_lines}/{$referenceData.lyricsComparison.total_lines_ref} lines match)</span>
+                {#if $referenceData.lyricsComparison.differences.length > 0}
+                  <details>
+                    <summary>Show differences ({$referenceData.lyricsComparison.differences.length})</summary>
+                    <div class="diff-list">
+                      {#each $referenceData.lyricsComparison.differences.slice(0, 10) as diff}
+                        <div class="diff-item">
+                          <span class="diff-line">Line {diff.line}:</span>
+                          {#if diff.user}
+                            <span class="diff-yours">Yours: "{diff.user}"</span>
+                          {:else}
+                            <span class="diff-yours">(missing in your lyrics)</span>
+                          {/if}
+                          {#if diff.reference}
+                            <span class="diff-ref">Ref: "{diff.reference}"</span>
+                          {:else}
+                            <span class="diff-ref">(extra line in your lyrics)</span>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </details>
+                {/if}
+              {/if}
+            </div>
+          {:else}
+            <div class="lyrics-comparison hint">Enter lyrics in Step 2, then re-upload reference to compare</div>
+          {/if}
         {:else}
           <label class="btn btn-reference small">
             📄 Upload Reference .txt
@@ -419,4 +477,50 @@
     color: #ef9a9a;
     text-align: center;
   }
+
+  .lyrics-comparison {
+    font-size: 0.8rem;
+    padding: 0.5rem;
+    border-radius: 6px;
+    margin-top: 0.5rem;
+  }
+  .lyrics-comparison.match {
+    background: #1a2e1a;
+    color: #66bb6a;
+    border: 1px solid #2e7d32;
+  }
+  .lyrics-comparison.mismatch {
+    background: #2e2a1a;
+    color: #ffb74d;
+    border: 1px solid #f57c00;
+  }
+  .lyrics-comparison.hint {
+    color: #666;
+    background: #1a1a2e;
+    border: 1px solid #333;
+  }
+
+  details summary {
+    cursor: pointer;
+    color: #aaa;
+    margin-top: 0.3rem;
+    font-size: 0.75rem;
+  }
+
+  .diff-list {
+    margin-top: 0.3rem;
+    font-family: 'Courier New', monospace;
+    font-size: 0.7rem;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .diff-item {
+    display: flex;
+    flex-direction: column;
+    padding: 0.2rem 0;
+    border-bottom: 1px solid #333;
+  }
+  .diff-line { color: #888; font-weight: bold; }
+  .diff-yours { color: #ef9a9a; }
+  .diff-ref { color: #81c784; }
 </style>

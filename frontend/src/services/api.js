@@ -20,6 +20,7 @@ async function request(method, path, body = null, isFormData = false) {
     }
   }
 
+  console.log(`[API] ${method} ${url}`);
   const response = await fetch(url, options);
   
   if (!response.ok) {
@@ -30,10 +31,13 @@ async function request(method, path, body = null, isFormData = false) {
     } catch {
       errorDetail = response.statusText;
     }
+    console.error(`[API] ❌ ${method} ${url} → ${response.status}: ${errorDetail}`);
     throw new Error(`API error ${response.status}: ${errorDetail}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  console.log(`[API] ✅ ${method} ${url} →`, data);
+  return data;
 }
 
 // ─── Health ────────────────────────────────────
@@ -59,7 +63,9 @@ export async function uploadCorrectedVocals(sessionId, file) {
 }
 
 export function getAudioUrl(sessionId, type) {
-  return `${BASE}/preview-audio/${sessionId}/${type}`;
+  const url = `${BASE}/preview-audio/${sessionId}/${type}`;
+  console.log(`[API] Audio URL: ${url}`);
+  return url;
 }
 
 // ─── Step 2: Lyrics ────────────────────────────

@@ -36,6 +36,7 @@
   }
 
   async function handleAutoHyphenate() {
+    console.log('[Step2] handleAutoHyphenate, language:', language, 'lyrics length:', lyricsText.length);
     if (!lyricsText.trim()) {
       errorMessage.set('Enter lyrics first');
       return;
@@ -47,10 +48,12 @@
 
     try {
       const result = await hyphenateLyrics(lyricsText, language);
+      console.log('[Step2] Hyphenation result:', result);
       hyphenationResult = result;
       lyricsText = result.hyphenated;
       processingStatus.set(`✅ Auto-hyphenated: ${result.total_syllables} syllables (${result.method})`);
     } catch (err) {
+      console.error('[Step2] Hyphenation error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
@@ -58,6 +61,8 @@
   }
 
   async function handleSubmit() {
+    console.log('[Step2] handleSubmit, session:', $sessionId, 'artist:', artist, 'title:', title, 'language:', language);
+    console.log('[Step2] Lyrics preview:', lyricsText.substring(0, 200));
     if (!lyricsText.trim()) {
       errorMessage.set('Please enter lyrics');
       return;
@@ -73,6 +78,7 @@
 
     try {
       const result = await submitLyrics($sessionId, lyricsText, artist, title, language);
+      console.log('[Step2] Submit lyrics result:', result);
       
       lyricsData.set({
         text: lyricsText,
@@ -86,6 +92,7 @@
 
       processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
     } catch (err) {
+      console.error('[Step2] Submit lyrics error:', err);
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);

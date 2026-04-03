@@ -94,6 +94,133 @@ def parse_ultrastar_file(content: str) -> dict:
 
 
 # ────────────────────────────────────────────────────────────
+# Extract lyrics from Ultrastar content
+# ────────────────────────────────────────────────────────────
+def extract_lyrics_from_ultrastar(content: str) -> str:
+    """Extract plain lyrics text from Ultrastar .txt content.
+    
+    Joins syllables into words and lines. Skips ~ (continuation) notes.
+    Returns cleaned lyrics as a multi-line string.
+    """
+    parsed = parse_ultrastar_file(content)
+    lines = []
+    current_line = []
+    prev_break = False
+    
+    for note in parsed["notes"]:
+        syl = note["syllable"]
+        
+        # Skip continuation/melisma notes
+        if syl.strip() == "~":
+            continue
+        
+        current_line.append(syl)
+    
+    # Now split by breaks in the original content
+    # Re-parse to find break positions, preserving leading spaces in syllables
+    all_elements = []
+    for line in content.strip().split("\n"):
+        line = line.strip()
+        if line.startswith(":") or line.startswith("F:"):
+            prefix = "F:" if line.startswith("F:") else ":"
+            rest = line[len(prefix):]
+            # Split only the first 3 tokens (start, duration, pitch) then keep rest as syllable
+            tokens = rest.strip().split(None, 3)
+            if len(tokens) >= 4:
+                # Find the syllable portion in the original string (preserves leading space)
+                # Find where the pitch token ends in the original rest string
+                syl = tokens[3]
+                # Check if original had a leading space before the syllable text
+                pitch_str = tokens[2]
+                pitch_end = rest.find(pitch_str, rest.find(tokens[1]) + len(tokens[1]))
+                if pitch_end >= 0:
+                    syl_start = pitch_end + len(pitch_str)
+                    syl = rest[syl_start:]  # preserves leading space
+                all_elements.append(("note", syl))
+            elif len(tokens) == 3:
+                all_elements.append(("note", ""))
+        elif line.startswith("-"):
+            all_elements.append(("break", None))
+        elif line.startswith("E"):
+            break
+    
+    lines = []
+    current_line = []
+    for elem_type, syl in all_elements:
+        if elem_type == "break":
+            if current_line:
+                lines.append(" ".join("".join(current_line).split()))
+                current_line = []
+        elif elem_type == "note":
+            if syl.strip() != "~":
+                current_line.append(syl)
+    
+    if current_line:
+        # Collapse multiple spaces when joining syllables
+        lines.append(" ".join("".join(current_line).split()))
+    
+    return "\n".join(lines)
+
+
+def compare_lyrics(user_lyrics: str, reference_content: str) -> dict:
+    """Compare user-entered lyrics against lyrics in a reference Ultrastar file.
+    
+    Returns:
+        dict with match info: exact_match, similarity, user_lines, ref_lines,
+        differences (list of line-level diffs)
+    """
+    from difflib import SequenceMatcher
+    
+    ref_lyrics = extract_lyrics_from_ultrastar(reference_content)
+    
+    # Normalize: lowercase, strip extra whitespace, remove hyphens (syllable markers)
+    def normalize(text):
+        text = text.replace("-", "").replace("\r", "")
+        lines = [" ".join(line.split()).strip().lower() for line in text.strip().split("\n") if line.strip()]
+        return lines
+    
+    user_lines = normalize(user_lyrics)
+    ref_lines = normalize(ref_lyrics)
+    
+    # Overall similarity
+    user_flat = " ".join(user_lines)
+    ref_flat = " ".join(ref_lines)
+    similarity = SequenceMatcher(None, user_flat, ref_flat).ratio()
+    
+    # Line-by-line comparison
+    max_lines = max(len(user_lines), len(ref_lines))
+    differences = []
+    matching_lines = 0
+    
+    for i in range(max_lines):
+        u = user_lines[i] if i < len(user_lines) else None
+        r = ref_lines[i] if i < len(ref_lines) else None
+        
+        if u == r:
+            matching_lines += 1
+        else:
+            line_sim = SequenceMatcher(None, u or "", r or "").ratio() if u and r else 0
+            differences.append({
+                "line": i + 1,
+                "user": u,
+                "reference": r,
+                "similarity": round(line_sim, 2),
+            })
+    
+    log_step("LYRICS", f"Lyrics comparison: {similarity:.1%} similar, {matching_lines}/{max_lines} lines match, {len(differences)} differences")
+    
+    return {
+        "exact_match": user_flat == ref_flat,
+        "similarity": round(similarity, 3),
+        "matching_lines": matching_lines,
+        "total_lines_user": len(user_lines),
+        "total_lines_ref": len(ref_lines),
+        "ref_lyrics": ref_lyrics,
+        "differences": differences[:20],  # Cap at 20 diffs
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # Compare AI output vs reference
 # ────────────────────────────────────────────────────────────
 def compare_with_reference(ai_content: str, reference_content: str) -> dict:
