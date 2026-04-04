@@ -1608,11 +1608,44 @@ def _anchor_to_whisper(results: List[dict], whisper_words: list) -> List[dict]:
         log_step("ALIGN", "Whisper anchoring: no matches found, skipping")
         return results
     
+    # ── Step 2b: Filter outlier anchors ──
+    # Anchors with drift wildly different from neighbors are false matches.
+    # Use a sliding window to detect and remove outliers.
+    import numpy as np
+    raw_anchor_count = len(anchors)
+    if len(anchors) >= 5:
+        drifts_arr = np.array([a["drift"] for a in anchors])
+        WINDOW = 5
+        filtered = []
+        for ai, a in enumerate(anchors):
+            # Get local neighbors' drifts
+            lo = max(0, ai - WINDOW)
+            hi = min(len(anchors), ai + WINDOW + 1)
+            neighbors = [anchors[j]["drift"] for j in range(lo, hi) if j != ai]
+            if not neighbors:
+                filtered.append(a)
+                continue
+            local_median = float(np.median(neighbors))
+            deviation = abs(a["drift"] - local_median)
+            # Keep if deviation is < 3s from local median
+            if deviation < 3.0:
+                filtered.append(a)
+            else:
+                log_step("ALIGN", f"  Filtered outlier anchor '{a['word']}' "
+                         f"drift={a['drift']:+.2f}s (local median={local_median:+.2f}s, "
+                         f"deviation={deviation:.2f}s)")
+        anchors = filtered
+        log_step("ALIGN", f"Anchors after outlier filter: {len(anchors)}/{raw_anchor_count}")
+    
+    if not anchors:
+        log_step("ALIGN", "Whisper anchoring: all anchors filtered as outliers, skipping")
+        return results
+    
     # ── Step 3: Log anchor comparison ──
     debug_path = os.path.join(os.path.dirname(__file__), '..', 'downloads', 'whisper_anchor_debug.txt')
     try:
         with open(debug_path, 'w') as f:
-            f.write(f"WHISPER ANCHOR COMPARISON ({len(anchors)} matched words)\n{'='*70}\n\n")
+            f.write(f"WHISPER ANCHOR COMPARISON ({len(anchors)}/{raw_anchor_count} anchors after filtering)\n{'='*70}\n\n")
             f.write(f"{'Word':<20} {'MFA':>8} {'Whisper':>8} {'Drift':>8} {'Action':>10}\n")
             f.write(f"{'-'*60}\n")
             for a in anchors:
@@ -1624,16 +1657,15 @@ def _anchor_to_whisper(results: List[dict], whisper_words: list) -> List[dict]:
     
     # Log summary
     drifts = [a["drift"] for a in anchors]
-    import numpy as np
     median_drift = float(np.median(drifts))
     max_drift = max(abs(d) for d in drifts)
-    log_step("ALIGN", f"Whisper anchoring: {len(anchors)} matches, "
+    log_step("ALIGN", f"Whisper anchoring: {len(anchors)} anchors, "
              f"median drift={median_drift:+.2f}s, max={max_drift:.2f}s")
     
     # ── Step 4: Apply drift correction ──
-    # Strategy: For each anchor, correct the syllables from the PREVIOUS anchor
-    # (or start) to this anchor, using interpolation between drift values.
-    # This ensures all syllables get corrected, not just those after anchors.
+    # Strategy: For each pair of consecutive anchors, apply uniform correction
+    # based on the FIRST anchor's drift (piecewise constant). This avoids
+    # interpolation artifacts when adjacent anchors have opposite drifts.
     
     fixed = [dict(r) for r in results]
     corrections = 0
@@ -1641,65 +1673,54 @@ def _anchor_to_whisper(results: List[dict], whisper_words: list) -> List[dict]:
     DRIFT_THRESHOLD = 0.2  # only correct if drift exceeds this
     MAX_CORRECTION = 5.0   # don't shift more than this (safety)
     
-    # Build correction map: for every syllable index, compute the correction
-    # by interpolating between nearest anchors
-    if len(anchors) >= 2:
-        for region_start_ai in range(-1, len(anchors)):
-            # Region: from this anchor to next anchor
-            if region_start_ai == -1:
-                # Before first anchor
-                region_start_idx = 0
-                drift_a = anchors[0]["drift"]
-            else:
-                region_start_idx = anchors[region_start_ai]["mfa_idx"]
-                drift_a = anchors[region_start_ai]["drift"]
-            
-            if region_start_ai + 1 < len(anchors):
-                region_end_idx = anchors[region_start_ai + 1]["mfa_idx"]
-                drift_b = anchors[region_start_ai + 1]["drift"]
-            else:
-                # After last anchor
-                region_end_idx = len(fixed)
-                drift_b = drift_a  # extend last anchor's drift
-            
-            block_len = region_end_idx - region_start_idx
-            if block_len <= 0:
+    if len(anchors) >= 1:
+        # Build regions: each anchor controls syllables until the next anchor
+        regions = []
+        
+        # Region before first anchor: use first anchor's drift
+        regions.append((0, anchors[0]["mfa_idx"], anchors[0]["drift"]))
+        
+        # Regions between anchors: use the starting anchor's drift
+        for ai in range(len(anchors)):
+            start_idx = anchors[ai]["mfa_idx"]
+            end_idx = anchors[ai + 1]["mfa_idx"] if ai + 1 < len(anchors) else len(fixed)
+            drift = anchors[ai]["drift"]
+            regions.append((start_idx, end_idx, drift))
+        
+        for region_start, region_end, drift in regions:
+            if abs(drift) < DRIFT_THRESHOLD:
                 continue
             
-            for j in range(region_start_idx, region_end_idx):
-                # Interpolate drift between endpoints
-                t = (j - region_start_idx) / max(1, block_len) 
-                local_drift = drift_a * (1 - t) + drift_b * t
-                
-                if abs(local_drift) < DRIFT_THRESHOLD:
-                    continue
-                
-                correction = -local_drift
-                if abs(correction) > MAX_CORRECTION:
-                    correction = MAX_CORRECTION if correction > 0 else -MAX_CORRECTION
-                
+            correction = -drift
+            if abs(correction) > MAX_CORRECTION:
+                correction = MAX_CORRECTION if correction > 0 else -MAX_CORRECTION
+            
+            for j in range(region_start, min(region_end, len(fixed))):
                 fixed[j]["start"] = round(fixed[j]["start"] + correction, 4)
                 fixed[j]["end"] = round(fixed[j]["end"] + correction, 4)
                 corrections += 1
-    elif len(anchors) == 1:
-        # Single anchor — apply uniform correction to all syllables
-        a = anchors[0]
-        if abs(a["drift"]) >= DRIFT_THRESHOLD:
-            correction = -a["drift"]
-            if abs(correction) > MAX_CORRECTION:
-                correction = MAX_CORRECTION if correction > 0 else -MAX_CORRECTION
-            for j in range(len(fixed)):
-                fixed[j]["start"] = round(fixed[j]["start"] + correction, 4)
-                fixed[j]["end"] = round(fixed[j]["end"] + correction, 4)
-            corrections = len(fixed)
     
-    # Ensure no negative times and maintain ordering
+    # ── Step 5: Enforce monotonic ordering ──
+    # After correction, some syllables may be out of order.
+    # Force each syllable to start no earlier than the previous one.
+    ordering_fixes = 0
     for i in range(len(fixed)):
         fixed[i]["start"] = max(0, fixed[i]["start"])
         fixed[i]["end"] = max(fixed[i]["start"] + 0.01, fixed[i]["end"])
     
+    for i in range(1, len(fixed)):
+        prev_end = fixed[i - 1]["end"]
+        if fixed[i]["start"] < prev_end - 0.01:
+            # This syllable starts before previous ends — fix it
+            dur = fixed[i]["end"] - fixed[i]["start"]
+            fixed[i]["start"] = round(prev_end, 4)
+            fixed[i]["end"] = round(fixed[i]["start"] + max(0.02, dur), 4)
+            ordering_fixes += 1
+    
     if corrections > 0:
         log_step("ALIGN", f"Whisper anchoring: corrected {corrections} syllables")
+    if ordering_fixes > 0:
+        log_step("ALIGN", f"Whisper anchoring: fixed {ordering_fixes} ordering violations")
     
     return fixed
 

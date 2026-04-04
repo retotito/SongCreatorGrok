@@ -548,8 +548,8 @@
       vocalUrl = data.vocal_url;
       console.log('[Step4] Vocal URL for playback:', vocalUrl);
 
-      // Load reference notes if available
-      if ($referenceData.uploaded) {
+      // Always try to load reference notes (don't gate on store state)
+      {
         try {
           const refData = await getReferenceNotes($sessionId);
           refBpm = refData.bpm || bpm;
