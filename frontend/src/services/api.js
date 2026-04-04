@@ -69,6 +69,12 @@ export function getAudioUrl(sessionId, type) {
 }
 
 // ─── Step 2: Lyrics ────────────────────────────
+export async function transcribeAudio(sessionId, language = 'en') {
+  const form = new FormData();
+  form.append('language', language);
+  return request('POST', `/transcribe/${sessionId}`, form, true);
+}
+
 export async function submitLyrics(sessionId, lyrics, artist, title, language) {
   const form = new FormData();
   form.append('lyrics', lyrics);

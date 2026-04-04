@@ -245,7 +245,110 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
-# Step 2: Lyrics Input
+# Step 2a: Whisper ASR Transcription
+# ────────────────────────────────────────────────────────────
+@app.post("/api/transcribe/{session_id}")
+async def transcribe_audio(session_id: str, language: str = Form("en")):
+    """Transcribe vocal audio using Whisper ASR.
+    
+    Returns the transcribed text with line breaks at phrase boundaries.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Find the vocal audio file
+    audio_path = session.get("vocal_audio") or session.get("original_audio")
+    if not audio_path or not os.path.exists(audio_path):
+        raise HTTPException(status_code=404, detail="No audio file found. Upload audio first.")
+    
+    log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
+    
+    try:
+        import whisper
+        
+        # Map short language codes to Whisper language names
+        WHISPER_LANG_MAP = {
+            "en": "English", "de": "German", "fr": "French",
+            "es": "Spanish", "it": "Italian", "pt": "Portuguese",
+            "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
+            "zh": "Chinese",
+        }
+        
+        # Load model (cached after first load)
+        model_name = "medium"
+        log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
+        model = whisper.load_model(model_name)
+        
+        # Transcribe with word-level timestamps
+        log_step("WHISPER", "Running transcription...")
+        result = model.transcribe(
+            audio_path,
+            language=language,
+            word_timestamps=True,
+        )
+        
+        # Build text with line breaks at segment boundaries
+        lines = []
+        all_words = []  # word-level timestamps for alignment anchoring
+        for segment in result.get("segments", []):
+            text = segment.get("text", "").strip()
+            if text:
+                lines.append(text)
+            # Extract word-level timestamps
+            for w in segment.get("words", []):
+                all_words.append({
+                    "word": w.get("word", "").strip(),
+                    "start": round(w.get("start", 0), 4),
+                    "end": round(w.get("end", 0), 4),
+                })
+        
+        transcribed_text = "\n".join(lines)
+        
+        # Save word timestamps to session for use during alignment
+        session["whisper_words"] = all_words
+        
+        # Also save to debug file
+        debug_dir = os.path.join(os.path.dirname(__file__), 'downloads')
+        try:
+            debug_path = os.path.join(debug_dir, 'whisper_words.txt')
+            with open(debug_path, 'w') as f:
+                f.write(f"WHISPER WORD TIMESTAMPS ({len(all_words)} words)\n{'='*60}\n\n")
+                for w in all_words:
+                    dur = w['end'] - w['start']
+                    f.write(f"  {w['start']:8.3f} - {w['end']:8.3f}  ({dur:5.3f}s)  {w['word']}\n")
+            log_step("WHISPER", f"Word timestamps saved: {len(all_words)} words -> {debug_path}")
+        except Exception:
+            pass
+        
+        # Count words
+        word_count = sum(len(line.split()) for line in lines)
+        
+        log_step("WHISPER", f"Transcription complete: {len(lines)} lines, {word_count} words")
+        if lines:
+            log_step("WHISPER", f"  First line: '{lines[0][:80]}'")
+            log_step("WHISPER", f"  Last line:  '{lines[-1][:80]}'")
+        
+        return JSONResponse({
+            "text": transcribed_text,
+            "lines": len(lines),
+            "words": word_count,
+            "language": language,
+            "language_name": WHISPER_LANG_MAP.get(language, language),
+            "model": model_name,
+        })
+        
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Whisper not installed. Run: pip install openai-whisper")
+    except Exception as e:
+        import traceback
+        log_step("WHISPER", f"Transcription failed: {e}")
+        log_step("WHISPER", traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+# ────────────────────────────────────────────────────────────
+# Step 2b: Lyrics Input
 # ────────────────────────────────────────────────────────────
 @app.post("/api/lyrics/{session_id}")
 async def submit_lyrics(
@@ -416,7 +519,12 @@ async def generate_ultrastar_files(session_id: str):
         log_step("GENERATE", "Step 3/4: Syllable alignment")
         from services.alignment import align_lyrics_to_audio
         
-        syllable_timings = align_lyrics_to_audio(vocal_path, lyrics, language)
+        # Pass Whisper word timestamps as alignment anchors
+        whisper_words = session.get("whisper_words", [])
+        if whisper_words:
+            log_step("GENERATE", f"Using {len(whisper_words)} Whisper word timestamps as alignment anchors")
+        
+        syllable_timings = align_lyrics_to_audio(vocal_path, lyrics, language, whisper_words=whisper_words)
         
         # Calculate GAP from first syllable
         gap_ms = 0

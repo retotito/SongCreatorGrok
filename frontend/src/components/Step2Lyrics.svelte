@@ -1,6 +1,6 @@
 <script>
-  import { sessionId, lyricsData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics } from '../services/api.js';
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
 
   // If coming from test session, lyrics may already be loaded
   let lyricsText = '';
@@ -8,6 +8,20 @@
   let title = '';
   let language = 'en';
   let hyphenationResult = null;
+  let isTranscribing = false;
+  let transcribeInfo = null;
+
+  // Audio player
+  let audioEl;
+  let audioSrc = '';
+  let isAudioPlaying = false;
+  let audioCurrentTime = 0;
+  let audioDuration = 0;
+
+  // Build audio URL when session is available
+  $: if ($sessionId) {
+    audioSrc = getAudioUrl($sessionId, $uploadData.hasVocals ? 'vocals' : 'original');
+  }
 
   // Sync from store if test session loaded
   $: if ($lyricsData.text) {
@@ -118,10 +132,108 @@
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
   }
+
+  // ── Audio player functions ──
+  function toggleAudio() {
+    if (!audioEl) return;
+    if (isAudioPlaying) {
+      audioEl.pause();
+    } else {
+      audioEl.play();
+    }
+    isAudioPlaying = !isAudioPlaying;
+  }
+
+  function onAudioTimeUpdate() {
+    if (audioEl) audioCurrentTime = audioEl.currentTime;
+  }
+
+  function onAudioLoaded() {
+    if (audioEl) audioDuration = audioEl.duration;
+  }
+
+  function onAudioEnded() {
+    isAudioPlaying = false;
+  }
+
+  function seekAudio(e) {
+    if (!audioEl || !audioDuration) return;
+    const bar = e.currentTarget;
+    const rect = bar.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    audioEl.currentTime = pct * audioDuration;
+    audioCurrentTime = audioEl.currentTime;
+  }
+
+  function formatTime(sec) {
+    if (!sec || isNaN(sec)) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  }
+
+  // ── Whisper transcription ──
+  async function handleTranscribe() {
+    if (!$sessionId) {
+      errorMessage.set('No session. Upload audio first.');
+      return;
+    }
+
+    errorMessage.set('');
+    isTranscribing = true;
+    processingStatus.set('🎙️ Transcribing with Whisper (this may take a minute)...');
+
+    try {
+      const result = await transcribeAudio($sessionId, language);
+      console.log('[Step2] Whisper result:', result);
+      lyricsText = result.text;
+      transcribeInfo = result;
+      processingStatus.set(`✅ Transcribed: ${result.lines} lines, ${result.words} words (${result.language_name}, model: ${result.model})`);
+    } catch (err) {
+      console.error('[Step2] Transcription error:', err);
+      errorMessage.set(err.message);
+    } finally {
+      isTranscribing = false;
+    }
+  }
 </script>
 
 <div class="step-content">
   <h2>Step 2: Lyrics</h2>
+
+  <!-- Audio Player -->
+  {#if audioSrc}
+    <div class="audio-player">
+      <audio
+        bind:this={audioEl}
+        src={audioSrc}
+        on:timeupdate={onAudioTimeUpdate}
+        on:loadedmetadata={onAudioLoaded}
+        on:ended={onAudioEnded}
+        preload="metadata"
+      ></audio>
+      <button class="btn btn-audio" on:click={toggleAudio} title={isAudioPlaying ? 'Pause' : 'Play'}>
+        {isAudioPlaying ? '⏸' : '▶'}
+      </button>
+      <div class="audio-bar" on:click={seekAudio} on:keydown={() => {}} role="slider" aria-valuenow={audioCurrentTime} aria-valuemin={0} aria-valuemax={audioDuration} tabindex="0">
+        <div class="audio-progress" style="width: {audioDuration ? (audioCurrentTime / audioDuration * 100) : 0}%"></div>
+      </div>
+      <span class="audio-time">{formatTime(audioCurrentTime)} / {formatTime(audioDuration)}</span>
+      <button
+        class="btn btn-transcribe"
+        on:click={handleTranscribe}
+        disabled={isTranscribing || $isProcessing}
+        title="Transcribe audio with Whisper AI"
+      >
+        {isTranscribing ? '⏳ Transcribing...' : '🎙️ Transcribe'}
+      </button>
+    </div>
+    {#if transcribeInfo}
+      <div class="transcribe-info">
+        Whisper ({transcribeInfo.model}): {transcribeInfo.words} words, {transcribeInfo.lines} lines — review and correct below
+      </div>
+    {/if}
+  {/if}
 
   <div class="form-row">
     <div class="form-group half">
@@ -263,6 +375,72 @@
   input:focus, select:focus, textarea:focus {
     outline: none;
     border-color: #4fc3f7;
+  }
+
+  .btn-transcribe { background: #6a1b9a; color: white; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  .btn-transcribe:hover:not(:disabled) { background: #8e24aa; }
+  .btn-transcribe:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .audio-player {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .btn-audio {
+    background: none;
+    border: 1px solid #4fc3f7;
+    color: #4fc3f7;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .btn-audio:hover { background: #1a2e4a; }
+
+  .audio-bar {
+    flex: 1;
+    height: 6px;
+    background: #333;
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+  }
+
+  .audio-progress {
+    height: 100%;
+    background: #4fc3f7;
+    border-radius: 3px;
+    transition: width 0.1s linear;
+  }
+
+  .audio-time {
+    color: #888;
+    font-size: 0.75rem;
+    min-width: 80px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .transcribe-info {
+    background: #1a0e2e;
+    border: 1px solid #6a1b9a;
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    color: #ce93d8;
+    font-size: 0.8rem;
+    margin-bottom: 1rem;
   }
 
   .action-row {

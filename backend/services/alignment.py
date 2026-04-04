@@ -39,7 +39,8 @@ else:
 def align_lyrics_to_audio(
     audio_path: str,
     lyrics_text: str,
-    language: str = "english"
+    language: str = "english",
+    whisper_words: list = None
 ) -> List[dict]:
     """Align lyrics to audio, returning timing for each syllable.
     
@@ -47,6 +48,7 @@ def align_lyrics_to_audio(
         audio_path: Path to vocal audio file
         lyrics_text: Full lyrics text with lines and hyphenated syllables
         language: Language for MFA model
+        whisper_words: Optional Whisper word timestamps for drift correction
         
     Returns:
         List of dicts: [{"syllable": "beau", "start": 1.23, "end": 1.56, "confidence": 0.95}, ...]
@@ -59,7 +61,8 @@ def align_lyrics_to_audio(
     
     if MFA_AVAILABLE:
         try:
-            results = align_with_mfa(audio_path, lyrics_text, flat_syllables, language)
+            results = align_with_mfa(audio_path, lyrics_text, flat_syllables, language,
+                                     whisper_words=whisper_words)
             log_step("ALIGN", f"MFA alignment succeeded: {len(results)} syllables")
             if results:
                 log_step("ALIGN", f"  First syllable: '{results[0]['syllable']}' at {results[0]['start']:.3f}s (method={results[0]['method']})")
@@ -287,123 +290,433 @@ def align_with_mfa(
     audio_path: str,
     lyrics_text: str,
     flat_syllables: list,
-    language: str
+    language: str,
+    whisper_words: list = None
 ) -> List[dict]:
     """Use MFA to align lyrics to audio via conda environment.
     
-    Strategy: Send full audio + all lyrics as a single file to MFA.
-    MFA handles silence/instrumental gaps naturally — it will align words
-    to the voiced regions and leave silence as empty intervals.
+    Strategy: Segment-based alignment.
+    1. Detect silence breaks in audio to find vocal segments
+    2. Distribute lyrics sections across audio segments
+    3. Run MFA on each segment independently (prevents drift accumulation)
+    4. Merge results with correct global time offsets
     """
     import librosa
     import soundfile as sf
 
-    # Map short language codes to MFA model names
     MFA_LANG_MAP = {
-        "en": "english",
-        "de": "german",
-        "fr": "french",
-        "es": "spanish",
-        "it": "italian",
-        "pt": "portuguese",
-        "nl": "dutch",
-        "ja": "japanese",
-        "ko": "korean",
+        "en": "english", "de": "german", "fr": "french",
+        "es": "spanish", "it": "italian", "pt": "portuguese",
+        "nl": "dutch", "ja": "japanese", "ko": "korean",
         "zh": "mandarin_china",
     }
     mfa_lang = MFA_LANG_MAP.get(language, language)
     
-    log_step("ALIGN", f"Running Montreal Forced Aligner (single-pass, lang={mfa_lang})...")
-    
-    # ── Load audio at 16kHz (MFA standard) ──
+    # ── Load audio at 16kHz ──
     y, sr = librosa.load(audio_path, sr=16000, mono=True)
     audio_duration = len(y) / sr
     log_step("ALIGN", f"Audio loaded: {audio_duration:.1f}s at 16kHz")
     
-    # ── Build clean transcript (all words, single string) ──
-    clean_words = _clean_lyrics_to_words(lyrics_text)
-    transcript = ' '.join(clean_words)
-    log_step("ALIGN", f"Transcript: {len(clean_words)} words")
+    # ── Detect vocal sections (silence breaks) ──
+    vocal_sections = _detect_vocal_sections(y, sr, min_silence_sec=1.5, min_section_sec=1.0)
     
-    # ── Run MFA ──
-    with tempfile.TemporaryDirectory() as temp_dir:
-        corpus_dir = os.path.join(temp_dir, "corpus")
-        output_dir = os.path.join(temp_dir, "output")
-        os.makedirs(corpus_dir)
-        os.makedirs(output_dir)
-        
-        # Write single audio + transcript pair
-        wav_path = os.path.join(corpus_dir, "song.wav")
-        sf.write(wav_path, y, sr)
-        
-        txt_path = os.path.join(corpus_dir, "song.txt")
-        with open(txt_path, 'w') as f:
-            f.write(transcript)
-        
-        # Also save transcript for debugging
-        debug_dir = os.path.join(os.path.dirname(__file__), '..', 'downloads')
-        try:
-            with open(os.path.join(debug_dir, 'mfa_transcript.txt'), 'w') as f:
-                f.write(transcript)
-        except:
-            pass
-        
-        cmd = [
-            CONDA_BIN, "run", "-n", MFA_ENV,
-            "mfa", "align",
-            corpus_dir,
-            f"{mfa_lang}_mfa",       # dictionary
-            f"{mfa_lang}_mfa",       # acoustic model
-            output_dir,
-            "--clean",
-            "--single_speaker",
-            "--beam", "100",         # wider beam for sung vocals
-            "--retry_beam", "400",
-        ]
-        
-        log_step("ALIGN", f"Running MFA align on {len(clean_words)} words, {audio_duration:.1f}s audio...")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        
-        if result.returncode != 0:
-            log_step("ALIGN", f"MFA failed (exit {result.returncode})")
-            if result.stderr:
-                log_step("ALIGN", f"MFA stderr (last 500): {result.stderr[-500:]}")
-            # Dump full stderr for debugging
-            try:
-                with open(os.path.join(debug_dir, 'mfa_error.txt'), 'w') as f:
-                    f.write(f"Exit code: {result.returncode}\n\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n")
-            except:
-                pass
-            raise RuntimeError(f"MFA alignment failed: {result.stderr[-200:]}")
-        
-        log_step("ALIGN", "MFA completed successfully")
-        if result.stderr:
-            # Log timing info from MFA
-            for line in result.stderr.split('\n'):
-                if 'Everything took' in line or 'Done' in line:
-                    log_step("ALIGN", f"  {line.strip()}")
-        
-        # ── Find and parse the TextGrid output ──
-        tg_path = None
-        for root, dirs, files in os.walk(output_dir):
-            for f in files:
-                if f.endswith('.TextGrid'):
-                    tg_path = os.path.join(root, f)
+    # ── Refine: split long segments (>15s) using shorter silence gaps ──
+    MAX_SEGMENT_SEC = 15.0
+    refined_sections = []
+    for (vs, ve) in vocal_sections:
+        if ve - vs > MAX_SEGMENT_SEC:
+            # Try progressively shorter silence thresholds to find sub-breaks
+            start_sample = int(vs * sr)
+            end_sample = int(ve * sr)
+            y_sub = y[start_sample:end_sample]
+            
+            split_found = False
+            for silence_thresh in [0.5, 0.3, 0.2]:
+                sub_sections = _detect_vocal_sections(y_sub, sr, min_silence_sec=silence_thresh, min_section_sec=2.0)
+                if len(sub_sections) > 1:
+                    for ss, se in sub_sections:
+                        refined_sections.append((round(ss + vs, 4), round(se + vs, 4)))
+                    log_step("ALIGN", f"  Split long section {vs:.1f}-{ve:.1f}s into {len(sub_sections)} sub-sections (silence={silence_thresh}s)")
+                    split_found = True
                     break
-        
-        if not tg_path:
-            raise RuntimeError("MFA produced no TextGrid output")
-        
-        all_word_intervals = _parse_textgrid_words(tg_path)
-        phones = _parse_textgrid_phones(tg_path)
-        log_step("ALIGN", f"MFA output: {len(all_word_intervals)} words, {len(phones)} phones")
-        
-        if all_word_intervals:
-            log_step("ALIGN", f"  First word: '{all_word_intervals[0]['text']}' at {all_word_intervals[0]['start']:.3f}s")
-            log_step("ALIGN", f"  Last word: '{all_word_intervals[-1]['text']}' at {all_word_intervals[-1]['end']:.3f}s")
+            
+            if not split_found:
+                # Force split at midpoint if still too long
+                mid = (vs + ve) / 2
+                refined_sections.append((vs, round(mid, 4)))
+                refined_sections.append((round(mid, 4), ve))
+                log_step("ALIGN", f"  Force-split long section {vs:.1f}-{ve:.1f}s at midpoint {mid:.1f}s")
+        else:
+            refined_sections.append((vs, ve))
+    vocal_sections = refined_sections
+    
+    log_step("ALIGN", f"Final: {len(vocal_sections)} vocal sections:")
+    for i, (vs, ve) in enumerate(vocal_sections):
+        log_step("ALIGN", f"  Section {i}: {vs:.1f}s - {ve:.1f}s ({ve-vs:.1f}s)")
+    
+    # ── Build flat word list from lyrics ──
+    all_clean_words = _clean_lyrics_to_words(lyrics_text)
+    log_step("ALIGN", f"Lyrics: {len(all_clean_words)} words total")
+    
+    # Save full transcript for debugging
+    debug_dir = os.path.join(os.path.dirname(__file__), '..', 'downloads')
+    transcript_full = ' '.join(all_clean_words)
+    try:
+        with open(os.path.join(debug_dir, 'mfa_transcript.txt'), 'w') as f:
+            f.write(transcript_full)
+    except:
+        pass
+    
+    # ── Assign words to audio segments ──
+    word_assignments = _assign_words_to_segments(all_clean_words, vocal_sections, whisper_words)
+    log_step("ALIGN", f"Assigned words to {len(word_assignments)} segments")
+    for i, (seg_words, ss, se) in enumerate(word_assignments):
+        log_step("ALIGN", f"  Seg {i}: {ss:.1f}-{se:.1f}s, {len(seg_words)} words: "
+                 f"'{' '.join(seg_words[:5])}...'")
+    
+    # ── Run MFA on each segment ──
+    all_word_intervals = []
+    all_phones = []
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for seg_idx, (seg_words, seg_start, seg_end) in enumerate(word_assignments):
+            if not seg_words:
+                log_step("ALIGN", f"  Segment {seg_idx}: no words, skipping")
+                continue
+            
+            seg_transcript = ' '.join(seg_words)
+            
+            # Cut audio for this segment (with small padding)
+            PAD = 0.3  # seconds padding before/after
+            cut_start = max(0, seg_start - PAD)
+            cut_end = min(audio_duration, seg_end + PAD)
+            start_sample = int(cut_start * sr)
+            end_sample = int(cut_end * sr)
+            y_segment = y[start_sample:end_sample]
+            
+            log_step("ALIGN", f"  Segment {seg_idx}: {cut_start:.1f}-{cut_end:.1f}s, "
+                     f"{len(seg_words)} words: '{seg_transcript[:50]}...'")
+            
+            # Create temp corpus for this segment
+            seg_corpus = os.path.join(temp_dir, f"corpus_{seg_idx}")
+            seg_output = os.path.join(temp_dir, f"output_{seg_idx}")
+            os.makedirs(seg_corpus, exist_ok=True)
+            os.makedirs(seg_output, exist_ok=True)
+            
+            wav_path = os.path.join(seg_corpus, f"seg{seg_idx}.wav")
+            sf.write(wav_path, y_segment, sr)
+            
+            txt_path = os.path.join(seg_corpus, f"seg{seg_idx}.txt")
+            with open(txt_path, 'w') as f:
+                f.write(seg_transcript)
+            
+            # Run MFA on this segment
+            cmd = [
+                CONDA_BIN, "run", "-n", MFA_ENV,
+                "mfa", "align",
+                seg_corpus,
+                f"{mfa_lang}_mfa",
+                f"{mfa_lang}_mfa",
+                seg_output,
+                "--clean",
+                "--single_speaker",
+                "--beam", "100",
+                "--retry_beam", "400",
+            ]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
+                if result.returncode != 0:
+                    log_step("ALIGN", f"  Segment {seg_idx} MFA failed (exit {result.returncode})")
+                    if result.stderr:
+                        log_step("ALIGN", f"    stderr: {result.stderr[-200:]}")
+                    # Try to dump error for debugging
+                    try:
+                        with open(os.path.join(debug_dir, f'mfa_error_seg{seg_idx}.txt'), 'w') as f:
+                            f.write(f"Segment {seg_idx}: {cut_start:.1f}-{cut_end:.1f}s\n")
+                            f.write(f"Words: {seg_transcript}\n\n")
+                            f.write(f"Exit: {result.returncode}\nStderr:\n{result.stderr}\n")
+                    except:
+                        pass
+                    continue
+                
+                # Parse TextGrid output
+                tg_path = None
+                for root, dirs, files in os.walk(seg_output):
+                    for f_name in files:
+                        if f_name.endswith('.TextGrid'):
+                            tg_path = os.path.join(root, f_name)
+                            break
+                
+                if not tg_path:
+                    log_step("ALIGN", f"  Segment {seg_idx}: no TextGrid output")
+                    continue
+                
+                # Save TextGrid for debugging
+                try:
+                    import shutil
+                    shutil.copy2(tg_path, os.path.join(debug_dir, f'mfa_seg{seg_idx}.TextGrid'))
+                except:
+                    pass
+                
+                # Parse and offset to global time
+                seg_words_iv = _parse_textgrid_words(tg_path)
+                seg_phones = _parse_textgrid_phones(tg_path)
+                
+                # Offset all timestamps by cut_start (to get global time)
+                for w in seg_words_iv:
+                    w["start"] = round(w["start"] + cut_start, 4)
+                    w["end"] = round(w["end"] + cut_start, 4)
+                for p in seg_phones:
+                    p["start"] = round(p["start"] + cut_start, 4)
+                    p["end"] = round(p["end"] + cut_start, 4)
+                
+                log_step("ALIGN", f"  Segment {seg_idx}: {len(seg_words_iv)} words, "
+                         f"{len(seg_phones)} phones aligned")
+                
+                all_word_intervals.extend(seg_words_iv)
+                all_phones.extend(seg_phones)
+                
+            except subprocess.TimeoutExpired:
+                log_step("ALIGN", f"  Segment {seg_idx}: MFA timed out")
+                continue
+    
+    log_step("ALIGN", f"Total MFA output: {len(all_word_intervals)} words, {len(all_phones)} phones")
+    
+    if not all_word_intervals:
+        raise RuntimeError("MFA produced no word intervals from any segment")
+    
+    # Save debug info
+    _dump_phone_debug(all_phones, word_intervals=all_word_intervals, time_range=(0, audio_duration))
+    
+    if all_word_intervals:
+        log_step("ALIGN", f"  First word: '{all_word_intervals[0]['text']}' at {all_word_intervals[0]['start']:.3f}s")
+        log_step("ALIGN", f"  Last word: '{all_word_intervals[-1]['text']}' at {all_word_intervals[-1]['end']:.3f}s")
     
     # ── Map word intervals to syllables ──
-    return _map_mfa_words_to_syllables(all_word_intervals, flat_syllables, lyrics_text, phones)
+    results = _map_mfa_words_to_syllables(all_word_intervals, flat_syllables, lyrics_text, all_phones)
+
+    # ── Post-process: anchor to Whisper for drift correction ──
+    if whisper_words:
+        results = _anchor_to_whisper(results, whisper_words)
+
+    return results
+
+
+def _assign_words_to_segments(all_words: list, vocal_sections: list,
+                              whisper_words: list = None) -> list:
+    """Assign lyrics words to audio vocal segments.
+    
+    Works at the WORD level rather than section level, avoiding the
+    mismatch between arbitrary lyrics chunking and audio silence breaks.
+    
+    Strategy:
+    - With Whisper timestamps: match each lyrics word to its Whisper
+      timestamp, then assign to the vocal segment containing that time.
+      This ensures words land in the correct audio segment.
+    - Without Whisper: distribute words proportionally by segment duration
+    
+    Returns list of (word_list, seg_start, seg_end) tuples.
+    """
+    total_words = len(all_words)
+    if total_words == 0 or not vocal_sections:
+        return []
+    
+    # If only one segment, give it all words
+    if len(vocal_sections) == 1:
+        return [(all_words, vocal_sections[0][0], vocal_sections[0][1])]
+    
+    if whisper_words and len(whisper_words) >= total_words * 0.3:
+        return _assign_words_whisper_direct(all_words, vocal_sections, whisper_words)
+    else:
+        return _assign_words_proportional(all_words, vocal_sections)
+
+
+def _assign_words_whisper_direct(all_words: list, vocal_sections: list,
+                                  whisper_words: list) -> list:
+    """Assign words to segments using Whisper timestamps directly.
+    
+    1. Sequentially match each lyrics word to a Whisper word
+    2. Use that Whisper word's timestamp to find the right vocal segment
+    3. Group consecutive words assigned to the same segment
+    """
+    # ── Step 1: Match lyrics words to Whisper words ──
+    # Both lists should be in order; do sequential fuzzy matching
+    word_timestamps = [None] * len(all_words)  # timestamps for each lyrics word
+    
+    wi = 0  # whisper index
+    for li, lw in enumerate(all_words):
+        lw_clean = lw.lower().strip(".,!?;:'-\"()")
+        if not lw_clean:
+            continue
+        
+        # Search for a match in a wide window around current whisper position
+        # Wide window handles Whisper inserting/skipping words vs lyrics
+        best_wi = None
+        best_score = -1
+        search_end = min(len(whisper_words), wi + 15)
+        
+        for try_wi in range(wi, search_end):
+            ww_clean = whisper_words[try_wi]["word"].lower().strip(".,!?;:'-\"()")
+            
+            # Exact match (best)
+            if ww_clean == lw_clean:
+                best_wi = try_wi
+                best_score = 3
+                break
+            
+            # Prefix match (3+ chars)
+            if len(lw_clean) >= 3 and len(ww_clean) >= 3:
+                if lw_clean[:3] == ww_clean[:3]:
+                    if best_score < 2:
+                        best_wi = try_wi
+                        best_score = 2
+            
+            # Short word match (1-2 chars)
+            if len(lw_clean) <= 2 and lw_clean == ww_clean:
+                if best_score < 2:
+                    best_wi = try_wi
+                    best_score = 2
+        
+        if best_wi is not None:
+            word_timestamps[li] = whisper_words[best_wi]["start"]
+            wi = best_wi + 1
+    
+    matched = sum(1 for t in word_timestamps if t is not None)
+    log_step("ALIGN", f"Whisper direct match: {matched}/{len(all_words)} words matched")
+    
+    # ── Step 2: Fill gaps by interpolation ──
+    # Words without a Whisper match get interpolated from neighbors
+    _interpolate_timestamps(word_timestamps, vocal_sections)
+    
+    # ── Step 3: Assign each word to a vocal segment ──
+    word_segment_idx = [0] * len(all_words)
+    for li in range(len(all_words)):
+        wt = word_timestamps[li]
+        if wt is None:
+            continue
+        
+        best_si = 0
+        best_dist = float('inf')
+        for si, (ss, se) in enumerate(vocal_sections):
+            if ss - 1.0 <= wt <= se + 0.5:
+                best_si = si
+                best_dist = 0
+                break
+            dist = min(abs(wt - ss), abs(wt - se))
+            if dist < best_dist:
+                best_dist = dist
+                best_si = si
+        word_segment_idx[li] = best_si
+    
+    # ── Step 4: Group into segment assignments ──
+    # Build: segment_index -> [word_indices]
+    segment_words = {}
+    for li in range(len(all_words)):
+        si = word_segment_idx[li]
+        if si not in segment_words:
+            segment_words[si] = []
+        segment_words[si].append(li)
+    
+    assignments = []
+    for si in sorted(segment_words.keys()):
+        indices = segment_words[si]
+        words = [all_words[i] for i in indices]
+        ss, se = vocal_sections[si]
+        assignments.append((words, ss, se))
+    
+    # Debug: write assignment details
+    debug_dir = os.path.join(os.path.dirname(__file__), '..', 'downloads')
+    try:
+        with open(os.path.join(debug_dir, 'segment_assignment_debug.txt'), 'w') as f:
+            f.write(f"SEGMENT ASSIGNMENT (Whisper-direct)\n{'='*70}\n")
+            f.write(f"Words: {len(all_words)}, Matched: {matched}\n\n")
+            for si, (words, ss, se) in enumerate(assignments):
+                f.write(f"Seg {si}: {ss:.1f}-{se:.1f}s ({se-ss:.1f}s), {len(words)} words\n")
+                for w in words:
+                    f.write(f"  {w}\n")
+                f.write("\n")
+    except:
+        pass
+    
+    return assignments
+
+
+def _interpolate_timestamps(word_timestamps: list, vocal_sections: list):
+    """Fill None gaps in word_timestamps by interpolating between known neighbors."""
+    n = len(word_timestamps)
+    if n == 0:
+        return
+    
+    # Forward fill: find runs of None and interpolate
+    i = 0
+    while i < n:
+        if word_timestamps[i] is not None:
+            i += 1
+            continue
+        
+        # Find the run of Nones
+        run_start = i
+        while i < n and word_timestamps[i] is None:
+            i += 1
+        run_end = i  # exclusive
+        
+        # Get bounds
+        prev_time = word_timestamps[run_start - 1] if run_start > 0 else vocal_sections[0][0]
+        next_time = word_timestamps[run_end] if run_end < n else (
+            word_timestamps[run_start - 1] + 0.3 * (run_end - run_start) if run_start > 0 
+            else vocal_sections[-1][1]
+        )
+        
+        # Interpolate
+        run_len = run_end - run_start
+        for j in range(run_len):
+            frac = (j + 1) / (run_len + 1)
+            word_timestamps[run_start + j] = prev_time + frac * (next_time - prev_time)
+
+
+def _assign_words_proportional(all_words: list, vocal_sections: list) -> list:
+    """Fallback: distribute words proportionally by segment duration."""
+    total_words = len(all_words)
+    total_duration = sum(e - s for s, e in vocal_sections)
+    
+    segment_word_counts = []
+    for ss, se in vocal_sections:
+        proportion = (se - ss) / total_duration
+        segment_word_counts.append(round(proportion * total_words))
+    
+    # Ensure total matches
+    assigned = sum(segment_word_counts)
+    if assigned != total_words:
+        for si in range(len(segment_word_counts) - 1, -1, -1):
+            if segment_word_counts[si] > 0:
+                segment_word_counts[si] += (total_words - assigned)
+                break
+    
+    for si in range(len(segment_word_counts)):
+        segment_word_counts[si] = max(0, segment_word_counts[si])
+    
+    log_step("ALIGN", "Word assignment (proportional by duration)")
+    
+    assignments = []
+    word_idx = 0
+    for si, (ss, se) in enumerate(vocal_sections):
+        n_words = segment_word_counts[si]
+        if n_words <= 0:
+            continue
+        n_words = min(n_words, total_words - word_idx)
+        if n_words <= 0:
+            continue
+        seg_words = all_words[word_idx:word_idx + n_words]
+        word_idx += n_words
+        assignments.append((seg_words, ss, se))
+    
+    if word_idx < total_words and assignments:
+        last_words, last_ss, last_se = assignments[-1]
+        assignments[-1] = (last_words + all_words[word_idx:], last_ss, last_se)
+    
+    return assignments
 
 
 def _parse_textgrid_words(textgrid_path: str) -> List[dict]:
@@ -470,6 +783,56 @@ def _parse_textgrid_phones(textgrid_path: str) -> List[dict]:
             })
     
     return intervals
+
+
+def _dump_phone_debug(phones: List[dict], word_intervals: List[dict] = None,
+                      time_range: tuple = None):
+    """Dump phone-level data to debug file for inspecting MFA's raw output.
+    
+    Shows ALL phones (including silence gaps) so we can see what MFA
+    actually recognises vs what it outputs at word level.
+    """
+    debug_path = os.path.join(os.path.dirname(__file__), '..', 'downloads', 'phone_debug.txt')
+    try:
+        t_lo, t_hi = time_range or (0, 9999)
+        with open(debug_path, 'w') as f:
+            f.write(f"PHONE-LEVEL DEBUG ({t_lo}s - {t_hi}s)\n{'='*80}\n\n")
+            
+            # Word intervals in range
+            if word_intervals:
+                f.write("WORD INTERVALS (raw from MFA):\n")
+                for i, w in enumerate(word_intervals):
+                    if w["end"] >= t_lo and w["start"] <= t_hi:
+                        dur = w["end"] - w["start"]
+                        # Show gap to next word
+                        gap_str = ""
+                        if i + 1 < len(word_intervals):
+                            gap = word_intervals[i+1]["start"] - w["end"]
+                            if gap > 0.01:
+                                gap_str = f"  >> GAP {gap:.3f}s to next word"
+                        f.write(f"  {w['start']:8.3f} - {w['end']:8.3f}  ({dur:5.3f}s)  {w['text']}{gap_str}\n")
+                f.write("\n")
+            
+            # All phones in range — show gaps as [SILENCE]
+            f.write("PHONES (with silence gaps shown):\n")
+            prev_end = None
+            for p in phones:
+                if p["end"] < t_lo:
+                    prev_end = p["end"]
+                    continue
+                if p["start"] > t_hi:
+                    break
+                # Show gap before this phone
+                if prev_end is not None:
+                    gap = p["start"] - prev_end
+                    if gap > 0.005:
+                        f.write(f"  {prev_end:8.3f} - {p['start']:8.3f}  ({gap:5.3f}s)  [SILENCE]\n")
+                f.write(f"  {p['start']:8.3f} - {p['end']:8.3f}  ({p['end']-p['start']:5.3f}s)  {p['text']}\n")
+                prev_end = p["end"]
+            
+        log_step("ALIGN", f"Phone debug written to {debug_path}")
+    except Exception as e:
+        log_step("ALIGN", f"Could not write phone debug: {e}")
 
 
 def _trim_word_intervals_with_phones(
@@ -779,6 +1142,9 @@ def _map_mfa_words_to_syllables(
     # ── Post-process: fix bloated syllables ──
     results = _fix_bloated_syllables(results)
     
+    # ── Post-process: fix boundary-crammed words ──
+    results = _fix_boundary_crammed_words(results)
+    
     return results
 
 
@@ -915,31 +1281,44 @@ def _fix_bloated_syllables(results: List[dict]) -> List[dict]:
         results[i]["end"] = round(new_end, 4)
         
         # Check if there's a large gap to the next syllable
-        # If so, shift subsequent syllables earlier to close the gap
+        # If so, shift subsequent syllables earlier — but ONLY to close
+        # the gap that was *created* by capping, not pre-existing gaps.
+        # A pre-existing gap > 1.0s indicates a real musical pause between
+        # phrases that MFA correctly identified; closing it destroys timing.
         if i + 1 < len(results):
-            gap_to_next = results[i + 1]["start"] - new_end
-            # Allow a small natural gap (0.3s for breath), shift the rest
+            gap_after_cap = results[i + 1]["start"] - new_end
+            gap_before_cap = results[i + 1]["start"] - old_end
+            
+            # Only shift if the original gap was small (not a real phrase break)
             max_gap = 0.3
-            if gap_to_next > max_gap:
-                shift = gap_to_next - max_gap
-                # Find how many subsequent syllables to shift:
-                # Shift until we hit a natural gap (> 1s) in the original data,
-                # which indicates a real phrase break
-                shift_end = i + 1
-                for j in range(i + 1, len(results)):
-                    shift_end = j + 1
-                    # Stop shifting at phrase/line boundaries
-                    if j + 1 < len(results):
-                        original_gap = results[j + 1]["start"] - results[j]["end"]
-                        if original_gap > 1.0:
-                            break
+            REAL_PAUSE_THRESHOLD = 1.0  # seconds — gap larger than this is a real pause
+            
+            if gap_after_cap > max_gap and gap_before_cap < REAL_PAUSE_THRESHOLD:
+                # Preserve at least the original gap (or max_gap, whichever is larger)
+                target_gap = max(max_gap, gap_before_cap)
+                shift = gap_after_cap - target_gap
                 
-                # Apply the shift
-                for j in range(i + 1, shift_end):
-                    results[j]["start"] = round(results[j]["start"] - shift, 4)
-                    results[j]["end"] = round(results[j]["end"] - shift, 4)
-                
-                log_step("ALIGN", f"  Shifted {shift_end - i - 1} syllables earlier by {shift:.2f}s after '{results[i]['syllable'].strip()}'")
+                if shift > 0:
+                    # Find how many subsequent syllables to shift:
+                    # Shift until we hit a natural gap (> 1s) in the original data,
+                    # which indicates a real phrase break
+                    shift_end = i + 1
+                    for j in range(i + 1, len(results)):
+                        shift_end = j + 1
+                        # Stop shifting at phrase/line boundaries
+                        if j + 1 < len(results):
+                            inter_gap = results[j + 1]["start"] - results[j]["end"]
+                            if inter_gap > 1.0:
+                                break
+                    
+                    # Apply the shift
+                    for j in range(i + 1, shift_end):
+                        results[j]["start"] = round(results[j]["start"] - shift, 4)
+                        results[j]["end"] = round(results[j]["end"] - shift, 4)
+                    
+                    log_step("ALIGN", f"  Shifted {shift_end - i - 1} syllables earlier by {shift:.2f}s after '{results[i]['syllable'].strip()}'")
+            elif gap_after_cap > max_gap:
+                log_step("ALIGN", f"  Preserved real pause ({gap_before_cap:.1f}s) after '{results[i]['syllable'].strip()}'")
         
         fixes_applied += 1
         log_step("ALIGN", f"  Trimmed '{results[i]['syllable'].strip()}' from {dur:.2f}s to {max_dur:.1f}s")
@@ -948,6 +1327,381 @@ def _fix_bloated_syllables(results: List[dict]) -> List[dict]:
         log_step("ALIGN", f"Fixed {fixes_applied} bloated syllables (threshold: {bloat_threshold:.2f}s, median: {median_dur:.3f}s)")
     
     return results
+
+
+def _fix_boundary_crammed_words(results: List[dict]) -> List[dict]:
+    """Fix words crammed at segment boundaries with tiny durations.
+    
+    When MFA can't match a word within a segment (e.g., Whisper heard a
+    different word), it squeezes the word into a tiny sliver at the segment
+    boundary. These show up as:
+    - Very short duration (< 0.15s)
+    - Followed by a large gap (> 1.5s) to the next word
+    
+    Fix: Move the crammed word to just before the next word, giving it a
+    reasonable duration based on its text length.
+    """
+    if not results or len(results) < 3:
+        return results
+    
+    CRAMMED_MAX_DUR = 0.15   # seconds — word is "crammed" if shorter
+    GAP_THRESHOLD = 1.5      # seconds — gap must be this large after crammed word
+    
+    fixes = 0
+    for i in range(len(results) - 1):
+        dur = results[i]["end"] - results[i]["start"]
+        gap = results[i + 1]["start"] - results[i]["end"]
+        
+        if dur >= CRAMMED_MAX_DUR or gap < GAP_THRESHOLD:
+            continue
+        
+        # This word has tiny duration followed by large gap → likely crammed
+        # Move it to just before the next word
+        text = results[i]["syllable"].strip()
+        estimated_dur = max(0.3, min(0.6, len(text) * 0.1))
+        
+        new_start = results[i + 1]["start"] - estimated_dur - 0.05
+        new_end = new_start + estimated_dur
+        
+        # Sanity: don't move before previous word's end
+        if i > 0 and new_start < results[i - 1]["end"]:
+            continue
+        
+        old_start = results[i]["start"]
+        results[i]["start"] = round(new_start, 4)
+        results[i]["end"] = round(new_end, 4)
+        fixes += 1
+        log_step("ALIGN", f"  Moved crammed '{text}' from {old_start:.2f}s to {new_start:.2f}s "
+                 f"(was {dur:.3f}s, gap was {gap:.1f}s)")
+    
+    if fixes:
+        log_step("ALIGN", f"Fixed {fixes} boundary-crammed word(s)")
+    
+    return results
+
+
+def _close_intra_line_gaps(results: List[dict], phones: List[dict] = None) -> List[dict]:
+    """Close false silence gaps between consecutive syllables.
+    
+    MFA systematically inserts silence gaps between words, even when the
+    singer sings them continuously. It also inflates vowels in held notes
+    (e.g., "sky" stretched to 4 seconds), and after bloated-syllable trimming
+    large artificial gaps remain. These accumulate and shift everything right.
+    
+    Strategy:
+    1. Small gaps (< SMALL_GAP): Always close — these are MFA padding artifacts
+    2. Medium gaps (< LARGE_GAP): Close unless they're between different lyric
+       sections (detected by large original gap > SECTION_BREAK in raw data)
+    3. Large gaps (>= LARGE_GAP): Keep — these indicate real musical breaks
+       (instrumental interludes, etc.)
+    
+    The key insight: after _fix_bloated_syllables has already capped inflated
+    words, any remaining gap that doesn't correspond to a genuine long silence
+    in the song should be closed. We detect genuine silence by checking the
+    raw (pre-processed) gap between this syllable's MFA end and the next
+    syllable's MFA start — if MFA originally placed them far apart AND
+    there's real silence in the audio, keep the gap.
+    """
+    if not results:
+        return results
+    
+    SMALL_GAP = 0.8     # always close gaps smaller than this
+    LARGE_GAP = 2.0     # never close gaps larger than this (real breaks)
+    REAL_SILENCE_MIN = 1.0  # min silence in phone data to consider gap "real"
+    
+    fixed = [dict(r) for r in results]  # shallow copy
+    
+    total_closed = 0.0
+    gap_count = 0
+    kept_count = 0
+    
+    for i in range(1, len(fixed)):
+        gap = fixed[i]["start"] - fixed[i - 1]["end"]
+        
+        if gap <= 0.01:  # no meaningful gap
+            continue
+        
+        if gap >= LARGE_GAP:
+            # Large gap — check phone data to see if it's real silence
+            real_silence = _has_real_silence(
+                phones, fixed[i - 1]["end"], fixed[i]["start"], REAL_SILENCE_MIN
+            ) if phones else True
+            if real_silence:
+                kept_count += 1
+                continue
+        
+        if gap < SMALL_GAP:
+            # Small gap — always an artifact, close it
+            pass  # fall through to closing
+        else:
+            # Medium gap — check phone data
+            real_silence = _has_real_silence(
+                phones, fixed[i - 1]["end"], fixed[i]["start"], REAL_SILENCE_MIN
+            ) if phones else False
+            if real_silence:
+                kept_count += 1
+                continue
+        
+        # Close this gap
+        duration = fixed[i]["end"] - fixed[i]["start"]
+        fixed[i]["start"] = round(fixed[i - 1]["end"], 4)
+        fixed[i]["end"] = round(fixed[i]["start"] + duration, 4)
+        total_closed += gap
+        gap_count += 1
+    
+    if gap_count > 0 or kept_count > 0:
+        log_step("ALIGN", f"Gap analysis: closed {gap_count} false gaps "
+                 f"({total_closed:.2f}s drift removed), "
+                 f"kept {kept_count} real silence gaps")
+    
+    return fixed
+
+
+def _has_real_silence(phones: List[dict], gap_start: float, gap_end: float,
+                      threshold: float) -> bool:
+    """Check if a time region contains real silence based on phone data.
+    
+    Looks at the phone tier to see if there are continuous phones spanning
+    the gap region (= no real silence, just MFA padding) or if there's a
+    genuine gap with no phones (= real silence).
+    
+    Returns True if the gap contains silence >= threshold seconds.
+    """
+    if not phones:
+        return True  # no phone data — assume gap is real (conservative)
+    
+    # Find the maximum continuous silence within [gap_start, gap_end]
+    # by looking at gaps between consecutive phones in that region
+    
+    # Get all phones that overlap or are within the gap region
+    # (with a small buffer to catch edge phones)
+    buffer = 0.05
+    relevant = []
+    for p in phones:
+        if p["end"] < gap_start - buffer:
+            continue
+        if p["start"] > gap_end + buffer:
+            break
+        relevant.append(p)
+    
+    if not relevant:
+        # No phones at all in this region — it's real silence
+        return (gap_end - gap_start) >= threshold
+    
+    # Check the coverage: find the longest gap between phones in this region
+    # First, check silence from gap_start to first phone
+    max_silence = max(0, relevant[0]["start"] - gap_start)
+    
+    # Check gaps between consecutive phones
+    for j in range(1, len(relevant)):
+        silence = relevant[j]["start"] - relevant[j - 1]["end"]
+        if silence > max_silence:
+            max_silence = silence
+    
+    # Check silence from last phone to gap_end
+    trailing = gap_end - relevant[-1]["end"]
+    if trailing > max_silence:
+        max_silence = trailing
+    
+    return max_silence >= threshold
+
+
+def _anchor_to_whisper(results: List[dict], whisper_words: list) -> List[dict]:
+    """Correct MFA timing drift using Whisper word timestamps as anchors.
+    
+    MFA is a forced aligner — precise at phone level but prone to systematic
+    drift when singing includes held notes, vibrato, or continuous phrasing.
+    Whisper is an ASR model — it independently detects word onsets from audio,
+    which are less precise but free of cumulative drift.
+    
+    Strategy:
+    1. Build a list of "word start" events from the MFA results (first syllable
+       of each word, identified by leading space in syllable text).
+    2. Match them to Whisper words using fuzzy text matching.
+    3. For each matched pair, compute the drift = MFA_start - Whisper_start.
+    4. Apply drift correction: shift groups of syllables so their word starts
+       align with Whisper's timing. Interpolate between anchor points to
+       avoid discontinuities.
+    """
+    if not whisper_words or not results:
+        return results
+    
+    # ── Step 1: Extract word-start positions from MFA results ──
+    mfa_words = []  # [{idx, word, start, end}]
+    current_word = ""
+    word_start_idx = 0
+    prev_line_idx = -1
+    
+    for i, r in enumerate(results):
+        syl = r["syllable"]
+        line_idx = r.get("line_index", 0)
+        # Detect word start: leading space, first syllable, OR first word of new line
+        is_word_start = (syl.startswith(" ") or i == 0 or line_idx != prev_line_idx)
+        prev_line_idx = line_idx
+        
+        if is_word_start:
+            # Start of a new word
+            if current_word and mfa_words:
+                pass  # previous word already recorded
+            clean = syl.strip().lower().rstrip(",.'!?;:")
+            if not clean:
+                continue
+            # Find the full word by collecting subsequent syllables
+            full_word = clean
+            for j in range(i + 1, len(results)):
+                next_syl = results[j]["syllable"]
+                next_line = results[j].get("line_index", 0)
+                if next_syl.startswith(" ") or next_line != line_idx:
+                    break
+                full_word += next_syl.strip().lower().rstrip(",.'!?;:")
+            mfa_words.append({
+                "idx": i,
+                "word": full_word,
+                "start": r["start"],
+            })
+    
+    log_step("ALIGN", f"Whisper anchoring: {len(mfa_words)} MFA words, {len(whisper_words)} Whisper words")
+    
+    # ── Step 2: Match MFA words to Whisper words ──
+    # Sequential matching with fuzzy text comparison
+    anchors = []  # [{mfa_idx, mfa_start, whisper_start, word, drift}]
+    w_idx = 0  # pointer into whisper_words
+    
+    for mw in mfa_words:
+        mfa_word = mw["word"]
+        best_match = None
+        best_dist = 999
+        
+        # Search ahead in Whisper words (within a window)
+        search_start = max(0, w_idx - 3)
+        search_end = min(len(whisper_words), w_idx + 15)
+        
+        for wi in range(search_start, search_end):
+            ww = whisper_words[wi]["word"].lower().strip().rstrip(",.'!?;:\"-")
+            
+            # Exact match
+            if ww == mfa_word:
+                best_match = wi
+                best_dist = 0
+                break
+            
+            # Prefix match (handles truncation)
+            if len(mfa_word) >= 3 and (ww.startswith(mfa_word[:3]) or mfa_word.startswith(ww[:3])):
+                dist = abs(len(ww) - len(mfa_word))
+                if dist < best_dist:
+                    best_match = wi
+                    best_dist = dist
+        
+        if best_match is not None and best_dist <= 3:
+            ww = whisper_words[best_match]
+            drift = mw["start"] - ww["start"]
+            anchors.append({
+                "mfa_idx": mw["idx"],
+                "mfa_start": mw["start"],
+                "whisper_start": ww["start"],
+                "word": mw["word"],
+                "drift": drift,
+            })
+            w_idx = best_match + 1
+    
+    if not anchors:
+        log_step("ALIGN", "Whisper anchoring: no matches found, skipping")
+        return results
+    
+    # ── Step 3: Log anchor comparison ──
+    debug_path = os.path.join(os.path.dirname(__file__), '..', 'downloads', 'whisper_anchor_debug.txt')
+    try:
+        with open(debug_path, 'w') as f:
+            f.write(f"WHISPER ANCHOR COMPARISON ({len(anchors)} matched words)\n{'='*70}\n\n")
+            f.write(f"{'Word':<20} {'MFA':>8} {'Whisper':>8} {'Drift':>8} {'Action':>10}\n")
+            f.write(f"{'-'*60}\n")
+            for a in anchors:
+                action = "OK" if abs(a["drift"]) < 0.5 else ("SHIFT" if abs(a["drift"]) < 3.0 else "BIG DRIFT")
+                f.write(f"{a['word']:<20} {a['mfa_start']:8.2f} {a['whisper_start']:8.2f} {a['drift']:+8.2f}s  {action:>10}\n")
+        log_step("ALIGN", f"Anchor debug written to {debug_path}")
+    except Exception:
+        pass
+    
+    # Log summary
+    drifts = [a["drift"] for a in anchors]
+    import numpy as np
+    median_drift = float(np.median(drifts))
+    max_drift = max(abs(d) for d in drifts)
+    log_step("ALIGN", f"Whisper anchoring: {len(anchors)} matches, "
+             f"median drift={median_drift:+.2f}s, max={max_drift:.2f}s")
+    
+    # ── Step 4: Apply drift correction ──
+    # Strategy: For each anchor, correct the syllables from the PREVIOUS anchor
+    # (or start) to this anchor, using interpolation between drift values.
+    # This ensures all syllables get corrected, not just those after anchors.
+    
+    fixed = [dict(r) for r in results]
+    corrections = 0
+    
+    DRIFT_THRESHOLD = 0.2  # only correct if drift exceeds this
+    MAX_CORRECTION = 5.0   # don't shift more than this (safety)
+    
+    # Build correction map: for every syllable index, compute the correction
+    # by interpolating between nearest anchors
+    if len(anchors) >= 2:
+        for region_start_ai in range(-1, len(anchors)):
+            # Region: from this anchor to next anchor
+            if region_start_ai == -1:
+                # Before first anchor
+                region_start_idx = 0
+                drift_a = anchors[0]["drift"]
+            else:
+                region_start_idx = anchors[region_start_ai]["mfa_idx"]
+                drift_a = anchors[region_start_ai]["drift"]
+            
+            if region_start_ai + 1 < len(anchors):
+                region_end_idx = anchors[region_start_ai + 1]["mfa_idx"]
+                drift_b = anchors[region_start_ai + 1]["drift"]
+            else:
+                # After last anchor
+                region_end_idx = len(fixed)
+                drift_b = drift_a  # extend last anchor's drift
+            
+            block_len = region_end_idx - region_start_idx
+            if block_len <= 0:
+                continue
+            
+            for j in range(region_start_idx, region_end_idx):
+                # Interpolate drift between endpoints
+                t = (j - region_start_idx) / max(1, block_len) 
+                local_drift = drift_a * (1 - t) + drift_b * t
+                
+                if abs(local_drift) < DRIFT_THRESHOLD:
+                    continue
+                
+                correction = -local_drift
+                if abs(correction) > MAX_CORRECTION:
+                    correction = MAX_CORRECTION if correction > 0 else -MAX_CORRECTION
+                
+                fixed[j]["start"] = round(fixed[j]["start"] + correction, 4)
+                fixed[j]["end"] = round(fixed[j]["end"] + correction, 4)
+                corrections += 1
+    elif len(anchors) == 1:
+        # Single anchor — apply uniform correction to all syllables
+        a = anchors[0]
+        if abs(a["drift"]) >= DRIFT_THRESHOLD:
+            correction = -a["drift"]
+            if abs(correction) > MAX_CORRECTION:
+                correction = MAX_CORRECTION if correction > 0 else -MAX_CORRECTION
+            for j in range(len(fixed)):
+                fixed[j]["start"] = round(fixed[j]["start"] + correction, 4)
+                fixed[j]["end"] = round(fixed[j]["end"] + correction, 4)
+            corrections = len(fixed)
+    
+    # Ensure no negative times and maintain ordering
+    for i in range(len(fixed)):
+        fixed[i]["start"] = max(0, fixed[i]["start"])
+        fixed[i]["end"] = max(fixed[i]["start"] + 0.01, fixed[i]["end"])
+    
+    if corrections > 0:
+        log_step("ALIGN", f"Whisper anchoring: corrected {corrections} syllables")
+    
+    return fixed
 
 
 def align_fallback(audio_path: str, parsed_lines: List[List[dict]]) -> List[dict]:
