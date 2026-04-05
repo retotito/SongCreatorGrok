@@ -35,6 +35,7 @@
 - [ ] **MIDI/pitch tone playback toggle**: On/off switch to play a synthesized tone following the pitch during playback.
 - [ ] **MIDI/pitch tone volume**: Volume slider for the synthesized pitch tone.
 - [ ] **Play selected note tone**: Add a button in the note info panel (top right) to play the pitch of the currently selected note.
+- [ ] **Vibrato indicator in piano roll**: Show a visual indicator (e.g. wavy line or icon) on notes where vibrato is detected, so the user can double-check the pitch is correct. Nice-to-have — can also be done manually.
 
 ## Execution Guidelines
 PROGRESS TRACKING:

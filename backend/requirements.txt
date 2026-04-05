@@ -7,6 +7,7 @@ python-multipart==0.0.9
 librosa==0.10.2
 soundfile==0.12.1
 numpy>=1.24.0
+essentia>=2.1b6
 
 # Pitch detection
 # crepe==0.0.16  # Broken on Python 3.12, using PYIN instead

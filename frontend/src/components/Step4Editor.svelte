@@ -60,6 +60,7 @@
 
   // Waveform
   let waveformPeaks = [];   // pre-computed peaks array
+  let waveformDuration = 0; // actual decoded audio duration (seconds)
   let showWaveform = true;
   const waveformHeight = 60; // px reserved at top of canvas for waveform
 
@@ -186,12 +187,18 @@
     return ((timeSec - gapSec) * bpm) / 15;
   }
 
-  // Format seconds as m:ss
+  // Minimum beat (corresponds to audio time 0) — negative when GAP > 0
+  function getMinBeat() {
+    return timeToBeat(0);
+  }
+
+  // Format seconds as m:ss.mmm
   function formatTime(seconds) {
     if (seconds < 0) seconds = 0;
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${m}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
   }
 
   // Time axis height
@@ -290,7 +297,7 @@
     // Recalculate playback cursor position with new BPM/GAP
     if (currentTimeSec > 0) {
       const gapSec = gapMs / 1000;
-      playbackBeat = Math.max(0, ((currentTimeSec - gapSec) * bpm) / 15);
+      playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs();
   }
@@ -333,22 +340,20 @@
     ctx.fillRect(0, 0, w, h);
 
     // ── Draw waveform at top ──
-    // Waveform uses INITIAL BPM/GAP so it stays anchored to the actual audio.
-    // Notes use CURRENT BPM/GAP. This lets the user see misalignment when tuning.
-    if (showWaveform && waveformPeaks.length > 0 && initialBpm > 0) {
+    // Waveform uses CURRENT BPM/GAP so it always aligns with the beat grid.
+    // pixel → beat (current) → time → audio sample
+    if (showWaveform && waveformPeaks.length > 0 && bpm > 0) {
       ctx.fillStyle = '#0a0a18';
       ctx.fillRect(0, 0, w, wt);
 
-      const sampleRate = waveformPeaks.length / (audioDuration || 1);
-      const waveGapSec = initialGap / 1000;
-      const waveBpm = initialBpm;
+      const sampleRate = waveformPeaks.length / (waveformDuration || audioDuration || 1);
       const midY = wt / 2;
 
       ctx.fillStyle = '#4fc3f744';
       for (let px = 0; px < w; px++) {
         const beat = xToBeat(px);  // pixel → beat in CURRENT beat-space
-        // Convert beat to absolute time using INITIAL BPM/GAP
-        const t = waveGapSec + (beat * 15) / waveBpm;
+        // Convert beat to absolute time using CURRENT BPM/GAP
+        const t = beatToTime(beat);
         const idx = Math.floor(t * sampleRate);
         if (idx < 0 || idx >= waveformPeaks.length) continue;
         const amp = waveformPeaks[idx] * (wt / 2) * 0.9;
@@ -425,7 +430,7 @@
     else if (pixelsPerSecond > 2) timeStep = 30;
     else timeStep = 60;
 
-    const startTimeSec = Math.max(0, beatToTime(xToBeat(0)));
+    const startTimeSec = beatToTime(xToBeat(0));
     const endTimeSec = beatToTime(xToBeat(w));
     const firstTick = Math.ceil(startTimeSec / timeStep) * timeStep;
 
@@ -451,14 +456,20 @@
 
     ctx.textAlign = 'left'; // Reset
 
-    // Draw reference notes (ghost overlay)
+    // Draw reference notes (ghost overlay) — convert from absolute time to current beat-space
     if (showReference && referenceNotes.length > 0) {
+      const curGapSec = gapMs / 1000;
       for (const note of referenceNotes) {
         if (note.type === 'break') continue;
 
-        const x = beatToX(note.start_beat);
+        // Convert absolute time → current beat-space on the fly
+        const startBeat = ((note.startTimeSec - curGapSec) * bpm) / 15;
+        const endBeat = ((note.endTimeSec - curGapSec) * bpm) / 15;
+        const dur = Math.max(0.5, endBeat - startBeat);
+
+        const x = beatToX(startBeat);
         const y = pitchToY(note.pitch);
-        const width = note.duration * zoom;
+        const width = dur * zoom;
 
         // Ghost outline style
         ctx.strokeStyle = '#66bb6a88';
@@ -532,7 +543,7 @@
     }
 
     // Playback cursor (show when playing OR when paused at non-zero position)
-    if (isPlaying || playbackBeat > 0) {
+    if (isPlaying || currentTimeSec > 0) {
       const cx = beatToX(playbackBeat);
       const pianoBottom = h - timeAxisHeight;
       ctx.strokeStyle = isPlaying ? '#ff5252' : '#ff8a80';
@@ -555,6 +566,19 @@
     const beat = xToBeat(mx);
     const pitch = yToPitch(my);
     console.log(`[Mouse] mouseDown at px(${mx.toFixed(0)}, ${my.toFixed(0)}) beat=${beat.toFixed(1)} pitch=${pitch}`);
+
+    // Click on time axis (bottom strip) → seek playhead (like DAW ruler click)
+    const pianoH = viewHeight - timeAxisHeight;
+    if (my >= pianoH) {
+      seekToTime(beatToTime(beat));
+      return;
+    }
+
+    // Alt+click anywhere → seek playhead
+    if (event.altKey) {
+      seekToTime(beatToTime(beat));
+      return;
+    }
 
     // Find clicked note
     let found = null;
@@ -636,7 +660,7 @@
       console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
     } else {
       // Scroll
-      scrollX = Math.max(0, scrollX + event.deltaX + event.deltaY);
+      scrollX = Math.max(getMinBeat() * zoom, scrollX + event.deltaX + event.deltaY);
     }
 
     draw();
@@ -688,6 +712,21 @@
     draw();
   }
 
+  // Seek playhead to an absolute time (seconds)
+  function seekToTime(timeSec) {
+    if (!audioEl) {
+      console.log('[Seek] No audioEl');
+      return;
+    }
+    const maxTime = audioEl.duration || audioDuration || 300;
+    const t = Math.max(0, Math.min(maxTime, timeSec));
+    console.log(`[Seek] seekToTime ${t.toFixed(2)}s`);
+    audioEl.currentTime = t;
+    currentTimeSec = t;
+    playbackBeat = timeToBeat(t);
+    draw();
+  }
+
   function seekPlayback(deltaSec) {
     if (!audioEl) {
       console.log('[Seek] No audioEl');
@@ -700,15 +739,16 @@
     audioEl.currentTime = newTime;
     currentTimeSec = newTime;
     const gapSec = gapMs / 1000;
-    playbackBeat = Math.max(0, ((newTime - gapSec) * bpm) / 15);
+    playbackBeat = ((newTime - gapSec) * bpm) / 15;
     // Update scroll position to follow
     const canvasWidth = canvasEl?.width || 800;
+    const minScrollX = getMinBeat() * zoom;
     if (scrollMode) {
-      scrollX = Math.max(0, playbackBeat * zoom - canvasWidth * 0.3);
+      scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.3);
     } else {
       const cursorX = beatToX(playbackBeat);
       if (cursorX < 0 || cursorX > canvasWidth) {
-        scrollX = Math.max(0, (playbackBeat * zoom) - canvasWidth * 0.3);
+        scrollX = Math.max(minScrollX, (playbackBeat * zoom) - canvasWidth * 0.3);
       }
     }
     draw();
@@ -739,13 +779,14 @@
     const currentTime = audioEl.currentTime;
     currentTimeSec = currentTime;
     const gapSec = gapMs / 1000;
-    playbackBeat = Math.max(0, ((currentTime - gapSec) * bpm) / 15);
+    playbackBeat = ((currentTime - gapSec) * bpm) / 15;
 
     // Scroll logic
     const canvasWidth = canvasEl?.width || 800;
+    const minScrollX = getMinBeat() * zoom;
     if (scrollMode) {
       // Fixed cursor: cursor stays at 30%, notes scroll
-      scrollX = Math.max(0, playbackBeat * zoom - canvasWidth * 0.3);
+      scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.3);
     } else {
       // Classic: auto-scroll when cursor reaches 70%
       const cursorX = beatToX(playbackBeat);
@@ -787,17 +828,18 @@
       const decoded = await audioCtx.decodeAudioData(arrayBuffer);
       audioCtx.close();
 
-      // Downsample to ~1000 peaks per second (plenty for visual)
+      // Downsample to 200 peaks per second (plenty for visual)
+      // Use floating-point sample boundaries to avoid accumulated rounding drift.
       const rawData = decoded.getChannelData(0);
       const peaksPerSec = 200;
       const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
-      const samplesPerPeak = Math.floor(rawData.length / totalPeaks);
+      const totalSamples = rawData.length;
       const peaks = new Float32Array(totalPeaks);
 
       for (let i = 0; i < totalPeaks; i++) {
         let max = 0;
-        const start = i * samplesPerPeak;
-        const end = Math.min(start + samplesPerPeak, rawData.length);
+        const start = Math.floor(i * totalSamples / totalPeaks);
+        const end = Math.min(Math.floor((i + 1) * totalSamples / totalPeaks), totalSamples);
         for (let j = start; j < end; j++) {
           const abs = Math.abs(rawData[j]);
           if (abs > max) max = abs;
@@ -806,6 +848,7 @@
       }
 
       waveformPeaks = peaks;
+      waveformDuration = decoded.duration;
       console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(1)}s audio`);
       draw();
     } catch (err) {
@@ -842,6 +885,9 @@
       console.log('[Step4] Vocal URL for playback:', vocalUrl);
       computeTotalBeats();
 
+      // Scroll to show audio from time=0 (pre-GAP region visible)
+      scrollX = getMinBeat() * zoom;
+
       // Load waveform
       if (vocalUrl) {
         loadWaveform(vocalUrl);
@@ -854,28 +900,24 @@
           refBpm = refData.bpm || bpm;
           refGapMs = refData.gap || 0;
 
-          // Convert reference beats from reference coordinate space to generated coordinate space
-          // Both use standard Ultrastar quarter-beat convention:
-          // refTime = refGapSec + (refBeat * 15 / refBpm)   → real time in seconds
-          // genBeat = (refTime - genGapSec) * genBpm / 15    → beat in generated space
+          // Store reference notes with ABSOLUTE TIME (seconds) so they stay
+          // aligned regardless of which BPM/GAP the user sets.
+          // Conversion to current beat-space happens dynamically at draw time.
           const refGapSec = refGapMs / 1000;
-          const genGapSec = gapMs / 1000;
 
           referenceNotes = (refData.notes || []).map(n => {
-            const realTimeSec = refGapSec + (n.start_beat * 15) / refBpm;
+            const startTimeSec = refGapSec + (n.start_beat * 15) / refBpm;
             const endTimeSec = refGapSec + ((n.start_beat + n.duration) * 15) / refBpm;
-            const genStartBeat = Math.round(((realTimeSec - genGapSec) * bpm) / 15);
-            const genEndBeat = Math.round(((endTimeSec - genGapSec) * bpm) / 15);
             return {
               ...n,
-              start_beat: genStartBeat,
-              duration: Math.max(1, genEndBeat - genStartBeat),
+              startTimeSec,
+              endTimeSec,
               original_start_beat: n.start_beat,
               original_duration: n.duration,
             };
           });
 
-          console.log('[Step4] Loaded', referenceNotes.length, 'reference notes (converted from BPM', refBpm, 'GAP', refGapMs, 'to BPM', bpm, 'GAP', gapMs, ')');
+          console.log('[Step4] Loaded', referenceNotes.length, 'reference notes as absolute times (ref BPM', refBpm, 'GAP', refGapMs, ')');
 
           // Auto-detect and normalize pitch offset between AI notes and reference
           // AI uses MIDI pitches (e.g., 46-71), reference may use Ultrastar relative (e.g., 5-22)
@@ -895,7 +937,8 @@
                 original_pitch: n.original_pitch || n.pitch,
               }));
             }
-          }        } catch (e) {
+          }
+        } catch (e) {
           console.warn('[Step4] Failed to load reference notes:', e);
           referenceNotes = [];
         }
@@ -1032,7 +1075,7 @@
       type="range"
       class="scroll-range"
       bind:this={scrollBarEl}
-      min="0"
+      min={getMinBeat()}
       max={totalBeats}
       step="1"
       value={scrollX / zoom}
@@ -1067,8 +1110,8 @@
         {@const refRealNotes = referenceNotes.filter(n => !n.type)}
         {@const refFirst = refRealNotes.length > 0 ? refRealNotes[0] : null}
         {@const refLast = refRealNotes.length > 0 ? refRealNotes[refRealNotes.length - 1] : null}
-        {@const refFirstTimeSec = refFirst ? (refGapMs / 1000 + (refFirst.original_start_beat * 60) / refBpm) : 0}
-        {@const refLastTimeSec = refLast ? (refGapMs / 1000 + ((refLast.original_start_beat + refLast.original_duration) * 60) / refBpm) : 0}
+        {@const refFirstTimeSec = refFirst ? refFirst.startTimeSec : 0}
+        {@const refLastTimeSec = refLast ? refLast.endTimeSec : 0}
         <span>Reference: BPM {(refBpm ?? 0).toFixed(1)} | GAP {refGapMs ?? 0}ms | {formatTime(refFirstTimeSec)}–{formatTime(refLastTimeSec)}</span>
       {/if}
     </div>
@@ -1080,7 +1123,7 @@
   {/if}
 
   <div class="help">
-    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: move cursor ±5s (Shift: ±1s) • Space: play/pause • Toggle Scroll / Wave</p>
+    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: move cursor ±5s (Shift: ±1s) • Space: play/pause • Click time axis or ⌥+click to seek • Toggle Scroll / Wave</p>
   </div>
 </div>
 
