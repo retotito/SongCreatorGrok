@@ -94,8 +94,21 @@
     if (pitchNotes.length === 0) return;
     
     const pitches = pitchNotes.map(n => n.pitch);
+    // Also include reference pitches (after offset normalization) for range calc
+    if (referenceNotes.length > 0) {
+      const refPitches = referenceNotes.filter(n => n.pitch !== undefined && n.type !== 'break').map(n => n.pitch);
+      pitches.push(...refPitches);
+    }
     minPitch = Math.max(24, Math.min(...pitches) - 6);
     maxPitch = Math.min(108, Math.max(...pitches) + 6);
+  }
+
+  // Compute median of a numeric array
+  function median(arr) {
+    if (arr.length === 0) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   // Beat to X pixel
@@ -577,7 +590,26 @@
           });
 
           console.log('[Step4] Loaded', referenceNotes.length, 'reference notes (converted from BPM', refBpm, 'GAP', refGapMs, 'to BPM', bpm, 'GAP', gapMs, ')');
-        } catch (e) {
+
+          // Auto-detect and normalize pitch offset between AI notes and reference
+          // AI uses MIDI pitches (e.g., 46-71), reference may use Ultrastar relative (e.g., 5-22)
+          const aiPitchNotes = notes.filter(n => n.pitch !== undefined && n.type !== 'break');
+          const refPitchNotes = referenceNotes.filter(n => n.pitch !== undefined && n.type !== 'break');
+          if (aiPitchNotes.length > 0 && refPitchNotes.length > 0) {
+            const aiMed = median(aiPitchNotes.map(n => n.pitch));
+            const refMed = median(refPitchNotes.map(n => n.pitch));
+            const rawOffset = aiMed - refMed;
+            // Round to nearest octave (12 semitones)
+            const octaveOffset = Math.round(rawOffset / 12) * 12;
+            if (octaveOffset !== 0) {
+              console.log(`[Step4] Shifting reference pitches by ${octaveOffset} semitones (AI median: ${aiMed}, ref median: ${refMed})`);
+              referenceNotes = referenceNotes.map(n => ({
+                ...n,
+                pitch: n.pitch + octaveOffset,
+                original_pitch: n.original_pitch || n.pitch,
+              }));
+            }
+          }        } catch (e) {
           console.warn('[Step4] Failed to load reference notes:', e);
           referenceNotes = [];
         }

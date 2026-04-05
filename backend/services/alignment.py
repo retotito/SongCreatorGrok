@@ -377,11 +377,13 @@ def align_with_mfa(
     # ── Run MFA on each segment ──
     all_word_intervals = []
     all_phones = []
+    seg_data = []  # [(n_expected_lyrics_words, n_mfa_words)] for segments that produced output
     
     with tempfile.TemporaryDirectory() as temp_dir:
         for seg_idx, (seg_words, seg_start, seg_end) in enumerate(word_assignments):
             if not seg_words:
                 log_step("ALIGN", f"  Segment {seg_idx}: no words, skipping")
+                seg_data.append((0, 0))
                 continue
             
             seg_transcript = ' '.join(seg_words)
@@ -439,6 +441,7 @@ def align_with_mfa(
                             f.write(f"Exit: {result.returncode}\nStderr:\n{result.stderr}\n")
                     except:
                         pass
+                    seg_data.append((len(seg_words), 0))
                     continue
                 
                 # Parse TextGrid output
@@ -451,6 +454,7 @@ def align_with_mfa(
                 
                 if not tg_path:
                     log_step("ALIGN", f"  Segment {seg_idx}: no TextGrid output")
+                    seg_data.append((len(seg_words), 0))
                     continue
                 
                 # Save TextGrid for debugging
@@ -468,18 +472,24 @@ def align_with_mfa(
                 for w in seg_words_iv:
                     w["start"] = round(w["start"] + cut_start, 4)
                     w["end"] = round(w["end"] + cut_start, 4)
+                    w["seg_idx"] = seg_idx
                 for p in seg_phones:
                     p["start"] = round(p["start"] + cut_start, 4)
-                    p["end"] = round(p["end"] + cut_start, 4)
+                    p["end"] = round(p["end"] + cut_start, 4)        
                 
-                log_step("ALIGN", f"  Segment {seg_idx}: {len(seg_words_iv)} words, "
-                         f"{len(seg_phones)} phones aligned")
+                # Merge MFA contraction splits within this segment
+                seg_words_iv = _merge_mfa_contractions(seg_words_iv)
                 
+                log_step("ALIGN", f"  Segment {seg_idx}: {len(seg_words_iv)} words "
+                         f"(expected {len(seg_words)}), {len(seg_phones)} phones aligned")
+                
+                seg_data.append((len(seg_words), len(seg_words_iv)))
                 all_word_intervals.extend(seg_words_iv)
                 all_phones.extend(seg_phones)
                 
             except subprocess.TimeoutExpired:
                 log_step("ALIGN", f"  Segment {seg_idx}: MFA timed out")
+                seg_data.append((len(seg_words), 0))
                 continue
     
     log_step("ALIGN", f"Total MFA output: {len(all_word_intervals)} words, {len(all_phones)} phones")
@@ -495,7 +505,8 @@ def align_with_mfa(
         log_step("ALIGN", f"  Last word: '{all_word_intervals[-1]['text']}' at {all_word_intervals[-1]['end']:.3f}s")
     
     # ── Map word intervals to syllables ──
-    results = _map_mfa_words_to_syllables(all_word_intervals, flat_syllables, lyrics_text, all_phones)
+    results = _map_mfa_words_to_syllables(all_word_intervals, flat_syllables, lyrics_text, all_phones,
+                                          seg_word_counts=seg_data)
 
     # ── Post-process: anchor to Whisper for drift correction ──
     if whisper_words:
@@ -835,6 +846,43 @@ def _dump_phone_debug(phones: List[dict], word_intervals: List[dict] = None,
         log_step("ALIGN", f"Could not write phone debug: {e}")
 
 
+def _merge_mfa_contractions(word_intervals: List[dict]) -> List[dict]:
+    """Merge MFA-split contractions back into single words.
+
+    MFA sometimes splits contractions like "there's" into "there" + "'s",
+    creating a word count mismatch with our lyrics. Merge them back.
+    """
+    if not word_intervals:
+        return word_intervals
+
+    merged = []
+    i = 0
+    while i < len(word_intervals):
+        w = dict(word_intervals[i])
+        # Check if next word is a contraction suffix
+        if i + 1 < len(word_intervals):
+            next_w = word_intervals[i + 1]
+            next_text = next_w["text"]
+            # Detect contraction suffixes: 's, 're, 'll, 've, 't, 'm, 'd
+            if next_text.startswith("\u2019") or next_text.startswith("'"):
+                # Merge: extend current word to cover both
+                w["end"] = next_w["end"]
+                w["text"] = w["text"] + next_w["text"]
+                log_step("ALIGN", f"  Merged MFA contraction: "
+                         f"'{word_intervals[i]['text']}' + '{next_text}' -> '{w['text']}'")
+                i += 2
+                merged.append(w)
+                continue
+        merged.append(w)
+        i += 1
+
+    if len(merged) != len(word_intervals):
+        log_step("ALIGN", f"Merged {len(word_intervals) - len(merged)} MFA "
+                 f"contractions ({len(word_intervals)} -> {len(merged)} words)")
+
+    return merged
+
+
 def _trim_word_intervals_with_phones(
     word_intervals: List[dict],
     phones: List[dict]
@@ -1007,7 +1055,8 @@ def _map_mfa_words_to_syllables(
     word_intervals: List[dict],
     flat_syllables: list,
     lyrics_text: str,
-    phones: List[dict] = None
+    phones: List[dict] = None,
+    seg_word_counts: List[tuple] = None
 ) -> List[dict]:
     """Map MFA word-level timestamps back to syllable-level timestamps.
     
@@ -1017,6 +1066,8 @@ def _map_mfa_words_to_syllables(
        span until the next word, including silence gaps)
     3. For multi-syllable words, distribute the word's time proportionally
     4. Track line_index for break line generation
+    5. If seg_word_counts is provided, resync at segment boundaries so that
+       a word-count mismatch in one segment doesn't cascade to all later ones
     """
     # ── Pre-process: trim word intervals using phone data ──
     # MFA word intervals span from word start to next word start, including
@@ -1048,35 +1099,39 @@ def _map_mfa_words_to_syllables(
     
     log_step("ALIGN", f"Word groups from lyrics: {len(word_groups)}, MFA words: {len(word_intervals)}")
     
-    # ── Match word groups to MFA intervals ──
-    # Use sequential matching: walk through both lists in order
-    results = [None] * len(flat_syllables)
-    mfa_idx = 0
+    # ── Build segment boundary map for resyncing ──
+    # seg_word_counts = [(n_expected_lyrics_words, n_actual_mfa_words), ...]
+    # This lets us resync at segment boundaries so a mismatch in one segment
+    # (e.g., MFA splitting a contraction) doesn't cascade to all later segments.
+    if seg_word_counts:
+        total_expected = sum(n_exp for n_exp, _ in seg_word_counts)
+        total_mfa = sum(n_mfa for _, n_mfa in seg_word_counts)
+        if total_expected != len(word_groups):
+            log_step("ALIGN", f"Warning: seg_word_counts total ({total_expected}) != "
+                     f"word_groups ({len(word_groups)}), falling back to sequential matching")
+            seg_word_counts = None
+        elif total_mfa != len(word_intervals):
+            log_step("ALIGN", f"Warning: seg_word_counts MFA total ({total_mfa}) != "
+                     f"word_intervals ({len(word_intervals)}), falling back to sequential matching")
+            seg_word_counts = None
+        else:
+            mismatched = [(i, ne, nm) for i, (ne, nm) in enumerate(seg_word_counts) if ne != nm]
+            if mismatched:
+                for seg_i, ne, nm in mismatched:
+                    log_step("ALIGN", f"  Seg {seg_i}: expected {ne} words, MFA produced {nm} "
+                             f"(diff {nm - ne:+d}) — will resync at boundary")
     
-    for wg in word_groups:
+    # ── Match word groups to MFA intervals ──
+    results = [None] * len(flat_syllables)
+    
+    def _assign_word(wg, mfa_word, confidence, method):
+        """Assign MFA timing to a word group's syllables."""
         syl_indices = wg["syllable_indices"]
         line_idx = wg["line_index"]
         num_syls = len(syl_indices)
-        
-        if mfa_idx < len(word_intervals):
-            mfa_word = word_intervals[mfa_idx]
-            word_start = mfa_word["start"]
-            word_end = mfa_word["end"]
-            word_duration = word_end - word_start
-            mfa_idx += 1
-            confidence = 0.9
-            method = "mfa"
-        else:
-            # No more MFA words — extrapolate from last known position
-            if results and any(r for r in results if r is not None):
-                last = [r for r in results if r is not None][-1]
-                word_start = last["end"] + 0.05
-            else:
-                word_start = 0.0
-            word_duration = 0.3 * num_syls
-            word_end = word_start + word_duration
-            confidence = 0.3
-            method = "mfa_extrapolated"
+        word_start = mfa_word["start"]
+        word_end = mfa_word["end"]
+        word_duration = word_end - word_start
         
         # Distribute time across syllables using phone data when possible
         syl_boundaries = _get_syllable_boundaries_from_phones(
@@ -1084,7 +1139,6 @@ def _map_mfa_words_to_syllables(
         ) if phones and num_syls > 1 else None
         
         if syl_boundaries and len(syl_boundaries) == num_syls:
-            # Use phone-derived boundaries
             for j, syl_idx in enumerate(syl_indices):
                 syl = flat_syllables[syl_idx]
                 start, end = syl_boundaries[j]
@@ -1098,8 +1152,7 @@ def _map_mfa_words_to_syllables(
                     "line_index": line_idx
                 }
         else:
-            # Fall back to equal distribution
-            syl_duration = word_duration / num_syls
+            syl_duration = word_duration / num_syls if num_syls > 0 else 0
             for j, syl_idx in enumerate(syl_indices):
                 syl = flat_syllables[syl_idx]
                 start = word_start + j * syl_duration
@@ -1113,6 +1166,63 @@ def _map_mfa_words_to_syllables(
                     "method": method,
                     "line_index": line_idx
                 }
+    
+    def _extrapolate_word(wg):
+        """Assign extrapolated timing when no MFA word is available."""
+        syl_indices = wg["syllable_indices"]
+        line_idx = wg["line_index"]
+        num_syls = len(syl_indices)
+        
+        last_known = [r for r in results if r is not None]
+        word_start = last_known[-1]["end"] + 0.05 if last_known else 0.0
+        word_duration = 0.3 * num_syls
+        syl_duration = 0.3
+        
+        for j, syl_idx in enumerate(syl_indices):
+            syl = flat_syllables[syl_idx]
+            results[syl_idx] = {
+                "syllable": syl["text"],
+                "start": round(word_start + j * syl_duration, 4),
+                "end": round(word_start + (j + 1) * syl_duration, 4),
+                "confidence": 0.3,
+                "is_rap": syl.get("is_rap", False),
+                "method": "mfa_extrapolated",
+                "line_index": line_idx
+            }
+    
+    if seg_word_counts:
+        # ── Segment-aware matching: resync at each segment boundary ──
+        mfa_idx = 0
+        wg_idx = 0
+        
+        for seg_i, (n_expected, n_mfa) in enumerate(seg_word_counts):
+            seg_mfa_start = mfa_idx
+            
+            for word_i in range(n_expected):
+                if wg_idx >= len(word_groups):
+                    break
+                wg = word_groups[wg_idx]
+                
+                if mfa_idx < seg_mfa_start + n_mfa:
+                    _assign_word(wg, word_intervals[mfa_idx], 0.9, "mfa")
+                    mfa_idx += 1
+                else:
+                    # Ran out of MFA words in this segment — extrapolate
+                    _extrapolate_word(wg)
+                
+                wg_idx += 1
+            
+            # Skip any remaining MFA words in this segment (handles extra words)
+            mfa_idx = seg_mfa_start + n_mfa
+    else:
+        # ── Fallback: sequential matching (original behavior) ──
+        mfa_idx = 0
+        for wg in word_groups:
+            if mfa_idx < len(word_intervals):
+                _assign_word(wg, word_intervals[mfa_idx], 0.9, "mfa")
+                mfa_idx += 1
+            else:
+                _extrapolate_word(wg)
     
     # Fill any gaps (shouldn't happen, but safety net)
     filled = [r for r in results if r is not None]
