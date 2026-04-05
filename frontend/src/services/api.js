@@ -100,6 +100,10 @@ export async function loadTestSession() {
   return request('POST', '/load-test-session');
 }
 
+export async function resumeLastSession() {
+  return request('POST', '/resume-last');
+}
+
 // ─── Step 3: Generate ──────────────────────────
 export async function generateUltrastar(sessionId) {
   return request('POST', `/generate/${sessionId}`);
@@ -116,6 +120,13 @@ export async function getEditorData(sessionId) {
 
 export async function saveCorrections(sessionId, corrections) {
   return request('POST', `/corrections/${sessionId}`, corrections);
+}
+
+export async function applyBpm(sessionId, bpm, gapMs) {
+  const form = new FormData();
+  form.append('bpm', bpm);
+  form.append('gap_ms', gapMs);
+  return request('POST', `/apply-bpm/${sessionId}`, form, true);
 }
 
 // ─── Step 5: Export ────────────────────────────

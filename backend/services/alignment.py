@@ -12,28 +12,35 @@ import subprocess
 from typing import List, Tuple, Optional
 from utils.logger import log_step, log_progress
 
-# ── Detect MFA via conda environment ──
+# ── Detect MFA via conda environment (lazy) ──
 CONDA_BIN = os.path.expanduser("~/miniconda3/bin/conda")
 MFA_ENV = "mfa"
+_mfa_checked = False
+MFA_AVAILABLE = False
 
 def _check_mfa():
     """Check if MFA is available in the conda environment."""
+    global _mfa_checked, MFA_AVAILABLE
+    if _mfa_checked:
+        return MFA_AVAILABLE
+    _mfa_checked = True
     if not os.path.exists(CONDA_BIN):
+        MFA_AVAILABLE = False
+        log_step("INIT", "MFA not found (conda not installed)")
         return False
     try:
         result = subprocess.run(
             [CONDA_BIN, "run", "-n", MFA_ENV, "mfa", "version"],
             capture_output=True, text=True, timeout=30
         )
-        return result.returncode == 0
+        MFA_AVAILABLE = result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-MFA_AVAILABLE = _check_mfa()
-if MFA_AVAILABLE:
-    log_step("INIT", "MFA available via conda (real forced alignment)")
-else:
-    log_step("INIT", "MFA not found, will use energy-based fallback alignment")
+        MFA_AVAILABLE = False
+    if MFA_AVAILABLE:
+        log_step("INIT", "MFA available via conda (real forced alignment)")
+    else:
+        log_step("INIT", "MFA not found, will use energy-based fallback alignment")
+    return MFA_AVAILABLE
 
 
 def align_lyrics_to_audio(
@@ -59,7 +66,7 @@ def align_lyrics_to_audio(
     
     log_step("ALIGN", f"Parsed {len(flat_syllables)} syllables across {len(parsed)} lines")
     
-    if MFA_AVAILABLE:
+    if _check_mfa():
         try:
             results = align_with_mfa(audio_path, lyrics_text, flat_syllables, language,
                                      whisper_words=whisper_words)

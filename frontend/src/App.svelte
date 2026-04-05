@@ -23,7 +23,7 @@
   });
 </script>
 
-<div class="app">
+<div class="app" class:full-width={$currentStep === 4}>
   <header>
     <h1>🎤 Ultrastar Song Generator</h1>
     <div class="backend-status" class:online={backendStatus === 'ok'} class:offline={backendStatus === 'offline'}>
@@ -74,6 +74,11 @@
     max-width: 900px;
     margin: 0 auto;
     padding: 1rem;
+  }
+
+  .app.full-width {
+    max-width: 100%;
+    padding: 0.5rem;
   }
 
   header {

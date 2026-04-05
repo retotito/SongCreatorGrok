@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, referenceData, errorMessage } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, getReferenceNotes } from '../services/api.js';
+  import { getEditorData, getAudioUrl, getReferenceNotes, applyBpm } from '../services/api.js';
 
   // Canvas refs
   let canvasEl;
@@ -20,10 +20,18 @@
   let refBpm = 0;
   let refGapMs = 0;
 
+  // Raw ms timings for BPM re-quantization
+  let rawTimings = [];   // syllable_timings from backend (start/end in seconds)
+  let pitchMap = [];     // midi pitch per syllable (extracted from initial Ultrastar parse)
+  let initialBpm = 0;    // original detected BPM
+  let initialGap = 0;    // original detected GAP
+  let bpmChanged = false; // track if user modified BPM/GAP
+  let applyingBpm = false; // loading state for Apply button
+
   // View state
   let scrollX = 0;
   let zoom = 20;          // pixels per beat (default zoomed in)
-  let viewHeight = 400;
+  let viewHeight = 460;
   let noteHeight = 8;
 
   // Pitch range (MIDI)
@@ -35,6 +43,7 @@
   let dragMode = null;     // 'move' | 'resize-left' | 'resize-right'
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
+  let scrollBarEl;
 
   // Playback
   let audioEl;
@@ -42,6 +51,20 @@
   let playbackBeat = 0;
   let animFrame;
   let currentTimeSec = 0;  // Reactive time display
+
+  // Scroll mode: notes scroll, cursor stays fixed
+  let scrollMode = false;
+
+  // Playback speed
+  let playbackRate = 1.0;
+
+  // Waveform
+  let waveformPeaks = [];   // pre-computed peaks array
+  let showWaveform = true;
+  const waveformHeight = 60; // px reserved at top of canvas for waveform
+
+  // Total beats for scrollbar
+  let totalBeats = 0;
 
   // Parse Ultrastar content into notes array
   function parseUltrastar(content) {
@@ -121,19 +144,26 @@
     return (x + scrollX) / zoom;
   }
 
-  // Pitch to Y pixel (piano area only, excluding time axis at bottom)
+  // Waveform top offset (only when waveform is visible)
+  function waveTop() {
+    return showWaveform ? waveformHeight : 0;
+  }
+
+  // Pitch to Y pixel (piano area only, excluding time axis at bottom and waveform at top)
   function pitchToY(pitch) {
     const range = maxPitch - minPitch;
-    const pianoH = viewHeight - 22; // exclude time axis
+    const wt = waveTop();
+    const pianoH = viewHeight - 22 - wt; // exclude time axis and waveform
     const ratio = (maxPitch - pitch) / range;
-    return ratio * (pianoH - 40) + 20;
+    return wt + ratio * (pianoH - 40) + 20;
   }
 
   // Y pixel to pitch
   function yToPitch(y) {
     const range = maxPitch - minPitch;
-    const pianoH = viewHeight - 22;
-    const ratio = (y - 20) / (pianoH - 40);
+    const wt = waveTop();
+    const pianoH = viewHeight - 22 - wt;
+    const ratio = (y - wt - 20) / (pianoH - 40);
     return Math.round(maxPitch - ratio * range);
   }
 
@@ -167,16 +197,172 @@
   // Time axis height
   const timeAxisHeight = 22;
 
+  // Compute total beats from notes for scrollbar range
+  function computeTotalBeats() {
+    const realNotes = notes.filter(n => n.type !== 'break');
+    if (realNotes.length === 0) {
+      totalBeats = Math.max(100, timeToBeat(audioDuration || 60));
+    } else {
+      const last = realNotes[realNotes.length - 1];
+      totalBeats = Math.max(last.startBeat + last.duration + 50, timeToBeat(audioDuration || 60));
+    }
+  }
+
+  // Update scrollbar from scrollX
+  function syncScrollbar() {
+    if (scrollBarEl) {
+      scrollBarEl.value = scrollX / zoom;
+    }
+  }
+
+  // ──── BPM Re-quantization ────────────────────
+  // Rebuild notes from raw ms timings using the current bpm/gapMs,
+  // preserving pitches from the original Ultrastar parse.
+  function requantizeFromMs() {
+    if (!rawTimings || rawTimings.length === 0) {
+      console.log('[Requantize] No rawTimings, skipping');
+      return;
+    }
+    console.log(`[Requantize] bpm=${bpm} gap=${gapMs}ms, ${rawTimings.length} timings`);
+
+    const gapSec = gapMs / 1000;
+    let id = 0;
+    let prevLineIndex = null;
+    let lastEndBeat = 0;
+    const newNotes = [];
+
+    for (let i = 0; i < rawTimings.length; i++) {
+      const timing = rawTimings[i];
+      const startSec = timing.start;
+      const endSec = timing.end;
+      const lineIndex = timing.line_index ?? 0;
+
+      // Insert break between phrases
+      if (prevLineIndex !== null && lineIndex !== prevLineIndex) {
+        const breakStart = lastEndBeat + 2;
+        const nextStartBeat = Math.max(0, Math.round(((startSec - gapSec) * bpm) / 15));
+        const breakEnd = Math.max(breakStart + 1, nextStartBeat - 2);
+        if (breakEnd > breakStart) {
+          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: breakEnd });
+        } else {
+          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: null });
+        }
+      }
+
+      let startBeat = Math.max(0, Math.round(((startSec - gapSec) * bpm) / 15));
+      let endBeat   = Math.max(startBeat + 1, Math.round(((endSec - gapSec) * bpm) / 15));
+
+      // Prevent overlap with previous note
+      if (startBeat <= lastEndBeat && newNotes.some(n => n.type !== 'break')) {
+        startBeat = lastEndBeat + 1;
+        endBeat = Math.max(startBeat + 1, endBeat);
+      }
+
+      const duration = Math.max(1, endBeat - startBeat);
+      const pitch = pitchMap[i] ?? 60;
+
+      newNotes.push({
+        id: id++,
+        startBeat,
+        duration,
+        pitch,
+        syllable: timing.syllable,
+        isRap: timing.is_rap ?? false,
+        confidence: timing.confidence ?? 1.0,
+        original: { startBeat, duration, pitch },
+      });
+
+      lastEndBeat = startBeat + duration;
+      prevLineIndex = lineIndex;
+    }
+
+    notes = newNotes;
+    console.log(`[Requantize] Built ${newNotes.filter(n => n.type !== 'break').length} notes, ${newNotes.filter(n => n.type === 'break').length} breaks`);
+    updatePitchRange();
+    computeTotalBeats();
+    draw();
+  }
+
+  // Handle BPM or GAP adjustment — re-quantize visually
+  function handleBpmGapChange() {
+    console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} (initial: bpm=${initialBpm} gap=${initialGap})`);
+    bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
+    // Recalculate playback cursor position with new BPM/GAP
+    if (currentTimeSec > 0) {
+      const gapSec = gapMs / 1000;
+      playbackBeat = Math.max(0, ((currentTimeSec - gapSec) * bpm) / 15);
+    }
+    requantizeFromMs();
+  }
+
+  // Apply BPM to backend (regenerate Ultrastar file)
+  async function handleApplyBpm() {
+    if (!$sessionId) return;
+    applyingBpm = true;
+    try {
+      const result = await applyBpm($sessionId, bpm, gapMs);
+      // Update generationResult store so Step 5 gets correct BPM/GAP
+      generationResult.update(r => ({ ...r, bpm, gap_ms: gapMs }));
+      initialBpm = bpm;
+      initialGap = gapMs;
+      bpmChanged = false;
+      // Re-parse the returned Ultrastar content to get updated notes
+      if (result.ultrastar_content) {
+        notes = parseUltrastar(result.ultrastar_content);
+        updatePitchRange();
+        draw();
+      }
+    } catch (err) {
+      console.error('[Step4] Apply BPM error:', err);
+      errorMessage.set(err.message);
+    } finally {
+      applyingBpm = false;
+    }
+  }
+
   // ──── Drawing ────────────────────────────────
   function draw() {
     if (!ctx || !canvasEl) return;
 
     const w = canvasEl.width;
     const h = canvasEl.height;
+    const wt = waveTop();
 
     // Clear
     ctx.fillStyle = '#0d1117';
     ctx.fillRect(0, 0, w, h);
+
+    // ── Draw waveform at top ──
+    // Waveform uses INITIAL BPM/GAP so it stays anchored to the actual audio.
+    // Notes use CURRENT BPM/GAP. This lets the user see misalignment when tuning.
+    if (showWaveform && waveformPeaks.length > 0 && initialBpm > 0) {
+      ctx.fillStyle = '#0a0a18';
+      ctx.fillRect(0, 0, w, wt);
+
+      const sampleRate = waveformPeaks.length / (audioDuration || 1);
+      const waveGapSec = initialGap / 1000;
+      const waveBpm = initialBpm;
+      const midY = wt / 2;
+
+      ctx.fillStyle = '#4fc3f744';
+      for (let px = 0; px < w; px++) {
+        const beat = xToBeat(px);  // pixel → beat in CURRENT beat-space
+        // Convert beat to absolute time using INITIAL BPM/GAP
+        const t = waveGapSec + (beat * 15) / waveBpm;
+        const idx = Math.floor(t * sampleRate);
+        if (idx < 0 || idx >= waveformPeaks.length) continue;
+        const amp = waveformPeaks[idx] * (wt / 2) * 0.9;
+        ctx.fillRect(px, midY - amp, 1, amp * 2);
+      }
+
+      // Separator line
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, wt);
+      ctx.lineTo(w, wt);
+      ctx.stroke();
+    }
 
     // Reserve bottom strip for time axis
     const pianoH = h - timeAxisHeight;
@@ -214,7 +400,7 @@
       ctx.strokeStyle = isMeasure ? '#2a2a4e' : '#161625';
       ctx.lineWidth = isMeasure ? 1 : 0.5;
       ctx.beginPath();
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, wt);
       ctx.lineTo(x, pianoH);
       ctx.stroke();
     }
@@ -356,6 +542,8 @@
       ctx.lineTo(cx, pianoBottom);
       ctx.stroke();
     }
+
+    syncScrollbar();
   }
 
   // ──── Interaction ────────────────────────────
@@ -366,6 +554,7 @@
 
     const beat = xToBeat(mx);
     const pitch = yToPitch(my);
+    console.log(`[Mouse] mouseDown at px(${mx.toFixed(0)}, ${my.toFixed(0)}) beat=${beat.toFixed(1)} pitch=${pitch}`);
 
     // Find clicked note
     let found = null;
@@ -392,8 +581,10 @@
       selectedNote = found.id;
       isDragging = true;
       dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration };
+      console.log(`[Mouse] Selected note id=${found.id} '${found.syllable}' mode=${dragMode}`);
     } else {
       selectedNote = null;
+      console.log('[Mouse] No note selected');
     }
 
     draw();
@@ -430,6 +621,7 @@
   }
 
   function handleMouseUp() {
+    if (isDragging) console.log('[Mouse] mouseUp, drag ended');
     isDragging = false;
     dragMode = null;
   }
@@ -439,12 +631,21 @@
     
     if (event.ctrlKey || event.metaKey) {
       // Zoom
+      const oldZoom = zoom;
       zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
+      console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
     } else {
       // Scroll
       scrollX = Math.max(0, scrollX + event.deltaX + event.deltaY);
     }
 
+    draw();
+  }
+
+  // Scrollbar input handler
+  function handleScrollbar(event) {
+    const beat = parseFloat(event.target.value);
+    scrollX = beat * zoom;
     draw();
   }
 
@@ -465,7 +666,9 @@
     } else {
       // Resume from our tracked position
       audioEl.currentTime = currentTimeSec;
-      console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
+      audioEl.playbackRate = playbackRate;
+      audioEl.preservesPitch = true;
+      console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
       updatePlayback();
@@ -499,26 +702,31 @@
     const gapSec = gapMs / 1000;
     playbackBeat = Math.max(0, ((newTime - gapSec) * bpm) / 15);
     // Update scroll position to follow
-    const cursorX = beatToX(playbackBeat);
     const canvasWidth = canvasEl?.width || 800;
-    if (cursorX < 0 || cursorX > canvasWidth) {
-      scrollX = Math.max(0, (playbackBeat * zoom) - canvasWidth * 0.3);
+    if (scrollMode) {
+      scrollX = Math.max(0, playbackBeat * zoom - canvasWidth * 0.3);
+    } else {
+      const cursorX = beatToX(playbackBeat);
+      if (cursorX < 0 || cursorX > canvasWidth) {
+        scrollX = Math.max(0, (playbackBeat * zoom) - canvasWidth * 0.3);
+      }
     }
     draw();
   }
 
   function handleKeydown(e) {
+    console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey}`);
     // Spacebar: toggle play/pause
     if (e.code === 'Space') {
       e.preventDefault();
       togglePlayback();
     }
-    // Left arrow: seek back 5s (Shift: 1s)
+    // Left arrow: move cursor (seek) — 5s or 1s with Shift
     if (e.code === 'ArrowLeft') {
       e.preventDefault();
       seekPlayback(e.shiftKey ? -1 : -5);
     }
-    // Right arrow: seek forward 5s (Shift: 1s)
+    // Right arrow: move cursor (seek) — 5s or 1s with Shift
     if (e.code === 'ArrowRight') {
       e.preventDefault();
       seekPlayback(e.shiftKey ? 1 : 5);
@@ -533,15 +741,77 @@
     const gapSec = gapMs / 1000;
     playbackBeat = Math.max(0, ((currentTime - gapSec) * bpm) / 15);
 
-    // Auto-scroll to follow playback
-    const cursorX = beatToX(playbackBeat);
+    // Scroll logic
     const canvasWidth = canvasEl?.width || 800;
-    if (cursorX > canvasWidth * 0.7) {
-      scrollX = (playbackBeat * zoom) - canvasWidth * 0.3;
+    if (scrollMode) {
+      // Fixed cursor: cursor stays at 30%, notes scroll
+      scrollX = Math.max(0, playbackBeat * zoom - canvasWidth * 0.3);
+    } else {
+      // Classic: auto-scroll when cursor reaches 70%
+      const cursorX = beatToX(playbackBeat);
+      if (cursorX > canvasWidth * 0.7) {
+        scrollX = (playbackBeat * zoom) - canvasWidth * 0.3;
+      }
     }
 
     draw();
     animFrame = requestAnimationFrame(updatePlayback);
+  }
+
+  // Set playback speed
+  function setPlaybackRate(rate) {
+    console.log(`[Speed] Set playback rate: ${rate}x`);
+    playbackRate = rate;
+    if (audioEl) {
+      audioEl.playbackRate = rate;
+      audioEl.preservesPitch = true;
+    }
+  }
+
+  // Resize canvas to fit container
+  function resizeCanvas() {
+    if (!canvasEl) return;
+    canvasEl.width = canvasEl.parentElement.clientWidth;
+    canvasEl.height = viewHeight;
+    console.log(`[Resize] Canvas ${canvasEl.width}x${canvasEl.height}`);
+    draw();
+  }
+
+  // Load waveform peaks from audio URL via Web Audio API
+  async function loadWaveform(url) {
+    console.log('[Waveform] Loading from', url);
+    try {
+      const resp = await fetch(url);
+      const arrayBuffer = await resp.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+      audioCtx.close();
+
+      // Downsample to ~1000 peaks per second (plenty for visual)
+      const rawData = decoded.getChannelData(0);
+      const peaksPerSec = 200;
+      const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
+      const samplesPerPeak = Math.floor(rawData.length / totalPeaks);
+      const peaks = new Float32Array(totalPeaks);
+
+      for (let i = 0; i < totalPeaks; i++) {
+        let max = 0;
+        const start = i * samplesPerPeak;
+        const end = Math.min(start + samplesPerPeak, rawData.length);
+        for (let j = start; j < end; j++) {
+          const abs = Math.abs(rawData[j]);
+          if (abs > max) max = abs;
+        }
+        peaks[i] = max;
+      }
+
+      waveformPeaks = peaks;
+      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(1)}s audio`);
+      draw();
+    } catch (err) {
+      console.warn('[Waveform] Failed to load:', err);
+      waveformPeaks = [];
+    }
   }
 
   // ──── Lifecycle ──────────────────────────────
@@ -557,9 +827,25 @@
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
       bpm = data.bpm;
       gapMs = data.gap_ms;
+
+      // Store initial values and raw timings for BPM re-quantization
+      initialBpm = data.bpm;
+      initialGap = data.gap_ms;
+      bpmChanged = false;
+      rawTimings = data.syllable_timings || [];
+
+      // Extract pitches from parsed notes (non-break, in order) for re-quantization
+      pitchMap = notes.filter(n => n.type !== 'break').map(n => n.pitch);
+      console.log('[Step4] Stored', rawTimings.length, 'raw timings,', pitchMap.length, 'pitches for re-quantization');
       audioDuration = data.audio_duration;
       vocalUrl = data.vocal_url;
       console.log('[Step4] Vocal URL for playback:', vocalUrl);
+      computeTotalBeats();
+
+      // Load waveform
+      if (vocalUrl) {
+        loadWaveform(vocalUrl);
+      }
 
       // Always try to load reference notes (don't gate on store state)
       {
@@ -625,18 +911,20 @@
   }
 
   onMount(() => {
+    console.log('[Step4] onMount');
     if (canvasEl) {
       ctx = canvasEl.getContext('2d');
-      canvasEl.width = canvasEl.parentElement.clientWidth;
-      canvasEl.height = viewHeight;
+      resizeCanvas();
       loadData();
     }
     window.addEventListener('keydown', handleKeydown);
+    window.addEventListener('resize', resizeCanvas);
   });
 
   onDestroy(() => {
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
+    window.removeEventListener('resize', resizeCanvas);
   });
 
   // Reload when we enter this step
@@ -650,19 +938,60 @@
 
   <div class="toolbar">
     <div class="playback-controls">
-      <button class="tool-btn" on:click={() => seekPlayback(-5)} title="Back 5s (←)">⏪</button>
-      <button class="tool-btn" on:click={togglePlayback} title="Space">
+      <button class="tool-btn" on:click={() => { console.log('[UI] seek -5'); seekPlayback(-5); }} title="Back 5s (←)">⏪</button>
+      <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
         {isPlaying ? '⏸ Pause' : '▶ Play'}
       </button>
-      <button class="tool-btn" on:click={() => seekPlayback(5)} title="Forward 5s (→)">⏩</button>
-      <button class="tool-btn" on:click={stopPlayback}>⏹ Stop</button>
+      <button class="tool-btn" on:click={() => { console.log('[UI] seek +5'); seekPlayback(5); }} title="Forward 5s (→)">⏩</button>
+      <button class="tool-btn" on:click={() => { console.log('[UI] stop'); stopPlayback(); }}>⏹ Stop</button>
       <span class="time-display">{formatTime(currentTimeSec)}</span>
     </div>
 
     <div class="zoom-controls">
-      <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 1); draw(); }}>−</button>
+      <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 1); console.log('[UI] zoom-', zoom); draw(); }}>−</button>
       <span class="zoom-label">Zoom: {zoom.toFixed(1)}x</span>
-      <button class="tool-btn" on:click={() => { zoom = Math.min(100, zoom + 1); draw(); }}>+</button>
+      <button class="tool-btn" on:click={() => { zoom = Math.min(100, zoom + 1); console.log('[UI] zoom+', zoom); draw(); }}>+</button>
+    </div>
+
+    <div class="mode-controls">
+      <label>
+        <input type="checkbox" bind:checked={scrollMode} on:change={() => console.log('[UI] scrollMode', scrollMode)} />
+        Scroll
+      </label>
+      <label>
+        <input type="checkbox" bind:checked={showWaveform} on:change={() => { console.log('[UI] waveform', showWaveform); draw(); }} />
+        Wave
+      </label>
+    </div>
+
+    <div class="speed-controls">
+      <span class="speed-label">Speed</span>
+      {#each [0.25, 0.5, 0.75, 1.0, 1.5, 2.0] as rate}
+        <button
+          class="tool-btn sm"
+          class:active={playbackRate === rate}
+          on:click={() => setPlaybackRate(rate)}
+        >{rate}x</button>
+      {/each}
+    </div>
+
+    <div class="bpm-controls">
+      <span class="bpm-label">BPM</span>
+      <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); console.log('[UI] bpm-', bpm); handleBpmGapChange(); }}>−</button>
+      <input type="number" class="bpm-input" bind:value={bpm} on:change={() => { console.log('[UI] bpm input', bpm); handleBpmGapChange(); }} step="1" min="10" max="1000" />
+      <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; console.log('[UI] bpm+', bpm); handleBpmGapChange(); }}>+</button>
+
+      <span class="bpm-label gap-label">GAP</span>
+      <button class="tool-btn sm" on:click={() => { gapMs = Math.max(0, gapMs - 100); console.log('[UI] gap-', gapMs); handleBpmGapChange(); }}>−</button>
+      <input type="number" class="gap-input" bind:value={gapMs} on:change={() => { console.log('[UI] gap input', gapMs); handleBpmGapChange(); }} step="100" min="0" />
+      <button class="tool-btn sm" on:click={() => { gapMs = gapMs + 100; console.log('[UI] gap+', gapMs); handleBpmGapChange(); }}>+</button>
+      <span class="bpm-label">ms</span>
+
+      {#if bpmChanged}
+        <button class="tool-btn apply-btn" on:click={handleApplyBpm} disabled={applyingBpm}>
+          {applyingBpm ? '⏳' : '✓'} Apply
+        </button>
+      {/if}
     </div>
 
     {#if referenceNotes.length > 0}
@@ -697,6 +1026,20 @@
     ></canvas>
   </div>
 
+  <!-- Scrollbar -->
+  <div class="scrollbar-container">
+    <input
+      type="range"
+      class="scroll-range"
+      bind:this={scrollBarEl}
+      min="0"
+      max={totalBeats}
+      step="1"
+      value={scrollX / zoom}
+      on:input={handleScrollbar}
+    />
+  </div>
+
   <div class="legend">
     <span class="legend-item"><span class="dot blue"></span> Normal note</span>
     <span class="legend-item"><span class="dot yellow"></span> Edited note</span>
@@ -716,14 +1059,17 @@
     {@const firstTimeSec = gapMs / 1000 + (firstBeat * 60) / bpm}
     {@const lastTimeSec = gapMs / 1000 + (lastBeat * 60) / bpm}
     <div class="stats-bar">
-      <span>Generated: BPM {bpm.toFixed(1)} | GAP {gapMs}ms | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}</span>
+      <span>
+        {bpmChanged ? '⚠ Modified: ' : 'Generated: '}BPM {(bpm ?? 0).toFixed(1)}{bpmChanged ? ` (was ${(initialBpm ?? 0).toFixed(1)})` : ''} | GAP {gapMs ?? 0}ms{bpmChanged ? ` (was ${initialGap ?? 0}ms)` : ''} | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}
+        {#if bpmChanged}<em style="color: #fdd835"> — click Apply to save</em>{/if}
+      </span>
       {#if referenceNotes.length > 0}
         {@const refRealNotes = referenceNotes.filter(n => !n.type)}
         {@const refFirst = refRealNotes.length > 0 ? refRealNotes[0] : null}
         {@const refLast = refRealNotes.length > 0 ? refRealNotes[refRealNotes.length - 1] : null}
         {@const refFirstTimeSec = refFirst ? (refGapMs / 1000 + (refFirst.original_start_beat * 60) / refBpm) : 0}
         {@const refLastTimeSec = refLast ? (refGapMs / 1000 + ((refLast.original_start_beat + refLast.original_duration) * 60) / refBpm) : 0}
-        <span>Reference: BPM {refBpm.toFixed(1)} | GAP {refGapMs}ms | {formatTime(refFirstTimeSec)}–{formatTime(refLastTimeSec)}</span>
+        <span>Reference: BPM {(refBpm ?? 0).toFixed(1)} | GAP {refGapMs ?? 0}ms | {formatTime(refFirstTimeSec)}–{formatTime(refLastTimeSec)}</span>
       {/if}
     </div>
   {/if}
@@ -734,7 +1080,7 @@
   {/if}
 
   <div class="help">
-    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Scroll to pan • Ctrl+Scroll to zoom</p>
+    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: move cursor ±5s (Shift: ±1s) • Space: play/pause • Toggle Scroll / Wave</p>
   </div>
 </div>
 
@@ -813,6 +1159,56 @@
     width: 100%;
   }
 
+  .scrollbar-container {
+    padding: 0;
+    background: #12121e;
+    border: 1px solid #333;
+    border-top: none;
+  }
+
+  .scroll-range {
+    width: 100%;
+    height: 18px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+    margin: 0;
+    display: block;
+  }
+
+  .scroll-range::-webkit-slider-runnable-track {
+    height: 6px;
+    background: #1a1a2e;
+    border-radius: 3px;
+  }
+
+  .scroll-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 40px;
+    height: 14px;
+    background: #4fc3f7;
+    border-radius: 4px;
+    margin-top: -4px;
+    cursor: grab;
+  }
+
+  .scroll-range::-moz-range-track {
+    height: 6px;
+    background: #1a1a2e;
+    border-radius: 3px;
+  }
+
+  .scroll-range::-moz-range-thumb {
+    width: 40px;
+    height: 14px;
+    background: #4fc3f7;
+    border-radius: 4px;
+    border: none;
+    cursor: grab;
+  }
+
   .legend {
     display: flex;
     gap: 1.5rem;
@@ -851,6 +1247,113 @@
 
   .ref-toggle input[type="checkbox"] {
     margin-right: 0.3rem;
+  }
+
+  .mode-controls {
+    font-size: 0.8rem;
+    color: #aaa;
+    border-left: 1px solid #333;
+    padding-left: 0.5rem;
+  }
+
+  .mode-controls label {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .speed-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    border-left: 1px solid #333;
+    padding-left: 0.5rem;
+  }
+
+  .speed-label {
+    color: #aaa;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+
+  .tool-btn.sm.active {
+    background: #4fc3f7;
+    color: #0d1117;
+    border-color: #4fc3f7;
+  }
+
+  .bpm-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0 0.4rem;
+    border-left: 1px solid #333;
+  }
+
+  .bpm-label {
+    color: #aaa;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+
+  .gap-label {
+    margin-left: 0.6rem;
+  }
+
+  .bpm-input, .gap-input {
+    width: 60px;
+    padding: 0.25rem 0.3rem;
+    background: #1a1a2e;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #4fc3f7;
+    font-family: monospace;
+    font-size: 0.8rem;
+    text-align: center;
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .gap-input {
+    width: 70px;
+  }
+
+  .bpm-input::-webkit-inner-spin-button,
+  .bpm-input::-webkit-outer-spin-button,
+  .gap-input::-webkit-inner-spin-button,
+  .gap-input::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .bpm-input:focus, .gap-input:focus {
+    outline: none;
+    border-color: #4fc3f7;
+  }
+
+  .tool-btn.sm {
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    min-width: 22px;
+  }
+
+  .apply-btn {
+    background: #2e7d32 !important;
+    color: #fff !important;
+    margin-left: 0.4rem;
+    font-weight: 600;
+  }
+
+  .apply-btn:hover {
+    background: #388e3c !important;
+  }
+
+  .apply-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
   }
 
   .help {

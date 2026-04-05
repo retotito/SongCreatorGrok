@@ -20,6 +20,149 @@ os.makedirs(REFERENCE_DIR, exist_ok=True)
 
 
 # ────────────────────────────────────────────────────────────
+# Beat ↔ Time helpers
+# ────────────────────────────────────────────────────────────
+def _beat_to_sec(beat: float, bpm: float, gap_ms: float) -> float:
+    """Convert an Ultrastar beat number to absolute time in seconds."""
+    return gap_ms / 1000.0 + beat * 15.0 / bpm
+
+
+def _clean_word(w: str) -> str:
+    """Normalize a word for comparison: lowercase, strip punctuation, normalize contractions."""
+    w = w.lower().replace('\u2019', "'").replace('\u2018', "'")
+    # Strip leading apostrophe/quote (e.g. 'Cause -> cause)
+    w = w.lstrip("'\"")
+    # Normalize common contractions
+    w = re.sub(r"[^\w']", '', w)
+    # Handle "you're" matching "you" etc - strip trailing contractions for fuzzy match
+    return w
+
+
+# ────────────────────────────────────────────────────────────
+# MS-based timing comparison (BPM-independent)
+# ────────────────────────────────────────────────────────────
+def compare_timing_ms(syllable_timings: list, reference_content: str) -> dict:
+    """Compare AI syllable_timings (in seconds) against a reference Ultrastar file.
+
+    Both sides are converted to absolute seconds, so this comparison is
+    completely independent of BPM quantisation.
+
+    Args:
+        syllable_timings: list of dicts with 'syllable', 'start', 'end' (seconds)
+        reference_content: raw Ultrastar .txt content
+
+    Returns:
+        dict with summary stats and per-note comparison details
+    """
+    parsed = parse_ultrastar_file(reference_content)
+    ref_bpm = parsed["bpm"]
+    ref_gap = parsed["gap"]
+
+    # Convert reference notes to seconds
+    ref_list = []
+    for n in parsed["notes"]:
+        syl = n["syllable"]
+        c = _clean_word(syl)
+        if not c:
+            continue
+        start_sec = _beat_to_sec(n["start_beat"], ref_bpm, ref_gap)
+        end_sec = _beat_to_sec(n["start_beat"] + n["duration"], ref_bpm, ref_gap)
+        ref_list.append({
+            "syl": syl, "clean": c,
+            "start": start_sec, "end": end_sec,
+            "pitch": n["pitch"],
+        })
+
+    # Build AI list
+    ai_list = []
+    for t in syllable_timings:
+        c = _clean_word(t.get("syllable", ""))
+        if not c:
+            continue
+        ai_list.append({
+            "syl": t["syllable"], "clean": c,
+            "start": t["start"], "end": t["end"],
+        })
+
+    if not ai_list or not ref_list:
+        return {"matched": 0, "total_ai": len(ai_list), "total_ref": len(ref_list),
+                "message": "No syllables to compare"}
+
+    # Sequential word-content matching with lookahead
+    a_idx = r_idx = 0
+    matched = []
+
+    def _fuzzy_eq(a: str, b: str) -> bool:
+        """Check if two cleaned words match, allowing contraction differences."""
+        if a == b:
+            return True
+        # one is prefix of the other (you vs you're -> you vs youre)
+        if a.startswith(b) or b.startswith(a):
+            return True
+        return False
+
+    while a_idx < len(ai_list) and r_idx < len(ref_list):
+        ac = ai_list[a_idx]["clean"]
+        rc = ref_list[r_idx]["clean"]
+
+        if _fuzzy_eq(ac, rc):
+            dt = ai_list[a_idx]["start"] - ref_list[r_idx]["start"]
+            matched.append({
+                "syllable": ai_list[a_idx]["syl"],
+                "ai_start": round(ai_list[a_idx]["start"], 4),
+                "ref_start": round(ref_list[r_idx]["start"], 4),
+                "dt": round(dt, 4),
+                "abs_dt": round(abs(dt), 4),
+            })
+            a_idx += 1
+            r_idx += 1
+        else:
+            found = False
+            for look in range(1, 8):
+                if r_idx + look < len(ref_list) and _fuzzy_eq(ref_list[r_idx + look]["clean"], ac):
+                    r_idx += look
+                    found = True
+                    break
+            if not found:
+                for look in range(1, 8):
+                    if a_idx + look < len(ai_list) and _fuzzy_eq(ai_list[a_idx + look]["clean"], rc):
+                        a_idx += look
+                        found = True
+                        break
+            if not found:
+                a_idx += 1
+                r_idx += 1
+
+    if not matched:
+        return {"matched": 0, "total_ai": len(ai_list), "total_ref": len(ref_list),
+                "message": "No syllables content-matched"}
+
+    abs_dts = [m["abs_dt"] for m in matched]
+    dts = [m["dt"] for m in matched]
+
+    return {
+        "matched": len(matched),
+        "total_ai": len(ai_list),
+        "total_ref": len(ref_list),
+        "ref_bpm": ref_bpm,
+        "ref_gap_ms": ref_gap,
+        "mean_error_sec": round(statistics.mean(abs_dts), 4),
+        "median_error_sec": round(statistics.median(abs_dts), 4),
+        "mean_drift_sec": round(statistics.mean(dts), 4),
+        "max_error_sec": round(max(abs_dts), 4),
+        "within_100ms": sum(1 for d in abs_dts if d <= 0.1),
+        "within_200ms": sum(1 for d in abs_dts if d <= 0.2),
+        "within_500ms": sum(1 for d in abs_dts if d <= 0.5),
+        "within_1s": sum(1 for d in abs_dts if d <= 1.0),
+        "over_1s": sum(1 for d in abs_dts if d > 1.0),
+        "over_2s": sum(1 for d in abs_dts if d > 2.0),
+        "pct_within_200ms": round(sum(1 for d in abs_dts if d <= 0.2) / len(abs_dts) * 100, 1),
+        "pct_within_500ms": round(sum(1 for d in abs_dts if d <= 0.5) / len(abs_dts) * 100, 1),
+        "details": matched[:20],  # only first 20 for the JSON response
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # Parse Ultrastar .txt
 # ────────────────────────────────────────────────────────────
 def parse_ultrastar_file(content: str) -> dict:

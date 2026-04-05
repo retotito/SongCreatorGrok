@@ -48,14 +48,52 @@ DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 CORRECTIONS_DIR = os.path.join(os.path.dirname(__file__), "corrections")
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 REFERENCE_DIR = os.path.join(os.path.dirname(__file__), "reference_songs")
+SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "sessions")
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 os.makedirs(CORRECTIONS_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REFERENCE_DIR, exist_ok=True)
+os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-# In-memory session store (simple dict for now)
+# In-memory session store
 sessions: dict = {}
+
+
+def save_session(session_id: str):
+    """Persist a session to disk as JSON."""
+    session = sessions.get(session_id)
+    if not session:
+        return
+    path = os.path.join(SESSIONS_DIR, f"{session_id}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(session, f, default=str)
+    except Exception as e:
+        log_step("PERSIST", f"Failed to save session {session_id}: {e}")
+
+
+def load_sessions():
+    """Load all sessions from disk on startup."""
+    count = 0
+    for fname in os.listdir(SESSIONS_DIR):
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(SESSIONS_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                session = json.load(f)
+            sid = session.get("id", fname.replace(".json", ""))
+            sessions[sid] = session
+            count += 1
+        except Exception as e:
+            log_step("PERSIST", f"Failed to load {fname}: {e}")
+    if count:
+        log_step("PERSIST", f"Restored {count} sessions from disk")
+
+
+# Load saved sessions on import
+load_sessions()
 
 
 # ────────────────────────────────────────────────────────────
@@ -65,7 +103,7 @@ sessions: dict = {}
 async def health_check():
     """Health check endpoint."""
     from services.pitch_detection import CREPE_AVAILABLE
-    from services.alignment import MFA_AVAILABLE
+    from services.alignment import _check_mfa
     from services.vocal_separation import DEMUCS_AVAILABLE
     
     return {
@@ -73,7 +111,7 @@ async def health_check():
         "version": "2.0.0",
         "models": {
             "crepe": CREPE_AVAILABLE,
-            "mfa": MFA_AVAILABLE,
+            "mfa": _check_mfa(),
             "demucs": DEMUCS_AVAILABLE,
         }
     }
@@ -105,6 +143,7 @@ async def upload_audio(audio: UploadFile = File(...)):
     }
     
     log_step("UPLOAD", f"Session {session_id}: uploaded {audio.filename} ({len(content)} bytes)")
+    save_session(session_id)
     
     return {
         "status": "ok",
@@ -133,6 +172,7 @@ async def extract_vocals(session_id: str):
         
         session["vocal_audio"] = vocal_path
         session["status"] = "vocals_extracted"
+        save_session(session_id)
         
         return {
             "status": "ok",
@@ -141,6 +181,7 @@ async def extract_vocals(session_id: str):
         }
     except Exception as e:
         session["status"] = "extraction_failed"
+        save_session(session_id)
         raise ServiceError("Vocal extraction failed", str(e))
 
 
@@ -162,6 +203,7 @@ async def upload_corrected_vocals(session_id: str, vocals: UploadFile = File(...
     session["status"] = "vocals_extracted"
     
     log_step("UPLOAD", f"Session {session_id}: uploaded corrected vocals ({len(content)} bytes)")
+    save_session(session_id)
     
     return {"status": "ok", "session_id": session_id}
 
@@ -307,6 +349,7 @@ async def transcribe_audio(session_id: str, language: str = Form("en")):
         
         # Save word timestamps to session for use during alignment
         session["whisper_words"] = all_words
+        save_session(session_id)
         
         # Also save to debug file
         debug_dir = os.path.join(os.path.dirname(__file__), 'downloads')
@@ -363,7 +406,7 @@ async def submit_lyrics(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    from services.alignment import parse_lyrics
+    from services.alignment_whisper import parse_lyrics
     
     parsed = parse_lyrics(lyrics)
     flat_count = sum(len(line) for line in parsed)
@@ -374,6 +417,7 @@ async def submit_lyrics(
     session["language"] = language
     session["parsed_lyrics"] = parsed
     session["status"] = "lyrics_submitted"
+    save_session(session_id)
     
     log_step("LYRICS", f"Session {session_id}: {flat_count} syllables, {len(parsed)} lines")
     
@@ -433,6 +477,93 @@ async def get_test_vocal():
     return FileResponse(path, media_type="audio/wav")
 
 
+@app.post("/api/resume-last")
+async def resume_last_session():
+    """Create a new session cloned from the most recent one.
+    
+    Reuses audio files, whisper word timestamps, lyrics, and metadata
+    so you can skip upload + transcription when re-generating.
+    """
+    if not sessions:
+        raise HTTPException(status_code=404, detail="No previous sessions found")
+    
+    # Find the most recent session
+    last = max(sessions.values(), key=lambda s: s.get("created_at", 0))
+    
+    # Verify audio still exists
+    vocal = last.get("vocal_audio")
+    original = last.get("original_audio")
+    if not vocal or not os.path.exists(vocal):
+        raise HTTPException(status_code=404, detail="Last session's audio files no longer exist")
+    
+    # Create new session reusing the same files
+    session_id = str(uuid.uuid4())[:8]
+    new_session = {
+        "id": session_id,
+        "original_audio": original,
+        "vocal_audio": vocal,
+        "lyrics": last.get("lyrics"),
+        "artist": last.get("artist", "Unknown Artist"),
+        "title": last.get("title", "Unknown Song"),
+        "language": last.get("language", "en"),
+        "whisper_words": last.get("whisper_words", []),
+        "parsed_lyrics": last.get("parsed_lyrics"),
+        "reference_content": last.get("reference_content"),
+        "reference_filename": last.get("reference_filename"),
+        "result": last.get("result"),  # carry over generation result
+        "status": "generated" if last.get("result") else ("lyrics_submitted" if last.get("lyrics") else "vocals_extracted"),
+        "created_at": time.time(),
+    }
+    sessions[session_id] = new_session
+    save_session(session_id)
+
+    lyrics = last.get("lyrics", "")
+    syllable_count = 0
+    line_count = 0
+    if new_session.get("parsed_lyrics"):
+        syllable_count = sum(len(line) for line in new_session["parsed_lyrics"])
+        line_count = len(new_session["parsed_lyrics"])
+    
+    log_step("RESUME", f"New session {session_id} from {last['id']} "
+             f"(vocals={os.path.basename(vocal)}, "
+             f"{len(new_session.get('whisper_words', []))} whisper words, "
+             f"{syllable_count} syllables)")
+    
+    # Build reference info if available
+    reference_info = None
+    ref_content = new_session.get("reference_content")
+    ref_filename = new_session.get("reference_filename")
+    if ref_content:
+        try:
+            from services.reference_comparison import parse_ultrastar_file
+            parsed_ref = parse_ultrastar_file(ref_content)
+            reference_info = {
+                "filename": ref_filename,
+                "notes_count": len(parsed_ref["notes"]),
+                "bpm": parsed_ref["bpm"],
+                "gap": parsed_ref["gap"],
+            }
+        except Exception:
+            reference_info = {"filename": ref_filename, "notes_count": 0, "bpm": 0, "gap": 0}
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "from_session": last["id"],
+        "filename": os.path.basename(vocal),
+        "has_lyrics": bool(lyrics),
+        "lyrics": lyrics,
+        "artist": new_session["artist"],
+        "title": new_session["title"],
+        "language": new_session["language"],
+        "syllable_count": syllable_count,
+        "line_count": line_count,
+        "whisper_words": len(new_session.get("whisper_words", [])),
+        "reference": reference_info,
+        "has_result": last.get("result") is not None,
+    }
+
+
 @app.post("/api/load-test-session")
 async def load_test_session():
     """Create a session pre-loaded with test files (dev convenience)."""
@@ -448,7 +579,7 @@ async def load_test_session():
     with open(lyrics_path, "r") as f:
         lyrics = f.read()
     
-    from services.alignment import parse_lyrics
+    from services.alignment_whisper import parse_lyrics
     parsed = parse_lyrics(lyrics)
     
     sessions[session_id] = {
@@ -504,9 +635,10 @@ async def generate_ultrastar_files(session_id: str):
     try:
         # Step 3a: BPM Detection
         log_step("GENERATE", "Step 1/4: BPM detection")
-        from services.bpm_detection import detect_bpm, get_audio_duration
+        from services.bpm_detection import detect_bpm, get_audio_duration, refine_bpm
         
-        bpm = detect_bpm(vocal_path)
+        original_path = session.get("original_audio")
+        bpm = detect_bpm(vocal_path, original_audio_path=original_path)
         audio_duration = get_audio_duration(vocal_path)
         
         # Step 3b: Pitch Detection
@@ -515,16 +647,31 @@ async def generate_ultrastar_files(session_id: str):
         
         pitch_data = detect_pitches_crepe(vocal_path)
         
-        # Step 3c: Forced Alignment
+        # Step 3c: Alignment
         log_step("GENERATE", "Step 3/4: Syllable alignment")
-        from services.alignment import align_lyrics_to_audio
-        
-        # Pass Whisper word timestamps as alignment anchors
         whisper_words = session.get("whisper_words", [])
-        if whisper_words:
-            log_step("GENERATE", f"Using {len(whisper_words)} Whisper word timestamps as alignment anchors")
         
-        syllable_timings = align_lyrics_to_audio(vocal_path, lyrics, language, whisper_words=whisper_words)
+        # Primary: Whisper-based alignment (no chunk drift, ~150ms accuracy)
+        # Fallback: MFA chunked alignment (if no Whisper words available)
+        syllable_timings = None
+        if whisper_words:
+            log_step("GENERATE", f"Using Whisper alignment ({len(whisper_words)} words)")
+            try:
+                from services.alignment_whisper import align_whisper
+                syllable_timings = align_whisper(lyrics, whisper_words, language)
+                if syllable_timings:
+                    log_step("GENERATE", f"Whisper alignment: {len(syllable_timings)} syllables")
+                else:
+                    log_step("GENERATE", "Whisper alignment returned empty, falling back to MFA")
+            except Exception as e:
+                log_step("GENERATE", f"Whisper alignment failed: {e}, falling back to MFA")
+                import traceback
+                traceback.print_exc()
+        
+        if not syllable_timings:
+            log_step("GENERATE", "Using MFA alignment (fallback)")
+            from services.alignment import align_lyrics_to_audio
+            syllable_timings = align_lyrics_to_audio(vocal_path, lyrics, language, whisper_words=whisper_words)
         
         # Calculate GAP from first syllable
         gap_ms = 0
@@ -532,9 +679,12 @@ async def generate_ultrastar_files(session_id: str):
             gap_ms = int(syllable_timings[0]["start"] * 1000)
             log_step("GENERATE", f"GAP: {gap_ms}ms (first syllable at {syllable_timings[0]['start']:.3f}s)")
         
+        # Refine BPM using syllable timestamps (can recover exact BPM)
+        bpm = refine_bpm(syllable_timings, gap_ms, bpm)
+        
         # Add line_index to timings if not present
-        from services.alignment import parse_lyrics
-        parsed = parse_lyrics(lyrics)
+        from services.alignment_whisper import parse_lyrics as parse_lyrics_fast
+        parsed = parse_lyrics_fast(lyrics)
         syllable_idx = 0
         for line_idx, line in enumerate(parsed):
             for _ in line:
@@ -560,13 +710,16 @@ async def generate_ultrastar_files(session_id: str):
         
         # Determine pitch/alignment methods (from actual results, not just availability)
         from services.pitch_detection import CREPE_AVAILABLE
-        from services.alignment import MFA_AVAILABLE
+        from services.alignment import _check_mfa as check_mfa_avail
         pitch_method = "CREPE" if CREPE_AVAILABLE else "PYIN (fallback)"
         
         # Check what method was actually used by looking at syllable_timings
         if syllable_timings:
             methods_used = set(t.get("method", "unknown") for t in syllable_timings)
-            if "mfa" in methods_used:
+            if "whisper" in methods_used:
+                whisper_count = sum(1 for t in syllable_timings if t.get("method") == "whisper")
+                align_method = f"Whisper ({whisper_count}/{len(syllable_timings)} syllables)"
+            elif "mfa" in methods_used:
                 mfa_count = sum(1 for t in syllable_timings if t.get("method") == "mfa")
                 align_method = f"MFA (chunked, {mfa_count}/{len(syllable_timings)} syllables)"
             elif "fallback_energy" in methods_used:
@@ -576,7 +729,7 @@ async def generate_ultrastar_files(session_id: str):
             else:
                 align_method = f"Mixed ({', '.join(methods_used)})"
         else:
-            align_method = "MFA" if MFA_AVAILABLE else "Even distribution (fallback)"
+            align_method = "MFA" if check_mfa_avail() else "Even distribution (fallback)"
         
         # Generate summary
         summary_content = generate_processing_summary(
@@ -624,7 +777,24 @@ async def generate_ultrastar_files(session_id: str):
             "elapsed_seconds": elapsed,
             "syllable_timings": syllable_timings,
             "ultrastar_content": txt_content,
+            "pitch_data": pitch_data,
         }
+        save_session(session_id)
+        
+        # ── Auto-compare with reference (ms-based, BPM-independent) ──
+        ms_comparison = None
+        ref_content = session.get("reference_content")
+        if ref_content and syllable_timings:
+            try:
+                from services.reference_comparison import compare_timing_ms
+                ms_comparison = compare_timing_ms(syllable_timings, ref_content)
+                session["result"]["ms_comparison"] = ms_comparison
+                save_session(session_id)
+                log_step("GENERATE", f"MS comparison: {ms_comparison['matched']} matched, "
+                         f"median {ms_comparison.get('median_error_sec', '?')}s, "
+                         f"{ms_comparison.get('pct_within_200ms', '?')}% ≤200ms")
+            except Exception as cmp_err:
+                log.warning(f"MS comparison failed: {cmp_err}")
         
         return {
             "status": "ok",
@@ -643,6 +813,7 @@ async def generate_ultrastar_files(session_id: str):
                 "vocals": f"/api/preview-audio/{session_id}/vocals",
             },
             "ultrastar_preview": txt_content[:2000],
+            "ms_comparison": ms_comparison,
         }
     except Exception as e:
         session["status"] = "generation_failed"
@@ -734,6 +905,66 @@ async def save_corrections(session_id: str, corrections: dict = None):
 
 
 # ────────────────────────────────────────────────────────────
+# Step 4b: Apply BPM / GAP (re-quantize from raw ms timings)
+# ────────────────────────────────────────────────────────────
+@app.post("/api/apply-bpm/{session_id}")
+async def apply_bpm(session_id: str, bpm: float = Form(...), gap_ms: int = Form(...)):
+    """Regenerate Ultrastar content with user-specified BPM and GAP.
+    
+    Uses the stored raw syllable_timings (in seconds) and pitch_data to
+    re-quantize notes to the new beat grid.  This lets the user adjust BPM
+    in the piano-roll editor and then export a clean Ultrastar file.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise ServiceError("No generation result", "Run generation first")
+
+    syllable_timings = result.get("syllable_timings")
+    pitch_data = result.get("pitch_data")
+    if not syllable_timings:
+        raise ServiceError("No syllable timings available")
+
+    # Regenerate Ultrastar content with new BPM / GAP
+    from services.ultrastar import generate_ultrastar, generate_processing_summary
+    ultrastar_content = generate_ultrastar(
+        syllable_timings=syllable_timings,
+        pitch_data=pitch_data,
+        bpm=bpm,
+        gap_ms=gap_ms,
+        artist=session.get("artist", "Unknown Artist"),
+        title=session.get("title", "Unknown Song"),
+        language=session.get("language", "English"),
+    )
+
+    # Save the new txt file
+    timestamp = int(time.time())
+    txt_filename = f"song_{timestamp}.txt"
+    txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(ultrastar_content)
+
+    # Update session result
+    result["bpm"] = bpm
+    result["gap_ms"] = gap_ms
+    result["ultrastar_content"] = ultrastar_content
+    result["txt_file"] = txt_filename
+
+    log_step("APPLY-BPM", f"Session {session_id}: BPM={bpm:.2f}, GAP={gap_ms}ms → {txt_filename}")
+    save_session(session_id)
+
+    return {
+        "status": "ok",
+        "bpm": bpm,
+        "gap_ms": gap_ms,
+        "ultrastar_content": ultrastar_content,
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # Step 5: Export & Download
 # ────────────────────────────────────────────────────────────
 @app.post("/api/export/{session_id}")
@@ -814,6 +1045,7 @@ async def upload_reference(session_id: str, reference: UploadFile = File(...)):
     content = (await reference.read()).decode("utf-8", errors="replace")
     session["reference_content"] = content
     session["reference_filename"] = reference.filename
+    save_session(session_id)
     
     # Parse to validate
     from services.reference_comparison import parse_ultrastar_file, compare_lyrics

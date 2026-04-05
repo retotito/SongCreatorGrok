@@ -1,6 +1,26 @@
 <script>
   import { sessionId, generationResult, referenceData, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationComparison, generationShowPreview } from '../stores/appStore.js';
-  import { generateUltrastar, compareReference } from '../services/api.js';
+  import { generateUltrastar, compareReference, uploadReference } from '../services/api.js';
+
+  async function handleReferenceUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file || !$sessionId) return;
+    errorMessage.set('');
+    try {
+      const result = await uploadReference($sessionId, file);
+      referenceData.set({
+        uploaded: true,
+        filename: result.filename,
+        notesCount: result.notes_count,
+        bpm: result.bpm,
+        gap: result.gap,
+        comparison: null,
+        lyricsComparison: result.lyrics_comparison || null,
+      });
+    } catch (err) {
+      errorMessage.set(err.message);
+    }
+  }
 
   // Use store-backed variables so data survives navigation
   $: logMessages = $generationLog;
@@ -38,9 +58,19 @@
       generationShowPreview.set(true);
       processingStatus.set('Generation complete!');
 
-      // Auto-compare with reference if available
+      // Show ms-based timing comparison if returned from backend
+      if (result.ms_comparison) {
+        const mc = result.ms_comparison;
+        addLog(`⏱️ Timing comparison (ms, BPM-independent):`);
+        addLog(`   Matched: ${mc.matched}/${mc.total_ref} syllables`);
+        addLog(`   Median error: ${(mc.median_error_sec * 1000).toFixed(0)}ms | Mean: ${(mc.mean_error_sec * 1000).toFixed(0)}ms`);
+        addLog(`   ≤200ms: ${mc.within_200ms} (${mc.pct_within_200ms}%) | ≤500ms: ${mc.within_500ms} (${mc.pct_within_500ms}%)`);
+        addLog(`   Drift: ${mc.mean_drift_sec > 0 ? '+' : ''}${(mc.mean_drift_sec * 1000).toFixed(0)}ms | Max error: ${(mc.max_error_sec * 1000).toFixed(0)}ms`);
+      }
+
+      // Auto-compare with reference if available (beat-based)
       if ($referenceData.uploaded) {
-        addLog('📚 Comparing with reference file...');
+        addLog('📚 Comparing with reference file (beat-based)...');
         try {
           const comp = await compareReference($sessionId);
           comparisonResult = comp.comparison;
@@ -94,6 +124,18 @@
     </ol>
   </div>
 
+  <!-- Reference file upload (optional) -->
+  <div class="reference-section">
+    {#if $referenceData.uploaded}
+      <p class="reference-info">📚 Reference: {$referenceData.filename} ({$referenceData.notesCount} notes, BPM: {$referenceData.bpm})</p>
+    {:else}
+      <label class="btn btn-reference">
+        📄 Upload Reference .txt (optional)
+        <input type="file" accept=".txt" on:change={handleReferenceUpload} hidden />
+      </label>
+    {/if}
+  </div>
+
   <button
     class="btn btn-primary big"
     on:click={handleGenerate}
@@ -101,6 +143,15 @@
   >
     {$isProcessing ? '⏳ Processing...' : '🚀 Generate Ultrastar Files'}
   </button>
+
+  {#if $generationResult && !$isProcessing}
+    <button
+      class="btn btn-secondary"
+      on:click={() => { console.log('[Step3] Jump to editor'); currentStep.set(4); }}
+    >
+      🎹 Open in Piano Roll Editor
+    </button>
+  {/if}
 
   {#if logMessages.length > 0}
     <div class="log-panel">
@@ -140,6 +191,59 @@
 
       <div class="ultrastar-preview">
         <pre>{$generationResult.ultrastar_preview}</pre>
+      </div>
+    </div>
+  {/if}
+
+  {#if $generationResult?.ms_comparison}
+    {@const mc = $generationResult.ms_comparison}
+    <div class="ms-comparison-panel">
+      <h3>⏱️ Timing Accuracy (ms, BPM-independent)</h3>
+      <div class="stats-row">
+        <div class="stat">
+          <span class="stat-label">Matched</span>
+          <span class="stat-value">{mc.matched}/{mc.total_ref}</span>
+          <span class="stat-unit">syllables</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Median Error</span>
+          <span class="stat-value" class:good={mc.median_error_sec <= 0.2} class:warn={mc.median_error_sec > 0.2 && mc.median_error_sec <= 0.5} class:bad={mc.median_error_sec > 0.5}>
+            {(mc.median_error_sec * 1000).toFixed(0)}ms
+          </span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">≤200ms</span>
+          <span class="stat-value" class:good={mc.pct_within_200ms >= 70} class:warn={mc.pct_within_200ms >= 40 && mc.pct_within_200ms < 70} class:bad={mc.pct_within_200ms < 40}>
+            {mc.pct_within_200ms}%
+          </span>
+          <span class="stat-unit">{mc.within_200ms} notes</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Drift</span>
+          <span class="stat-value">{mc.mean_drift_sec > 0 ? '+' : ''}{(mc.mean_drift_sec * 1000).toFixed(0)}ms</span>
+        </div>
+      </div>
+      <div class="ms-details">
+        <p>≤100ms: {mc.within_100ms} | ≤500ms: {mc.within_500ms} ({mc.pct_within_500ms}%) | >1s: {mc.over_1s} | >2s: {mc.over_2s}</p>
+        <p>Mean error: {(mc.mean_error_sec * 1000).toFixed(0)}ms | Max: {(mc.max_error_sec * 1000).toFixed(0)}ms</p>
+        {#if mc.ref_bpm}
+          <p>Ref BPM: {mc.ref_bpm} | Ref GAP: {mc.ref_gap_ms}ms</p>
+        {/if}
+        {#if mc.details && mc.details.length > 0}
+          <details>
+            <summary>First {mc.details.length} note comparisons</summary>
+            <div class="note-details-scroll">
+              {#each mc.details as d}
+                <div class="note-row" class:good-row={d.abs_dt <= 0.2} class:bad-row={d.abs_dt > 1}>
+                  <span class="note-syl">{d.syllable}</span>
+                  <span>AI: {d.ai_start.toFixed(3)}s</span>
+                  <span>Ref: {d.ref_start.toFixed(3)}s</span>
+                  <span class:positive={d.dt > 0} class:negative={d.dt < 0}>Δ{d.dt > 0 ? '+' : ''}{(d.dt * 1000).toFixed(0)}ms</span>
+                </div>
+              {/each}
+            </div>
+          </details>
+        {/if}
       </div>
     </div>
   {/if}
@@ -236,6 +340,17 @@
   .btn-primary:hover:not(:disabled) { background: #1565c0; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  .btn-secondary {
+    background: #2e7d32;
+    color: white;
+    width: 100%;
+    padding: 0.75rem;
+    font-size: 1rem;
+    margin-top: 0.5rem;
+  }
+
+  .btn-secondary:hover { background: #388e3c; }
+
   .log-panel {
     background: #0d1117;
     border: 1px solid #333;
@@ -311,6 +426,59 @@
     white-space: pre;
   }
 
+  .ms-comparison-panel {
+    border: 1px solid #00897b;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-top: 1rem;
+    background: #0d1f1a;
+  }
+
+  .ms-comparison-panel h3 {
+    color: #4db6ac;
+    margin: 0 0 0.75rem;
+  }
+
+  .ms-details {
+    font-size: 0.8rem;
+    color: #aaa;
+    margin-top: 0.75rem;
+  }
+
+  .ms-details p {
+    margin: 0.2rem 0;
+  }
+
+  .stat-value.good { color: #66bb6a; }
+  .stat-value.warn { color: #ffa726; }
+  .stat-value.bad { color: #ef5350; }
+
+  .note-details-scroll {
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 0.5rem;
+  }
+
+  .note-row {
+    font-family: 'Courier New', monospace;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.5rem;
+    display: flex;
+    gap: 1rem;
+    color: #999;
+  }
+
+  .note-row.good-row { color: #66bb6a; }
+  .note-row.bad-row { color: #ef5350; }
+  .note-syl { width: 80px; text-align: right; color: #ccc; }
+
+  details summary {
+    color: #4db6ac;
+    cursor: pointer;
+    font-size: 0.8rem;
+    margin-top: 0.5rem;
+  }
+
   .comparison-panel {
     border: 1px solid #7b1fa2;
     border-radius: 8px;
@@ -356,5 +524,31 @@
     margin-top: 1rem;
     color: #ef9a9a;
     text-align: center;
+  }
+
+  .reference-section {
+    margin-bottom: 1rem;
+  }
+
+  .reference-info {
+    color: #a5d6a7;
+    font-size: 0.9rem;
+  }
+
+  .btn-reference {
+    background: #37474f;
+    color: #b0bec5;
+    padding: 0.6rem 1.2rem;
+    border: 1px dashed #546e7a;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+    display: inline-block;
+  }
+
+  .btn-reference:hover {
+    background: #455a64;
+    border-color: #78909c;
   }
 </style>

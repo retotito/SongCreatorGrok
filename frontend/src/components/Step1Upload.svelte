@@ -1,6 +1,6 @@
 <script>
-  import { sessionId, uploadData, referenceData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
-  import { uploadAudio, extractVocals, uploadCorrectedVocals, getAudioUrl, loadTestSession, uploadReference } from '../services/api.js';
+  import { sessionId, uploadData, referenceData, currentStep, isProcessing, processingStatus, errorMessage, lyricsData, generationResult } from '../stores/appStore.js';
+  import { uploadAudio, extractVocals, uploadCorrectedVocals, getAudioUrl, uploadReference, resumeLastSession, getGenerationResult } from '../services/api.js';
 
   let dragOver = false;
   let audioPlayer;
@@ -116,21 +116,63 @@
     }
   }
 
-  async function handleLoadTest() {
+  async function handleResumeLast() {
     errorMessage.set('');
     isProcessing.set(true);
-    processingStatus.set('Loading test files...');
+    processingStatus.set('Resuming last session...');
 
     try {
-      const result = await loadTestSession();
+      const result = await resumeLastSession();
       sessionId.set(result.session_id);
       uploadData.set({
-        filename: 'test_vocal.wav',
+        filename: result.filename,
         hasVocals: true,
         vocalUrl: getAudioUrl(result.session_id, 'vocals'),
       });
-      // Jump to step 2 since lyrics are also loaded
-      currentStep.set(2);
+      // Restore reference data if carried over
+      if (result.reference) {
+        referenceData.set({
+          uploaded: true,
+          filename: result.reference.filename,
+          notesCount: result.reference.notes_count,
+          bpm: result.reference.bpm,
+          gap: result.reference.gap,
+          comparison: null,
+          lyricsComparison: null,
+        });
+      }
+      if (result.has_lyrics) {
+        lyricsData.set({
+          text: result.lyrics,
+          artist: result.artist,
+          title: result.title,
+          language: result.language,
+          syllableCount: result.syllable_count,
+          lineCount: result.line_count,
+          preview: [],
+        });
+        // If previous session had a generation result, load it and jump to step 3
+        if (result.has_result) {
+          try {
+            const genResult = await getGenerationResult(result.session_id);
+            console.log('[Step1] getGenerationResult response:', genResult);
+            if (genResult && genResult.status === 'ok') {
+              generationResult.set(genResult);
+              console.log('[Step1] Restored generation result, jumping to step 3');
+            } else {
+              console.warn('[Step1] Generation result not ready:', genResult?.status);
+            }
+          } catch (e) {
+            console.warn('[Step1] Could not restore generation result:', e);
+          }
+        } else {
+          console.log('[Step1] No previous generation result (has_result=false). Server may have restarted.');
+        }
+        // Jump to step 3 (generate) since lyrics are already submitted
+        currentStep.set(3);
+      } else {
+        currentStep.set(2);
+      }
       processingStatus.set('');
     } catch (err) {
       errorMessage.set(err.message);
@@ -207,8 +249,8 @@
 
     <div class="divider">or</div>
 
-    <button class="btn btn-test" on:click={handleLoadTest} disabled={$isProcessing}>
-      🧪 Load Test Files (Beautiful Day)
+    <button class="btn btn-test" on:click={handleResumeLast} disabled={$isProcessing}>
+      ⏩ Resume Last Session (skip transcription)
     </button>
 
   {:else if !$uploadData.hasVocals}
