@@ -287,11 +287,15 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
-# Step 2a: Whisper ASR Transcription
+# Step 2a: WhisperX ASR Transcription + Forced Alignment
 # ────────────────────────────────────────────────────────────
 @app.post("/api/transcribe/{session_id}")
 async def transcribe_audio(session_id: str, language: str = Form("en")):
-    """Transcribe vocal audio using Whisper ASR.
+    """Transcribe vocal audio using WhisperX with phoneme-level forced alignment.
+    
+    WhisperX provides ~50ms word boundaries (vs ~200ms for vanilla Whisper)
+    by running wav2vec2-based forced alignment after initial transcription.
+    Falls back to vanilla Whisper if WhisperX is unavailable.
     
     Returns the transcribed text with line breaks at phrase boundaries.
     """
@@ -304,25 +308,160 @@ async def transcribe_audio(session_id: str, language: str = Form("en")):
     if not audio_path or not os.path.exists(audio_path):
         raise HTTPException(status_code=404, detail="No audio file found. Upload audio first.")
     
+    # Map short language codes to Whisper language names
+    WHISPER_LANG_MAP = {
+        "en": "English", "de": "German", "fr": "French",
+        "es": "Spanish", "it": "Italian", "pt": "Portuguese",
+        "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
+        "zh": "Chinese",
+    }
+    
     log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
     
+    # --- Try WhisperX first (phoneme-level forced alignment) ---
+    try:
+        import whisperx
+        import torch
+        
+        device = "cpu"  # MPS has limited WhisperX support
+        compute_type = "int8"  # Efficient for CPU
+        model_name = "medium"
+        
+        log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
+        model = whisperx.load_model(model_name, device, compute_type=compute_type)
+        
+        # Load audio at WhisperX's expected sample rate
+        log_step("WHISPERX", "Loading audio...")
+        audio = whisperx.load_audio(audio_path)
+        
+        # Step 1: Initial transcription (same quality as vanilla Whisper)
+        log_step("WHISPERX", "Running transcription...")
+        result = model.transcribe(audio, batch_size=4, language=language)
+        
+        # Step 2: Forced alignment with wav2vec2 for precise word boundaries
+        log_step("WHISPERX", "Running forced alignment (wav2vec2)...")
+        align_model, align_metadata = whisperx.load_align_model(
+            language_code=language, device=device
+        )
+        result = whisperx.align(
+            result["segments"],
+            align_model,
+            align_metadata,
+            audio,
+            device,
+            return_char_alignments=True,  # character-level for syllable distribution
+        )
+        
+        # Free alignment model to save memory
+        del align_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Extract word-level and char-level timestamps
+        lines = []
+        all_words = []
+        all_chars = []
+        
+        for segment in result.get("segments", []):
+            text = segment.get("text", "").strip()
+            if text:
+                lines.append(text)
+            
+            # Word-level timestamps (phoneme-aligned, ~50ms accuracy)
+            for w in segment.get("words", []):
+                word_text = w.get("word", "").strip()
+                if not word_text:
+                    continue
+                start = w.get("start")
+                end = w.get("end")
+                if start is None or end is None:
+                    continue
+                all_words.append({
+                    "word": word_text,
+                    "start": round(start, 4),
+                    "end": round(end, 4),
+                    "score": round(w.get("score", 0.0), 4),
+                })
+            
+            # Character-level timestamps (for precise syllable splitting)
+            for c in segment.get("chars", []):
+                char_text = c.get("char", "")
+                start = c.get("start")
+                end = c.get("end")
+                if start is None or end is None:
+                    continue
+                all_chars.append({
+                    "char": char_text,
+                    "start": round(start, 4),
+                    "end": round(end, 4),
+                    "score": round(c.get("score", 0.0), 4),
+                })
+        
+        transcribed_text = "\n".join(lines)
+        
+        # Save to session
+        session["whisper_words"] = all_words
+        session["whisper_chars"] = all_chars
+        session["whisper_method"] = "whisperx"
+        save_session(session_id)
+        
+        # Debug output
+        debug_dir = os.path.join(os.path.dirname(__file__), 'downloads')
+        try:
+            debug_path = os.path.join(debug_dir, 'whisper_words.txt')
+            with open(debug_path, 'w') as f:
+                f.write(f"WHISPERX WORD TIMESTAMPS ({len(all_words)} words, {len(all_chars)} chars)\n{'='*60}\n\n")
+                f.write("WORDS:\n")
+                for w in all_words:
+                    dur = w['end'] - w['start']
+                    f.write(f"  {w['start']:8.3f} - {w['end']:8.3f}  ({dur:5.3f}s)  score={w['score']:.2f}  {w['word']}\n")
+                f.write(f"\nCHARACTERS ({len(all_chars)}):\n")
+                for c in all_chars[:200]:  # First 200 chars
+                    dur = c['end'] - c['start']
+                    f.write(f"  {c['start']:8.3f} - {c['end']:8.3f}  ({dur:5.3f}s)  '{c['char']}'\n")
+                if len(all_chars) > 200:
+                    f.write(f"  ... and {len(all_chars) - 200} more chars\n")
+            log_step("WHISPERX", f"Timestamps saved: {len(all_words)} words, {len(all_chars)} chars")
+        except Exception:
+            pass
+        
+        word_count = sum(len(line.split()) for line in lines)
+        
+        log_step("WHISPERX", f"Transcription complete: {len(lines)} lines, {word_count} words")
+        log_step("WHISPERX", f"  Alignment: {len(all_words)} words, {len(all_chars)} char timestamps")
+        if all_words:
+            avg_score = sum(w['score'] for w in all_words) / len(all_words)
+            log_step("WHISPERX", f"  Avg alignment score: {avg_score:.3f}")
+        if lines:
+            log_step("WHISPERX", f"  First line: '{lines[0][:80]}'")
+            log_step("WHISPERX", f"  Last line:  '{lines[-1][:80]}'")
+        
+        return JSONResponse({
+            "text": transcribed_text,
+            "lines": len(lines),
+            "words": word_count,
+            "language": language,
+            "language_name": WHISPER_LANG_MAP.get(language, language),
+            "model": f"whisperx-{model_name}",
+            "alignment": "wav2vec2",
+            "char_timestamps": len(all_chars),
+        })
+    
+    except ImportError:
+        log_step("WHISPER", "WhisperX not available, falling back to vanilla Whisper...")
+    except Exception as e:
+        import traceback
+        log_step("WHISPERX", f"WhisperX failed: {e}, falling back to vanilla Whisper")
+        log_step("WHISPERX", traceback.format_exc())
+    
+    # --- Fallback: vanilla Whisper ---
     try:
         import whisper
         
-        # Map short language codes to Whisper language names
-        WHISPER_LANG_MAP = {
-            "en": "English", "de": "German", "fr": "French",
-            "es": "Spanish", "it": "Italian", "pt": "Portuguese",
-            "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
-            "zh": "Chinese",
-        }
-        
-        # Load model (cached after first load)
         model_name = "medium"
         log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
         model = whisper.load_model(model_name)
         
-        # Transcribe with word-level timestamps
         log_step("WHISPER", "Running transcription...")
         result = model.transcribe(
             audio_path,
@@ -330,14 +469,12 @@ async def transcribe_audio(session_id: str, language: str = Form("en")):
             word_timestamps=True,
         )
         
-        # Build text with line breaks at segment boundaries
         lines = []
-        all_words = []  # word-level timestamps for alignment anchoring
+        all_words = []
         for segment in result.get("segments", []):
             text = segment.get("text", "").strip()
             if text:
                 lines.append(text)
-            # Extract word-level timestamps
             for w in segment.get("words", []):
                 all_words.append({
                     "word": w.get("word", "").strip(),
@@ -346,31 +483,26 @@ async def transcribe_audio(session_id: str, language: str = Form("en")):
                 })
         
         transcribed_text = "\n".join(lines)
-        
-        # Save word timestamps to session for use during alignment
         session["whisper_words"] = all_words
+        session["whisper_chars"] = []  # No char-level from vanilla Whisper
+        session["whisper_method"] = "whisper"
         save_session(session_id)
         
-        # Also save to debug file
+        # Debug output
         debug_dir = os.path.join(os.path.dirname(__file__), 'downloads')
         try:
             debug_path = os.path.join(debug_dir, 'whisper_words.txt')
             with open(debug_path, 'w') as f:
-                f.write(f"WHISPER WORD TIMESTAMPS ({len(all_words)} words)\n{'='*60}\n\n")
+                f.write(f"WHISPER (fallback) WORD TIMESTAMPS ({len(all_words)} words)\n{'='*60}\n\n")
                 for w in all_words:
                     dur = w['end'] - w['start']
                     f.write(f"  {w['start']:8.3f} - {w['end']:8.3f}  ({dur:5.3f}s)  {w['word']}\n")
-            log_step("WHISPER", f"Word timestamps saved: {len(all_words)} words -> {debug_path}")
+            log_step("WHISPER", f"Word timestamps saved: {len(all_words)} words")
         except Exception:
             pass
         
-        # Count words
         word_count = sum(len(line.split()) for line in lines)
-        
-        log_step("WHISPER", f"Transcription complete: {len(lines)} lines, {word_count} words")
-        if lines:
-            log_step("WHISPER", f"  First line: '{lines[0][:80]}'")
-            log_step("WHISPER", f"  Last line:  '{lines[-1][:80]}'")
+        log_step("WHISPER", f"Fallback transcription complete: {len(lines)} lines, {word_count} words")
         
         return JSONResponse({
             "text": transcribed_text,
@@ -378,11 +510,13 @@ async def transcribe_audio(session_id: str, language: str = Form("en")):
             "words": word_count,
             "language": language,
             "language_name": WHISPER_LANG_MAP.get(language, language),
-            "model": model_name,
+            "model": f"whisper-{model_name}",
+            "alignment": "whisper-native",
+            "char_timestamps": 0,
         })
         
     except ImportError:
-        raise HTTPException(status_code=500, detail="Whisper not installed. Run: pip install openai-whisper")
+        raise HTTPException(status_code=500, detail="Neither WhisperX nor Whisper installed. Run: pip install whisperx")
     except Exception as e:
         import traceback
         log_step("WHISPER", f"Transcription failed: {e}")
@@ -507,6 +641,8 @@ async def resume_last_session():
         "title": last.get("title", "Unknown Song"),
         "language": last.get("language", "en"),
         "whisper_words": last.get("whisper_words", []),
+        "whisper_chars": last.get("whisper_chars", []),
+        "whisper_method": last.get("whisper_method", "whisper"),
         "parsed_lyrics": last.get("parsed_lyrics"),
         "reference_content": last.get("reference_content"),
         "reference_filename": last.get("reference_filename"),
@@ -650,23 +786,37 @@ async def generate_ultrastar_files(session_id: str):
         # Step 3c: Alignment
         log_step("GENERATE", "Step 3/4: Syllable alignment")
         whisper_words = session.get("whisper_words", [])
+        whisper_chars = session.get("whisper_chars", [])
+        whisper_method = session.get("whisper_method", "whisper")
         
-        # Primary: Whisper-based alignment (no chunk drift, ~150ms accuracy)
-        # Fallback: MFA chunked alignment (if no Whisper words available)
+        # Primary: WhisperX-based alignment (phoneme-aligned ~50ms accuracy)
+        # Fallback: vanilla Whisper alignment (~200ms), then MFA
         syllable_timings = None
         if whisper_words:
-            log_step("GENERATE", f"Using Whisper alignment ({len(whisper_words)} words)")
+            log_step("GENERATE", f"Using {whisper_method} alignment ({len(whisper_words)} words, {len(whisper_chars)} chars)")
             try:
                 from services.alignment_whisper import align_whisper
-                syllable_timings = align_whisper(lyrics, whisper_words, language)
+                syllable_timings = align_whisper(
+                    lyrics, whisper_words, language,
+                    char_timestamps=whisper_chars,
+                )
                 if syllable_timings:
-                    log_step("GENERATE", f"Whisper alignment: {len(syllable_timings)} syllables")
+                    log_step("GENERATE", f"Alignment: {len(syllable_timings)} syllables")
                 else:
-                    log_step("GENERATE", "Whisper alignment returned empty, falling back to MFA")
+                    log_step("GENERATE", "Alignment returned empty, falling back to MFA")
             except Exception as e:
-                log_step("GENERATE", f"Whisper alignment failed: {e}, falling back to MFA")
+                log_step("GENERATE", f"Alignment failed: {e}, falling back to MFA")
                 import traceback
                 traceback.print_exc()
+        
+        # Onset snapping: refine syllable boundaries using spectral onsets
+        if syllable_timings:
+            try:
+                from services.onset_snapping import snap_to_onsets
+                syllable_timings = snap_to_onsets(vocal_path, syllable_timings)
+                log_step("GENERATE", "Onset snapping applied")
+            except Exception as e:
+                log_step("GENERATE", f"Onset snapping skipped: {e}")
         
         if not syllable_timings:
             log_step("GENERATE", "Using MFA alignment (fallback)")
@@ -716,7 +866,11 @@ async def generate_ultrastar_files(session_id: str):
         # Check what method was actually used by looking at syllable_timings
         if syllable_timings:
             methods_used = set(t.get("method", "unknown") for t in syllable_timings)
-            if "whisper" in methods_used:
+            if "whisperx" in methods_used:
+                wx_count = sum(1 for t in syllable_timings if t.get("method") == "whisperx")
+                char_count = sum(1 for t in syllable_timings if t.get("split_method") == "char")
+                align_method = f"WhisperX ({wx_count}/{len(syllable_timings)} syllables, {char_count} char-split)"
+            elif "whisper" in methods_used:
                 whisper_count = sum(1 for t in syllable_timings if t.get("method") == "whisper")
                 align_method = f"Whisper ({whisper_count}/{len(syllable_timings)} syllables)"
             elif "mfa" in methods_used:
@@ -867,11 +1021,110 @@ async def get_editor_data(session_id: str):
         "syllable_timings": result["syllable_timings"],
         "ultrastar_content": result["ultrastar_content"],
         "vocal_url": f"/api/preview-audio/{session_id}/vocals",
+        "has_edits": result.get("has_edits", False),
+        "edit_count": result.get("edit_count", 0),
+        "last_saved": result.get("last_saved"),
     }
 
 
 # ────────────────────────────────────────────────────────────
-# Step 4: Save corrections
+# Step 4: Save editor state
+# ────────────────────────────────────────────────────────────
+@app.post("/api/save-editor/{session_id}")
+async def save_editor_state(session_id: str, request: Request):
+    """Save the current piano-roll editor state (notes, BPM, GAP) back to the session.
+
+    Accepts JSON body with:
+        notes: list of note objects {startBeat, duration, pitch, syllable, isRap, type}
+        bpm: float
+        gap_ms: int
+    
+    Reconstructs Ultrastar content from the notes and persists everything.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise ServiceError("No generation result", "Run generation first")
+
+    body = await request.json()
+    editor_notes = body.get("notes", [])
+    editor_bpm = body.get("bpm")
+    editor_gap = body.get("gap_ms")
+
+    if not editor_notes:
+        raise ServiceError("No notes provided")
+    if editor_bpm is None or editor_gap is None:
+        raise ServiceError("BPM and gap_ms are required")
+
+    # Reconstruct Ultrastar .txt content from the editor notes
+    lines = []
+    lines.append(f"#TITLE:{session.get('title', 'Unknown Song')}")
+    lines.append(f"#ARTIST:{session.get('artist', 'Unknown Artist')}")
+    lines.append(f"#BPM:{editor_bpm:.2f}")
+    lines.append(f"#GAP:{int(editor_gap)}")
+    lang = session.get("language", "en")
+    lang_name = {"en": "English", "de": "German", "fr": "French", "es": "Spanish",
+                 "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ja": "Japanese",
+                 "ko": "Korean", "zh": "Chinese"}.get(lang, lang.title())
+    lines.append(f"#LANGUAGE:{lang_name}")
+    lines.append(f"#MP3:{os.path.basename(session.get('original_audio', 'song.mp3'))}")
+
+    for note in editor_notes:
+        note_type = note.get("type", "")
+        if note_type == "break":
+            end_beat = note.get("endBeat")
+            if end_beat is not None:
+                lines.append(f"- {note['startBeat']} {end_beat}")
+            else:
+                lines.append(f"- {note['startBeat']}")
+        else:
+            if note.get("isGolden"):
+                prefix = "*"
+            elif note.get("isRap"):
+                prefix = "F:"
+            else:
+                prefix = ":"
+            lines.append(f"{prefix} {note['startBeat']} {note['duration']} {note['pitch']} {note['syllable']}")
+
+    lines.append("E")
+    ultrastar_content = "\n".join(lines)
+
+    # Update session result
+    result["bpm"] = editor_bpm
+    result["gap_ms"] = int(editor_gap)
+    result["ultrastar_content"] = ultrastar_content
+    result["has_edits"] = True
+    result["edit_count"] = result.get("edit_count", 0) + 1
+    result["last_saved"] = time.time()
+
+    # Also write the file to downloads
+    timestamp = int(time.time())
+    txt_filename = f"song_{timestamp}.txt"
+    txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(ultrastar_content)
+    result["txt_file"] = txt_filename
+
+    save_session(session_id)
+
+    note_count = sum(1 for n in editor_notes if n.get("type") != "break")
+    log_step("SAVE-EDITOR", f"Session {session_id}: {note_count} notes, BPM={editor_bpm:.1f}, GAP={editor_gap}ms (save #{result['edit_count']})")
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "note_count": note_count,
+        "edit_count": result["edit_count"],
+        "last_saved": result["last_saved"],
+        "txt_file": txt_filename,
+    }
+
+
+# ────────────────────────────────────────────────────────────
+# Step 4: Save corrections (legacy)
 # ────────────────────────────────────────────────────────────
 @app.post("/api/corrections/{session_id}")
 async def save_corrections(session_id: str, corrections: dict = None):

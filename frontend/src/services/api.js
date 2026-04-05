@@ -129,6 +129,10 @@ export async function applyBpm(sessionId, bpm, gapMs) {
   return request('POST', `/apply-bpm/${sessionId}`, form, true);
 }
 
+export async function saveEditorState(sessionId, notes, bpm, gapMs) {
+  return request('POST', `/save-editor/${sessionId}`, { notes, bpm, gap_ms: gapMs });
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

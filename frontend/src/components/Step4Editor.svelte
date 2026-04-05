@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, referenceData, errorMessage } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, getReferenceNotes, applyBpm } from '../services/api.js';
+  import { getEditorData, getAudioUrl, getReferenceNotes, applyBpm, saveEditorState } from '../services/api.js';
 
   // Canvas refs
   let canvasEl;
@@ -28,6 +28,12 @@
   let bpmChanged = false; // track if user modified BPM/GAP
   let applyingBpm = false; // loading state for Apply button
 
+  // Save state
+  let isSaving = false;
+  let lastSaveTime = null;
+  let editCount = 0;
+  let hasUnsavedChanges = false;
+
   // View state
   let scrollX = 0;
   let zoom = 20;          // pixels per beat (default zoomed in)
@@ -45,6 +51,22 @@
   let isDragging = false;
   let scrollBarEl;
 
+  // Drag pitch preview (oscillator while dragging a note)
+  let dragOsc = null;
+  let dragGain = null;
+  let dragAudioCtx = null;
+  let dragLastPitch = null;
+
+  // Context menu
+  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, beat: 0, pitch: 0 };
+  let editingSyllable = '';
+  let contextMenuEl;
+
+  // Undo/Redo history
+  let undoStack = [];
+  let redoStack = [];
+  const MAX_UNDO = 50;
+
   // Playback
   let audioEl;
   let isPlaying = false;
@@ -58,6 +80,29 @@
   // Playback speed
   let playbackRate = 1.0;
 
+  // MIDI pitch playback during track play
+  let midiPlayback = false;
+  let muteVocal = false;
+  let midiAudioCtx = null;
+  let midiActiveNotes = new Map(); // noteId -> { osc, gain }
+  let midiVolume = 0.25;
+
+  // Loop region
+  let loopEnabled = false;
+  let loopStartBeat = null;  // beat where loop begins
+  let loopEndBeat = null;    // beat where loop ends
+  let isSettingLoop = false; // dragging on time axis to set loop
+  let loopDragStartBeat = null; // beat where loop drag began
+  let loopHandleDrag = null; // 'start' or 'end' when dragging a loop handle
+
+  // Playhead drag / scrub
+  let playheadDrag = false;
+  let scrubAudio = true; // hear audio while dragging playhead
+  let scrubAudioBuffer = null; // decoded AudioBuffer for grain scrub
+  let scrubCtx = null;         // AudioContext for scrub grains
+  let scrubSource = null;      // current BufferSourceNode
+  let scrubGain = null;        // gain node for scrub
+
   // Waveform
   let waveformPeaks = [];   // pre-computed peaks array
   let waveformDuration = 0; // actual decoded audio duration (seconds)
@@ -67,6 +112,9 @@
   // Total beats for scrollbar
   let totalBeats = 0;
 
+  // Guard: which session has already loaded data (prevent reactive re-load)
+  let dataLoadedSession = null;
+
   // Parse Ultrastar content into notes array
   function parseUltrastar(content) {
     const lines = content.split('\n');
@@ -75,9 +123,13 @@
 
     for (const line of lines) {
       const trimmed = line.trim();
-      if (trimmed.startsWith(':') || trimmed.startsWith('F:')) {
+      if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('F:')) {
+        const isGolden = trimmed.startsWith('*');
         const isRap = trimmed.startsWith('F:');
-        const prefix = isRap ? 'F:' : ':';
+        let prefix;
+        if (isRap) prefix = 'F:';
+        else if (isGolden) prefix = '*';
+        else prefix = ':';
         const parts = trimmed.substring(prefix.length).trim().split(/\s+/);
         
         if (parts.length >= 4) {
@@ -93,6 +145,7 @@
             pitch,
             syllable,
             isRap,
+            isGolden: isGolden || false,
             confidence: 1.0,
             original: { startBeat, duration, pitch },
           });
@@ -288,6 +341,100 @@
     updatePitchRange();
     computeTotalBeats();
     draw();
+  }
+
+  // Track unsaved changes on note edits
+  function markUnsaved() {
+    hasUnsavedChanges = true;
+    editorState.update(s => ({ ...s, hasChanges: true }));
+  }
+
+  // ──── Undo / Redo ───────────────────────────
+  function snapshotNotes() {
+    return JSON.parse(JSON.stringify(notes));
+  }
+
+  function pushUndo() {
+    undoStack.push(snapshotNotes());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack = []; // new action clears redo
+  }
+
+  function undo() {
+    if (undoStack.length === 0) return;
+    redoStack.push(snapshotNotes());
+    notes = undoStack.pop();
+    selectedNote = null;
+    closeContextMenu();
+    markUnsaved();
+    updatePitchRange();
+    computeTotalBeats();
+    draw();
+    console.log(`[Undo] Restored (${undoStack.length} left, ${redoStack.length} redo)`);
+  }
+
+  function redo() {
+    if (redoStack.length === 0) return;
+    undoStack.push(snapshotNotes());
+    notes = redoStack.pop();
+    selectedNote = null;
+    closeContextMenu();
+    markUnsaved();
+    updatePitchRange();
+    computeTotalBeats();
+    draw();
+    console.log(`[Redo] Restored (${undoStack.length} undo, ${redoStack.length} left)`);
+  }
+
+  // Save current editor state to backend
+  async function handleSave() {
+    if (!$sessionId || isSaving) return;
+    isSaving = true;
+    try {
+      // Serialize notes for the API
+      const noteData = notes.map(n => {
+        if (n.type === 'break') {
+          return { type: 'break', startBeat: n.startBeat, endBeat: n.endBeat || null };
+        }
+        return {
+          startBeat: n.startBeat,
+          duration: n.duration,
+          pitch: n.pitch,
+          syllable: n.syllable,
+          isRap: n.isRap || false,
+          isGolden: n.isGolden || false,
+        };
+      });
+
+      const result = await saveEditorState($sessionId, noteData, bpm, gapMs);
+      editCount = result.edit_count || editCount + 1;
+      lastSaveTime = new Date();
+      hasUnsavedChanges = false;
+      editorState.update(s => ({ ...s, hasChanges: false }));
+      console.log(`[Step4] Saved: ${result.note_count} notes, save #${editCount}`);
+    } catch (err) {
+      console.error('[Step4] Save error:', err);
+      errorMessage.set('Save failed: ' + err.message);
+    } finally {
+      isSaving = false;
+    }
+  }
+
+  // Reload editor data from backend (discard unsaved changes)
+  async function handleReload() {
+    if (hasUnsavedChanges && !confirm('Discard unsaved changes and reload from last save?')) return;
+    dataLoadedSession = null; // Force re-load
+    await loadData();
+    hasUnsavedChanges = false;
+    editorState.update(s => ({ ...s, hasChanges: false }));
+  }
+
+  // Keyboard shortcut: Ctrl/Cmd+S to save
+  function handleKeydownSave(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      handleSave();
+    }
   }
 
   // Handle BPM or GAP adjustment — re-quantize visually
@@ -496,14 +643,36 @@
       if (note.type === 'break') {
         // Draw break line
         const x = beatToX(note.startBeat);
-        ctx.strokeStyle = '#c6282855';
-        ctx.lineWidth = 2;
+        const isBreakSelected = selectedNote === note.id;
+        ctx.strokeStyle = isBreakSelected ? '#ef5350' : '#c6282855';
+        ctx.lineWidth = isBreakSelected ? 3 : 2;
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
+        ctx.moveTo(x, wt);
+        ctx.lineTo(x, pianoH);
         ctx.stroke();
         ctx.setLineDash([]);
+
+        // Draw drag handle (diamond shape at center)
+        const handleY = (wt + pianoH) / 2;
+        const hs = isBreakSelected ? 7 : 5;
+        ctx.fillStyle = isBreakSelected ? '#ef5350' : '#c62828aa';
+        ctx.beginPath();
+        ctx.moveTo(x, handleY - hs);
+        ctx.lineTo(x + hs, handleY);
+        ctx.lineTo(x, handleY + hs);
+        ctx.lineTo(x - hs, handleY);
+        ctx.closePath();
+        ctx.fill();
+
+        // Show beat label when selected
+        if (isBreakSelected) {
+          ctx.fillStyle = '#ef5350';
+          ctx.font = '9px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(`break @${note.startBeat}`, x, handleY - hs - 4);
+          ctx.textAlign = 'left';
+        }
         continue;
       }
 
@@ -519,7 +688,10 @@
         note.pitch !== note.original.pitch
       );
 
-      if (note.isRap) {
+      if (note.isGolden) {
+        ctx.fillStyle = isSelected ? '#ffd70088' : '#ffd70044';
+        ctx.strokeStyle = '#ffd700';
+      } else if (note.isRap) {
         ctx.fillStyle = isSelected ? '#ff980088' : '#ff980044';
         ctx.strokeStyle = '#ff9800';
       } else if (hasChanged) {
@@ -534,11 +706,85 @@
       ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
       ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
 
+      // Golden star indicator
+      if (note.isGolden && width > 14) {
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.fillText('★', x + width - 12, y + 3);
+      }
+
       // Syllable text
       if (zoom > 1 && width > 10) {
         ctx.fillStyle = '#eee';
         ctx.font = '10px sans-serif';
         ctx.fillText(note.syllable.trim(), x + 2, y + 3);
+      }
+    }
+
+    // ── Loop region overlay ──
+    if (loopStartBeat !== null && loopEndBeat !== null) {
+      const lx1 = beatToX(Math.min(loopStartBeat, loopEndBeat));
+      const lx2 = beatToX(Math.max(loopStartBeat, loopEndBeat));
+      const pianoBottom = h - timeAxisHeight;
+
+      // Translucent blue fill
+      ctx.fillStyle = loopEnabled ? '#42a5f522' : '#42a5f511';
+      ctx.fillRect(lx1, 0, lx2 - lx1, pianoBottom);
+
+      // Loop boundary lines
+      ctx.strokeStyle = loopEnabled ? '#42a5f5' : '#42a5f566';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(lx1, 0); ctx.lineTo(lx1, pianoBottom);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(lx2, 0); ctx.lineTo(lx2, pianoBottom);
+      ctx.stroke();
+
+      // Loop region on time axis
+      ctx.fillStyle = loopEnabled ? '#42a5f544' : '#42a5f522';
+      ctx.fillRect(lx1, pianoBottom, lx2 - lx1, timeAxisHeight);
+
+      // Loop drag handles (triangles at top of boundary lines)
+      const handleSize = 8;
+      // Left handle (▶ pointing right)
+      ctx.fillStyle = loopEnabled ? '#42a5f5' : '#42a5f5aa';
+      ctx.beginPath();
+      ctx.moveTo(lx1, 0);
+      ctx.lineTo(lx1 + handleSize, handleSize);
+      ctx.lineTo(lx1, handleSize * 2);
+      ctx.closePath();
+      ctx.fill();
+      // Right handle (◀ pointing left)
+      ctx.beginPath();
+      ctx.moveTo(lx2, 0);
+      ctx.lineTo(lx2 - handleSize, handleSize);
+      ctx.lineTo(lx2, handleSize * 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Bottom handles on time axis
+      ctx.beginPath();
+      ctx.moveTo(lx1, pianoBottom + timeAxisHeight);
+      ctx.lineTo(lx1 + handleSize, pianoBottom + timeAxisHeight - handleSize);
+      ctx.lineTo(lx1, pianoBottom + timeAxisHeight - handleSize * 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(lx2, pianoBottom + timeAxisHeight);
+      ctx.lineTo(lx2 - handleSize, pianoBottom + timeAxisHeight - handleSize);
+      ctx.lineTo(lx2, pianoBottom + timeAxisHeight - handleSize * 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Loop label
+      if (loopEnabled) {
+        ctx.fillStyle = '#42a5f5';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('LOOP', (lx1 + lx2) / 2, pianoBottom + 16);
+        ctx.textAlign = 'left';
       }
     }
 
@@ -552,6 +798,25 @@
       ctx.moveTo(cx, 0);
       ctx.lineTo(cx, pianoBottom);
       ctx.stroke();
+
+      // Playhead drag handle (inverted triangle ▼ at top)
+      if (!isPlaying) {
+        const hs = 7;
+        ctx.fillStyle = '#ff8a80';
+        ctx.beginPath();
+        ctx.moveTo(cx - hs, 0);
+        ctx.lineTo(cx + hs, 0);
+        ctx.lineTo(cx, hs * 1.5);
+        ctx.closePath();
+        ctx.fill();
+        // Small triangle at bottom (on time axis)
+        ctx.beginPath();
+        ctx.moveTo(cx - hs, pianoBottom + timeAxisHeight);
+        ctx.lineTo(cx + hs, pianoBottom + timeAxisHeight);
+        ctx.lineTo(cx, pianoBottom + timeAxisHeight - hs * 1.5);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
 
     syncScrollbar();
@@ -567,9 +832,59 @@
     const pitch = yToPitch(my);
     console.log(`[Mouse] mouseDown at px(${mx.toFixed(0)}, ${my.toFixed(0)}) beat=${beat.toFixed(1)} pitch=${pitch}`);
 
-    // Click on time axis (bottom strip) → seek playhead (like DAW ruler click)
+    // Ignore right-click — let contextmenu handler deal with it
+    if (event.button === 2) return;
+
+    // Close context menu on left-click
+    if (contextMenu.visible) closeContextMenu();
+
+    // Click on time axis (bottom strip)
     const pianoH = viewHeight - timeAxisHeight;
+
+    // Check playhead handle hit (when paused, 10px zone near playhead line)
+    if (!isPlaying && currentTimeSec > 0) {
+      const cx = beatToX(playbackBeat);
+      if (Math.abs(mx - cx) <= 10) {
+        playheadDrag = true;
+        console.log('[Playhead] Start drag');
+        // Start grain scrub
+        if (scrubAudio && scrubAudioBuffer) {
+          startScrubGrain(currentTimeSec);
+        }
+        return;
+      }
+    }
+
+    // Check loop handle hit zones first (8px hit zone near boundary lines, full height)
+    if (loopStartBeat !== null && loopEndBeat !== null) {
+      const lsX = beatToX(loopStartBeat);
+      const leX = beatToX(loopEndBeat);
+      if (Math.abs(mx - lsX) <= 8) {
+        loopHandleDrag = 'start';
+        console.log('[Loop] Dragging start handle');
+        draw();
+        return;
+      }
+      if (Math.abs(mx - leX) <= 8) {
+        loopHandleDrag = 'end';
+        console.log('[Loop] Dragging end handle');
+        draw();
+        return;
+      }
+    }
+
     if (my >= pianoH) {
+      if (event.shiftKey) {
+        // Shift+click on ruler → start loop drag
+        isSettingLoop = true;
+        loopDragStartBeat = Math.round(beat);
+        loopStartBeat = loopDragStartBeat;
+        loopEndBeat = loopDragStartBeat;
+        loopEnabled = true;
+        console.log(`[Loop] Start drag at beat ${loopDragStartBeat}`);
+        draw();
+        return;
+      }
       seekToTime(beatToTime(beat));
       return;
     }
@@ -580,7 +895,7 @@
       return;
     }
 
-    // Find clicked note
+    // Find clicked note (check regular notes first, then breaks)
     let found = null;
     for (const note of notes) {
       if (note.type === 'break') continue;
@@ -601,11 +916,34 @@
       }
     }
 
+    // If no regular note found, check break lines (10px hit zone)
+    if (!found) {
+      for (const note of notes) {
+        if (note.type !== 'break') continue;
+        const bx = beatToX(note.startBeat);
+        if (Math.abs(mx - bx) <= 6) {
+          found = note;
+          dragMode = 'move-break';
+          break;
+        }
+      }
+    }
+
     if (found) {
       selectedNote = found.id;
       isDragging = true;
-      dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration };
-      console.log(`[Mouse] Selected note id=${found.id} '${found.syllable}' mode=${dragMode}`);
+      dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration, endBeat: found.endBeat };
+      if (found.type !== 'break') {
+        pushUndo();
+        // Start pitch preview oscillator for move drag
+        if (dragMode === 'move') {
+          startDragOsc(found.pitch);
+        }
+        console.log(`[Mouse] Selected note id=${found.id} '${found.syllable}' mode=${dragMode}`);
+      } else {
+        pushUndo();
+        console.log(`[Mouse] Selected break id=${found.id} at beat ${found.startBeat} mode=${dragMode}`);
+      }
     } else {
       selectedNote = null;
       console.log('[Mouse] No note selected');
@@ -615,21 +953,135 @@
   }
 
   function handleMouseMove(event) {
-    if (!isDragging || selectedNote === null) return;
-
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
 
+    // Playhead drag (scrub)
+    if (playheadDrag) {
+      const beat = xToBeat(mx);
+      const timeSec = beatToTime(beat);
+      const maxTime = audioEl?.duration || audioDuration || 300;
+      const clampedTime = Math.max(0, Math.min(maxTime, timeSec));
+      currentTimeSec = clampedTime;
+      playbackBeat = timeToBeat(clampedTime);
+      if (audioEl) audioEl.currentTime = clampedTime;
+
+      // Grain scrub: play tiny loop at current position
+      if (scrubAudio && scrubAudioBuffer && !muteVocal) {
+        startScrubGrain(clampedTime);
+      }
+
+      // Scrub: play MIDI pitch of note under playhead
+      if (midiPlayback) {
+        ensureMidiCtx();
+        updateMidiPlayback(playbackBeat);
+      }
+
+      draw();
+      return;
+    }
+
+    // Loop handle drag
+    if (loopHandleDrag) {
+      const beat = Math.round(xToBeat(mx));
+      const minLoopBeats = 2;
+      if (loopHandleDrag === 'start') {
+        loopStartBeat = Math.min(beat, loopEndBeat - minLoopBeats);
+      } else {
+        loopEndBeat = Math.max(beat, loopStartBeat + minLoopBeats);
+      }
+      draw();
+      return;
+    }
+
+    // Loop region drag on time axis
+    if (isSettingLoop) {
+      loopEndBeat = Math.round(xToBeat(mx));
+      draw();
+      return;
+    }
+
+    // Cursor style based on hover target
+    if (!isDragging && !isSettingLoop && !loopHandleDrag && !playheadDrag) {
+      let cursor = '';
+
+      // Check playhead handle (when paused)
+      if (!isPlaying && currentTimeSec > 0) {
+        const cx = beatToX(playbackBeat);
+        if (Math.abs(mx - cx) <= 10) {
+          cursor = 'col-resize';
+        }
+      }
+
+      // Check loop handles
+      if (loopStartBeat !== null && loopEndBeat !== null) {
+        const lsX = beatToX(loopStartBeat);
+        const leX = beatToX(loopEndBeat);
+        if (Math.abs(mx - lsX) <= 8 || Math.abs(mx - leX) <= 8) {
+          cursor = 'col-resize';
+        }
+      }
+
+      // Check note hover (if no loop handle matched)
+      if (!cursor) {
+        for (const note of notes) {
+          if (note.type === 'break') {
+            const bx = beatToX(note.startBeat);
+            if (Math.abs(mx - bx) <= 6) {
+              cursor = 'col-resize';
+              break;
+            }
+            continue;
+          }
+          const nx = beatToX(note.startBeat);
+          const ny = pitchToY(note.pitch);
+          const nw = note.duration * zoom;
+          if (mx >= nx && mx <= nx + nw && my >= ny - noteHeight / 2 && my <= ny + noteHeight / 2) {
+            if (mx - nx < 5 || nx + nw - mx < 5) {
+              cursor = 'col-resize';
+            } else {
+              cursor = 'move';
+            }
+            break;
+          }
+        }
+      }
+
+      canvasEl.style.cursor = cursor;
+    }
+
+    if (!isDragging || selectedNote === null) return;
+
     const note = notes.find(n => n.id === selectedNote);
-    if (!note || note.type === 'break') return;
+    if (!note) return;
 
     const dx = mx - dragStart.x;
     const dy = my - dragStart.y;
 
+    // Break drag: horizontal only
+    if (note.type === 'break' && dragMode === 'move-break') {
+      note.startBeat = Math.max(0, Math.round(dragStart.beat + dx / zoom));
+      if (note.endBeat !== null && note.endBeat !== undefined) {
+        const origDiff = (dragStart.endBeat || note.endBeat) - dragStart.beat;
+        note.endBeat = note.startBeat + origDiff;
+      }
+      editorState.update(s => ({ ...s, hasChanges: true }));
+      hasUnsavedChanges = true;
+      notes = [...notes];
+      draw();
+      return;
+    }
+
+    if (note.type === 'break') return;
+
     if (dragMode === 'move') {
       note.startBeat = Math.max(0, Math.round(dragStart.beat + dx / zoom));
       note.pitch = Math.max(minPitch, Math.min(maxPitch, yToPitch(dragStart.y + dy)));
+      // Update pitch preview if pitch changed
+      if (note.pitch !== dragLastPitch) {
+        updateDragOsc(note.pitch);
+      }
     } else if (dragMode === 'resize-right') {
       note.duration = Math.max(1, Math.round(dragStart.duration + dx / zoom));
     } else if (dragMode === 'resize-left') {
@@ -640,14 +1092,375 @@
     }
 
     editorState.update(s => ({ ...s, hasChanges: true }));
+    hasUnsavedChanges = true;
     notes = [...notes]; // trigger reactivity
     draw();
   }
 
   function handleMouseUp() {
-    if (isDragging) console.log('[Mouse] mouseUp, drag ended');
+    // Finish playhead drag
+    if (playheadDrag) {
+      playheadDrag = false;
+      stopScrubGrain();
+      if (midiPlayback) stopAllMidiNotes();
+      canvasEl.style.cursor = '';
+      console.log(`[Playhead] Drag done at ${currentTimeSec.toFixed(2)}s`);
+      draw();
+      return;
+    }
+
+    // Finish loop handle drag
+    if (loopHandleDrag) {
+      console.log(`[Loop] Handle drag done: ${loopStartBeat} → ${loopEndBeat}`);
+      loopHandleDrag = null;
+      canvasEl.style.cursor = '';
+      draw();
+      return;
+    }
+
+    // Finish loop drag
+    if (isSettingLoop) {
+      isSettingLoop = false;
+      // Normalize so start < end
+      if (loopStartBeat !== null && loopEndBeat !== null) {
+        const a = Math.min(loopStartBeat, loopEndBeat);
+        const b = Math.max(loopStartBeat, loopEndBeat);
+        if (b - a < 2) {
+          // Too small → clear loop
+          loopStartBeat = null;
+          loopEndBeat = null;
+          loopEnabled = false;
+          console.log('[Loop] Cleared (too small)');
+        } else {
+          loopStartBeat = a;
+          loopEndBeat = b;
+          console.log(`[Loop] Set region: beat ${a} → ${b}`);
+        }
+      }
+      loopDragStartBeat = null;
+      draw();
+      return;
+    }
+
+    if (isDragging) {
+      console.log('[Mouse] mouseUp, drag ended');
+      stopDragOsc();
+    }
     isDragging = false;
     dragMode = null;
+  }
+
+  // ──── Drag Pitch Preview ─────────────────────
+  function startDragOsc(pitch) {
+    stopDragOsc(); // clean up any previous
+    dragAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    dragOsc = dragAudioCtx.createOscillator();
+    dragGain = dragAudioCtx.createGain();
+    dragOsc.connect(dragGain);
+    dragGain.connect(dragAudioCtx.destination);
+    dragOsc.type = 'triangle';
+    const freq = 440 * Math.pow(2, (pitch - 69) / 12);
+    dragOsc.frequency.value = freq;
+    dragGain.gain.value = 0.25;
+    dragOsc.start();
+    dragLastPitch = pitch;
+  }
+
+  function updateDragOsc(pitch) {
+    if (!dragOsc || !dragAudioCtx) return;
+    const freq = 440 * Math.pow(2, (pitch - 69) / 12);
+    dragOsc.frequency.setValueAtTime(freq, dragAudioCtx.currentTime);
+    dragLastPitch = pitch;
+  }
+
+  function stopDragOsc() {
+    if (dragOsc) {
+      try {
+        dragGain.gain.linearRampToValueAtTime(0, dragAudioCtx.currentTime + 0.05);
+        dragOsc.stop(dragAudioCtx.currentTime + 0.06);
+      } catch (e) { /* already stopped */ }
+      dragOsc = null;
+      dragGain = null;
+    }
+    if (dragAudioCtx) {
+      setTimeout(() => { try { dragAudioCtx.close(); } catch(e) {} }, 100);
+      dragAudioCtx = null;
+    }
+    dragLastPitch = null;
+  }
+
+  // ──── Context Menu ──────────────────────────
+  function handleContextMenu(event) {
+    event.preventDefault();
+    const rect = canvasEl.getBoundingClientRect();
+    const mx = event.clientX - rect.left;
+    const my = event.clientY - rect.top;
+
+    // Find note under cursor (regular notes first, then breaks)
+    let found = null;
+    let isBreak = false;
+    for (const note of notes) {
+      if (note.type === 'break') continue;
+      const nx = beatToX(note.startBeat);
+      const ny = pitchToY(note.pitch);
+      const nw = note.duration * zoom;
+      if (mx >= nx && mx <= nx + nw && my >= ny - noteHeight / 2 && my <= ny + noteHeight / 2) {
+        found = note;
+        break;
+      }
+    }
+
+    // Check breaks if no regular note hit
+    if (!found) {
+      for (const note of notes) {
+        if (note.type !== 'break') continue;
+        const bx = beatToX(note.startBeat);
+        if (Math.abs(mx - bx) <= 6) {
+          found = note;
+          isBreak = true;
+          break;
+        }
+      }
+    }
+
+    if (found) {
+      selectedNote = found.id;
+      syllableUndoPushed = false;
+      if (!isBreak) editingSyllable = found.syllable;
+      // Position menu, clamping to viewport
+      const menuW = 220, menuH = isBreak ? 160 : 280;
+      const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
+      const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
+      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, beat: 0, pitch: 0 };
+      draw();
+    } else {
+      // Empty space — show canvas context menu
+      const beat = Math.round(xToBeat(mx));
+      const pitch = yToPitch(my);
+      const menuW = 220, menuH = 180;
+      const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
+      const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
+      selectedNote = null;
+      contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, beat, pitch };
+    }
+  }
+
+  function closeContextMenu() {
+    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, beat: 0, pitch: 0 };
+  }
+
+  function handleGlobalClick(e) {
+    if (contextMenu.visible && contextMenuEl && !contextMenuEl.contains(e.target)) {
+      closeContextMenu();
+    }
+  }
+
+  // ──── Note Actions ──────────────────────────
+  function deleteNote(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    pushUndo();
+    notes = notes.filter(n => n.id !== id);
+    if (selectedNote === id) selectedNote = null;
+    markUnsaved();
+    closeContextMenu();
+    computeTotalBeats();
+    draw();
+  }
+
+  function splitNote(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const idx = notes.findIndex(n => n.id === id);
+    if (idx === -1) return;
+    const note = notes[idx];
+    if (note.type === 'break' || note.duration < 2) return;
+
+    pushUndo();
+    const halfDur = Math.floor(note.duration / 2);
+    const maxId = Math.max(...notes.map(n => n.id)) + 1;
+
+    const note1 = { ...note, duration: halfDur };
+    const note2 = {
+      ...note,
+      id: maxId,
+      startBeat: note.startBeat + halfDur,
+      duration: note.duration - halfDur,
+      syllable: '~',
+      original: { startBeat: note.startBeat + halfDur, duration: note.duration - halfDur, pitch: note.pitch },
+    };
+
+    notes = [...notes.slice(0, idx), note1, note2, ...notes.slice(idx + 1)];
+    selectedNote = maxId; // select the new second note
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function setNoteType(noteId, type) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const note = notes.find(n => n.id === id);
+    if (!note || note.type === 'break') return;
+
+    pushUndo();
+    if (type === 'golden') {
+      note.isRap = false;
+      note.isGolden = true;
+    } else if (type === 'rap') {
+      note.isRap = true;
+      note.isGolden = false;
+    } else {
+      note.isRap = false;
+      note.isGolden = false;
+    }
+
+    notes = [...notes];
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function insertBreak(noteId, position) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const idx = notes.findIndex(n => n.id === id);
+    if (idx === -1) return;
+    const note = notes[idx];
+    if (note.type === 'break') return;
+
+    pushUndo();
+    const maxId = Math.max(...notes.map(n => n.id)) + 1;
+    const breakBeat = position === 'before'
+      ? Math.max(0, note.startBeat - 1)
+      : note.startBeat + note.duration + 1;
+    const breakNote = { id: maxId, type: 'break', startBeat: breakBeat, endBeat: null };
+
+    const insertIdx = position === 'before' ? idx : idx + 1;
+    notes = [...notes.slice(0, insertIdx), breakNote, ...notes.slice(insertIdx)];
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function addBreakAt(beat) {
+    pushUndo();
+    const maxId = Math.max(0, ...notes.map(n => n.id)) + 1;
+    const breakNote = { id: maxId, type: 'break', startBeat: Math.max(0, beat), endBeat: null };
+    // Insert in sorted position
+    let insertIdx = notes.findIndex(n => {
+      const nb = n.type === 'break' ? n.startBeat : n.startBeat;
+      return nb > beat;
+    });
+    if (insertIdx === -1) insertIdx = notes.length;
+    notes = [...notes.slice(0, insertIdx), breakNote, ...notes.slice(insertIdx)];
+    selectedNote = maxId;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function addNoteAt(beat, pitch) {
+    pushUndo();
+    const maxId = Math.max(0, ...notes.map(n => n.id)) + 1;
+    const duration = 4; // default 4 beats
+    const newNote = {
+      id: maxId,
+      startBeat: Math.max(0, beat),
+      duration,
+      pitch: Math.max(minPitch, Math.min(maxPitch, pitch)),
+      syllable: '~',
+      isRap: false,
+      isGolden: false,
+      confidence: 1.0,
+      original: { startBeat: beat, duration, pitch },
+    };
+    // Insert in sorted position
+    let insertIdx = notes.filter(n => n.type !== 'break').findIndex(n => n.startBeat > beat);
+    if (insertIdx === -1) {
+      // Append after last non-break note
+      insertIdx = notes.length;
+    } else {
+      // Find the actual index in the full notes array
+      const targetNote = notes.filter(n => n.type !== 'break')[insertIdx];
+      insertIdx = notes.indexOf(targetNote);
+    }
+    notes = [...notes.slice(0, insertIdx), newNote, ...notes.slice(insertIdx)];
+    selectedNote = maxId;
+    markUnsaved();
+    closeContextMenu();
+    computeTotalBeats();
+    draw();
+  }
+
+  function mergeWithNext(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const realNotes = notes.filter(n => n.type !== 'break');
+    const realIdx = realNotes.findIndex(n => n.id === id);
+    if (realIdx === -1 || realIdx >= realNotes.length - 1) return;
+
+    const current = realNotes[realIdx];
+    const next = realNotes[realIdx + 1];
+
+    pushUndo();
+    // Extend current to cover next
+    current.duration = (next.startBeat + next.duration) - current.startBeat;
+    current.syllable = current.syllable.trimEnd() + next.syllable;
+
+    // Remove next note
+    notes = notes.filter(n => n.id !== next.id);
+    notes = [...notes];
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  // Track syllable undo only once when the context menu opens (not per keystroke)
+  let syllableUndoPushed = false;
+  function updateSyllable(noteId, text) {
+    const id = noteId ?? contextMenu.noteId;
+    if (id === null) return;
+    const note = notes.find(n => n.id === id);
+    if (!note || note.type === 'break') return;
+    if (!syllableUndoPushed) {
+      pushUndo();
+      syllableUndoPushed = true;
+    }
+    note.syllable = text;
+    notes = [...notes];
+    markUnsaved();
+    draw();
+  }
+
+  function playNotePitch(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const note = notes.find(n => n.id === id);
+    if (!note || note.type === 'break') return;
+
+    // Synthesize a tone at the note's MIDI pitch using Web Audio API
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    const freq = 440 * Math.pow(2, (note.pitch - 69) / 12);
+    osc.frequency.value = freq;
+    osc.type = 'triangle';
+    gain.gain.value = 0.35;
+
+    // Sustain at steady volume, then fade out gently at the end
+    const durationSec = Math.min(2, (note.duration * 15) / bpm);
+    const fadeTime = Math.min(0.15, durationSec * 0.3);
+    osc.start();
+    gain.gain.setValueAtTime(0.35, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.35, audioCtx.currentTime + durationSec - fadeTime);
+    gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + durationSec);
+    osc.stop(audioCtx.currentTime + durationSec + 0.05);
+
+    closeContextMenu();
   }
 
   function handleWheel(event) {
@@ -659,8 +1472,10 @@
       zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
       console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
     } else {
-      // Scroll
-      scrollX = Math.max(getMinBeat() * zoom, scrollX + event.deltaX + event.deltaY);
+      // Scroll — horizontal only; ignore if mostly vertical (trackpad two-finger swipe)
+      if (Math.abs(event.deltaX) > Math.abs(event.deltaY) * 0.5 && Math.abs(event.deltaX) > 1) {
+        scrollX = Math.max(getMinBeat() * zoom, scrollX + event.deltaX);
+      }
     }
 
     draw();
@@ -686,15 +1501,27 @@
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
       cancelAnimationFrame(animFrame);
+      stopAllMidiNotes();
       draw(); // Redraw to show paused cursor
     } else {
+      // If loop active and playhead is outside loop, jump to loop start
+      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+        if (playbackBeat < loopStartBeat || playbackBeat >= loopEndBeat) {
+          const loopStartTime = beatToTime(loopStartBeat);
+          currentTimeSec = loopStartTime;
+          playbackBeat = loopStartBeat;
+          console.log(`[Play] Jumped to loop start beat ${loopStartBeat}`);
+        }
+      }
       // Resume from our tracked position
       audioEl.currentTime = currentTimeSec;
       audioEl.playbackRate = playbackRate;
       audioEl.preservesPitch = true;
+      audioEl.volume = muteVocal ? 0 : 1;
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
+      if (midiPlayback) ensureMidiCtx();
       updatePlayback();
     }
   }
@@ -709,6 +1536,7 @@
     playbackBeat = 0;
     currentTimeSec = 0;
     cancelAnimationFrame(animFrame);
+    stopAllMidiNotes();
     draw();
   }
 
@@ -755,7 +1583,22 @@
   }
 
   function handleKeydown(e) {
-    console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey}`);
+    // Skip shortcuts when typing in context menu input
+    if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
+
+    console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
+
+    // Undo / Redo (Cmd+Z / Cmd+Shift+Z on Mac, Ctrl+Z / Ctrl+Shift+Z on others)
+    if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        redo();
+      } else {
+        undo();
+      }
+      return;
+    }
+
     // Spacebar: toggle play/pause
     if (e.code === 'Space') {
       e.preventDefault();
@@ -771,6 +1614,39 @@
       e.preventDefault();
       seekPlayback(e.shiftKey ? 1 : 5);
     }
+
+    // L: toggle loop on/off
+    if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote === null) {
+      e.preventDefault();
+      toggleLoop();
+    }
+    // Escape: clear loop region
+    if (e.code === 'Escape') {
+      if (loopStartBeat !== null) {
+        e.preventDefault();
+        clearLoop();
+      }
+    }
+
+    // Note action shortcuts (only when a note is selected and not in an input)
+    if (selectedNote !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (e.code === 'KeyP') {
+        e.preventDefault();
+        playNotePitch(selectedNote);
+      }
+      if (e.code === 'Delete' || e.code === 'Backspace') {
+        e.preventDefault();
+        deleteNote(selectedNote);
+      }
+      if (e.code === 'KeyS' && !e.shiftKey) {
+        e.preventDefault();
+        splitNote(selectedNote);
+      }
+      if (e.code === 'KeyM') {
+        e.preventDefault();
+        mergeWithNext(selectedNote);
+      }
+    }
   }
 
   function updatePlayback() {
@@ -781,10 +1657,25 @@
     const gapSec = gapMs / 1000;
     playbackBeat = ((currentTime - gapSec) * bpm) / 15;
 
-    // Scroll logic
+    // ── Loop wrap ──
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      if (playbackBeat >= loopEndBeat) {
+        const loopStartTime = beatToTime(loopStartBeat);
+        audioEl.currentTime = loopStartTime;
+        currentTimeSec = loopStartTime;
+        playbackBeat = loopStartBeat;
+        // Stop all midi notes so they retrigger cleanly
+        if (midiPlayback) stopAllMidiNotes();
+        console.log(`[Loop] Wrapped to beat ${loopStartBeat}`);
+      }
+    }
+
+    // Scroll logic — disable auto-scroll when looping
     const canvasWidth = canvasEl?.width || 800;
     const minScrollX = getMinBeat() * zoom;
-    if (scrollMode) {
+    if (loopEnabled && loopStartBeat !== null) {
+      // No auto-scroll during loop — let user freely edit
+    } else if (scrollMode) {
       // Fixed cursor: cursor stays at 30%, notes scroll
       scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.3);
     } else {
@@ -796,6 +1687,7 @@
     }
 
     draw();
+    if (midiPlayback) updateMidiPlayback(playbackBeat);
     animFrame = requestAnimationFrame(updatePlayback);
   }
 
@@ -807,6 +1699,148 @@
       audioEl.playbackRate = rate;
       audioEl.preservesPitch = true;
     }
+  }
+
+  // ──── MIDI Pitch Playback ────────────────────
+  function ensureMidiCtx() {
+    if (!midiAudioCtx || midiAudioCtx.state === 'closed') {
+      midiAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+  }
+
+  function updateMidiPlayback(currentBeat) {
+    if (!midiAudioCtx) return;
+
+    for (const note of notes) {
+      if (note.type === 'break') continue;
+      const noteEnd = note.startBeat + note.duration;
+      const isInNote = currentBeat >= note.startBeat && currentBeat < noteEnd;
+
+      if (isInNote && !midiActiveNotes.has(note.id)) {
+        // Start this note
+        const osc = midiAudioCtx.createOscillator();
+        const gain = midiAudioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(midiAudioCtx.destination);
+        osc.type = 'triangle';
+        const freq = 440 * Math.pow(2, (note.pitch - 69) / 12);
+        osc.frequency.value = freq;
+        gain.gain.value = midiVolume;
+        osc.start();
+        midiActiveNotes.set(note.id, { osc, gain });
+      } else if (!isInNote && midiActiveNotes.has(note.id)) {
+        // Stop this note
+        const entry = midiActiveNotes.get(note.id);
+        try {
+          entry.gain.gain.linearRampToValueAtTime(0, midiAudioCtx.currentTime + 0.03);
+          entry.osc.stop(midiAudioCtx.currentTime + 0.04);
+        } catch (e) { /* already stopped */ }
+        midiActiveNotes.delete(note.id);
+      }
+    }
+  }
+
+  function stopAllMidiNotes() {
+    for (const [id, entry] of midiActiveNotes) {
+      try {
+        entry.gain.gain.linearRampToValueAtTime(0, (midiAudioCtx?.currentTime || 0) + 0.03);
+        entry.osc.stop((midiAudioCtx?.currentTime || 0) + 0.04);
+      } catch (e) { /* already stopped */ }
+    }
+    midiActiveNotes.clear();
+  }
+
+  function toggleMidiPlayback() {
+    midiPlayback = !midiPlayback;
+    if (midiPlayback && isPlaying) {
+      ensureMidiCtx();
+    } else if (!midiPlayback) {
+      stopAllMidiNotes();
+    }
+    console.log('[MIDI] Pitch playback:', midiPlayback);
+  }
+
+  function toggleMuteVocal() {
+    muteVocal = !muteVocal;
+    if (audioEl) audioEl.volume = muteVocal ? 0 : 1;
+    console.log('[Audio] Mute vocal:', muteVocal);
+  }
+
+  // ──── Grain Scrub ────────────────────────────
+  function startScrubGrain(timeSec) {
+    if (!scrubAudioBuffer) return;
+
+    // Stop previous grain
+    stopScrubGrain();
+
+    // Create/reuse context
+    if (!scrubCtx || scrubCtx.state === 'closed') {
+      scrubCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    const grainDuration = 0.05; // 50ms grain
+    const sampleRate = scrubAudioBuffer.sampleRate;
+    const startSample = Math.floor(timeSec * sampleRate);
+    const grainSamples = Math.floor(grainDuration * sampleRate);
+
+    if (startSample < 0 || startSample >= scrubAudioBuffer.length) return;
+
+    // Create a short buffer for the grain
+    const numChannels = scrubAudioBuffer.numberOfChannels;
+    const grainBuffer = scrubCtx.createBuffer(numChannels, grainSamples, sampleRate);
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      const source = scrubAudioBuffer.getChannelData(ch);
+      const dest = grainBuffer.getChannelData(ch);
+      for (let i = 0; i < grainSamples; i++) {
+        const idx = startSample + i;
+        // Apply tiny fade in/out to avoid clicks
+        let env = 1;
+        if (i < 64) env = i / 64;
+        else if (i > grainSamples - 64) env = (grainSamples - i) / 64;
+        dest[i] = (idx < source.length ? source[idx] : 0) * env;
+      }
+    }
+
+    scrubSource = scrubCtx.createBufferSource();
+    scrubSource.buffer = grainBuffer;
+    scrubSource.loop = true;
+
+    scrubGain = scrubCtx.createGain();
+    scrubGain.gain.value = 1.0;
+
+    scrubSource.connect(scrubGain);
+    scrubGain.connect(scrubCtx.destination);
+    scrubSource.start();
+  }
+
+  function stopScrubGrain() {
+    if (scrubSource) {
+      try { scrubSource.stop(); } catch (e) {}
+      scrubSource = null;
+    }
+    if (scrubGain) {
+      scrubGain = null;
+    }
+  }
+
+  // ──── Loop Region ────────────────────────────
+  function toggleLoop() {
+    if (loopStartBeat === null || loopEndBeat === null) {
+      console.log('[Loop] No region set');
+      return;
+    }
+    loopEnabled = !loopEnabled;
+    console.log('[Loop] Enabled:', loopEnabled);
+    draw();
+  }
+
+  function clearLoop() {
+    loopStartBeat = null;
+    loopEndBeat = null;
+    loopEnabled = false;
+    console.log('[Loop] Cleared');
+    draw();
   }
 
   // Resize canvas to fit container
@@ -827,6 +1861,9 @@
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const decoded = await audioCtx.decodeAudioData(arrayBuffer);
       audioCtx.close();
+
+      // Store decoded buffer for grain scrubbing
+      scrubAudioBuffer = decoded;
 
       // Downsample to 200 peaks per second (plenty for visual)
       // Use floating-point sample boundaries to avoid accumulated rounding drift.
@@ -859,8 +1896,16 @@
 
   // ──── Lifecycle ──────────────────────────────
   async function loadData() {
-    console.log('[Step4] loadData, session:', $sessionId, 'hasResult:', !!$generationResult);
+    const session = $sessionId;
+    console.log('[Step4] loadData, session:', session, 'hasResult:', !!$generationResult);
     if (!$generationResult) return;
+
+    // Skip if already loaded for this session (prevents reactive re-triggers)
+    if (dataLoadedSession === session) {
+      console.log('[Step4] Already loaded for session', session, '— skipping');
+      return;
+    }
+    dataLoadedSession = session;
 
     try {
       const data = await getEditorData($sessionId);
@@ -881,12 +1926,21 @@
       pitchMap = notes.filter(n => n.type !== 'break').map(n => n.pitch);
       console.log('[Step4] Stored', rawTimings.length, 'raw timings,', pitchMap.length, 'pitches for re-quantization');
       audioDuration = data.audio_duration;
+
+      // Restore save state
+      editCount = data.edit_count || 0;
+      lastSaveTime = data.last_saved ? new Date(data.last_saved * 1000) : null;
+      hasUnsavedChanges = false;
       vocalUrl = data.vocal_url;
       console.log('[Step4] Vocal URL for playback:', vocalUrl);
       computeTotalBeats();
 
-      // Scroll to show audio from time=0 (pre-GAP region visible)
-      scrollX = getMinBeat() * zoom;
+      // Position playhead and scroll at GAP (song start)
+      const gapSec = gapMs / 1000;
+      currentTimeSec = gapSec;
+      playbackBeat = 0; // beat 0 = GAP position
+      const canvasWidth = canvasEl?.width || 800;
+      scrollX = Math.max(getMinBeat() * zoom, (playbackBeat * zoom) - canvasWidth * 0.1);
 
       // Load waveform
       if (vocalUrl) {
@@ -961,13 +2015,17 @@
       loadData();
     }
     window.addEventListener('keydown', handleKeydown);
+    window.addEventListener('keydown', handleKeydownSave);
     window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('click', handleGlobalClick);
   });
 
   onDestroy(() => {
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
+    window.removeEventListener('keydown', handleKeydownSave);
     window.removeEventListener('resize', resizeCanvas);
+    window.removeEventListener('click', handleGlobalClick);
   });
 
   // Reload when we enter this step
@@ -1005,6 +2063,21 @@
         <input type="checkbox" bind:checked={showWaveform} on:change={() => { console.log('[UI] waveform', showWaveform); draw(); }} />
         Wave
       </label>
+      <label title="Play MIDI pitch tones during playback">
+        <input type="checkbox" checked={midiPlayback} on:change={toggleMidiPlayback} />
+        🎹 MIDI
+      </label>
+      <label title="Mute vocal track">
+        <input type="checkbox" checked={muteVocal} on:change={toggleMuteVocal} />
+        🔇 Mute
+      </label>
+      <label title="Loop region (Shift+drag on time ruler to set, L to toggle, Esc to clear)">
+        <input type="checkbox" checked={loopEnabled} on:change={toggleLoop} />
+        🔁 Loop
+      </label>
+      {#if loopStartBeat !== null && loopEndBeat !== null}
+        <button class="tool-btn sm" on:click={clearLoop} title="Clear loop region (Esc)">✕ Loop</button>
+      {/if}
     </div>
 
     <div class="speed-controls">
@@ -1046,6 +2119,20 @@
       </div>
     {/if}
 
+    <div class="save-controls">
+      <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save (⌘S)">
+        {isSaving ? '⏳' : '💾'} Save
+      </button>
+      <button class="tool-btn" on:click={handleReload} title="Reload from last save">
+        🔄 Reload
+      </button>
+      {#if hasUnsavedChanges}
+        <span class="unsaved-indicator">● unsaved</span>
+      {:else if lastSaveTime}
+        <span class="saved-indicator">✓ saved {lastSaveTime.toLocaleTimeString()}</span>
+      {/if}
+    </div>
+
     <div class="info">
       {#if selectedNote !== null}
         {@const note = notes.find(n => n.id === selectedNote)}
@@ -1065,9 +2152,105 @@
       on:mousemove={handleMouseMove}
       on:mouseup={handleMouseUp}
       on:mouseleave={handleMouseUp}
-      on:wheel={handleWheel}
+      on:wheel|nonpassive={handleWheel}
+      on:contextmenu={handleContextMenu}
     ></canvas>
   </div>
+
+  <!-- Context Menu -->
+  {#if contextMenu.visible}
+    {@const ctxNote = notes.find(n => n.id === contextMenu.noteId)}
+    {#if ctxNote}
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        {#if contextMenu.isBreak}
+          <!-- Break context menu -->
+          <div class="ctx-header">
+            <span class="ctx-break-label">Break @ beat {ctxNote.startBeat}</span>
+          </div>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat = Math.max(0, n.startBeat - 1); notes = [...notes]; markUnsaved(); draw(); } }}>
+            ← Nudge Left <span class="ctx-shortcut">-1</span>
+          </button>
+          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat += 1; notes = [...notes]; markUnsaved(); draw(); } }}>
+            → Nudge Right <span class="ctx-shortcut">+1</span>
+          </button>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item danger" on:click={() => deleteNote(ctxNote.id)}>
+            🗑 Delete Break <span class="ctx-shortcut">Del</span>
+          </button>
+        {:else}
+          <!-- Note context menu -->
+          <div class="ctx-header">
+            <input
+              class="ctx-syllable-input"
+              type="text"
+              bind:value={editingSyllable}
+              on:input={() => updateSyllable(ctxNote.id, editingSyllable)}
+              on:keydown|stopPropagation={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
+              placeholder="syllable"
+            />
+            <span class="ctx-pitch">{noteName(ctxNote.pitch)}</span>
+          </div>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item" on:click={() => playNotePitch(ctxNote.id)}>
+            🔊 Play Pitch <span class="ctx-shortcut">P</span>
+          </button>
+          <button class="ctx-item" on:click={() => splitNote(ctxNote.id)}>
+            ✂️ Split Note <span class="ctx-shortcut">S</span>
+          </button>
+          <button class="ctx-item" on:click={() => mergeWithNext(ctxNote.id)}>
+            🔗 Merge with Next <span class="ctx-shortcut">M</span>
+          </button>
+          <div class="ctx-divider"></div>
+          <div class="ctx-type-group">
+            <span class="ctx-type-label">Type:</span>
+            <button
+              class="ctx-type-btn" class:active={!ctxNote.isGolden && !ctxNote.isRap}
+              on:click={() => setNoteType(ctxNote.id, 'normal')}
+            >Normal</button>
+            <button
+              class="ctx-type-btn golden" class:active={ctxNote.isGolden}
+              on:click={() => setNoteType(ctxNote.id, 'golden')}
+            >★ Golden</button>
+            <button
+              class="ctx-type-btn rap" class:active={ctxNote.isRap}
+              on:click={() => setNoteType(ctxNote.id, 'rap')}
+            >F Rap</button>
+          </div>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item danger" on:click={() => deleteNote(ctxNote.id)}>
+            🗑 Delete Note <span class="ctx-shortcut">Del</span>
+          </button>
+        {/if}
+      </div>
+    {:else if contextMenu.isEmpty}
+      <!-- Empty space context menu -->
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        <div class="ctx-header">
+          <span class="ctx-location-label">Beat {contextMenu.beat} · {noteName(contextMenu.pitch)}</span>
+        </div>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => addNoteAt(contextMenu.beat, contextMenu.pitch)}>
+          🎵 Add Note
+        </button>
+        <button class="ctx-item" on:click={() => addBreakAt(contextMenu.beat)}>
+          ┃ Add Break
+        </button>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => { seekToTime(beatToTime(contextMenu.beat)); closeContextMenu(); }}>
+          ⏩ Seek Here
+        </button>
+      </div>
+    {/if}
+  {/if}
 
   <!-- Scrollbar -->
   <div class="scrollbar-container">
@@ -1086,6 +2269,7 @@
   <div class="legend">
     <span class="legend-item"><span class="dot blue"></span> Normal note</span>
     <span class="legend-item"><span class="dot yellow"></span> Edited note</span>
+    <span class="legend-item"><span class="dot gold"></span> Golden note</span>
     <span class="legend-item"><span class="dot orange"></span> Rap note</span>
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
     {#if referenceNotes.length > 0}
@@ -1123,7 +2307,8 @@
   {/if}
 
   <div class="help">
-    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: move cursor ±5s (Shift: ±1s) • Space: play/pause • Click time axis or ⌥+click to seek • Toggle Scroll / Wave</p>
+    <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: seek ±5s (Shift: ±1s) • Space: play/pause • ⌥+click to seek • Right-click for context menu • Click/drag breaks to move</p>
+    <p><strong>Shortcuts:</strong> ⌘Z: undo • ⇧⌘Z: redo • P: play pitch • S: split • M: merge • Del: delete • ⌘S: save</p>
   </div>
 </div>
 
@@ -1279,6 +2464,7 @@
 
   .dot.blue { background: #4fc3f7; }
   .dot.yellow { background: #fdd835; }
+  .dot.gold { background: #ffd700; }
   .dot.orange { background: #ff9800; }
   .dot.red-line { background: #c62828; width: 2px; height: 12px; }
   .dot.green-dash { background: #66bb6a; width: 10px; height: 10px; border: 1px dashed #66bb6a; background: transparent; }
@@ -1290,6 +2476,32 @@
 
   .ref-toggle input[type="checkbox"] {
     margin-right: 0.3rem;
+  }
+
+  .save-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    border-left: 1px solid #333;
+    padding-left: 0.5rem;
+  }
+
+  .save-btn {
+    background: #2e7d32 !important;
+  }
+  .save-btn:hover:not(:disabled) {
+    background: #388e3c !important;
+  }
+
+  .unsaved-indicator {
+    color: #ffa726;
+    font-size: 0.75rem;
+    font-weight: bold;
+  }
+
+  .saved-indicator {
+    color: #66bb6a;
+    font-size: 0.7rem;
   }
 
   .mode-controls {
@@ -1422,4 +2634,143 @@
   }
   .stats-bar span:first-child { color: #4fc3f7; }
   .stats-bar span:nth-child(2) { color: #66bb6a; }
+
+  /* ── Context Menu ── */
+  .context-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 200px;
+    background: #1a1a2e;
+    border: 1px solid #444;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    padding: 4px 0;
+    font-size: 0.85rem;
+  }
+
+  .ctx-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 6px 10px;
+  }
+
+  .ctx-syllable-input {
+    flex: 1;
+    background: #0d1117;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #eee;
+    font-family: monospace;
+    font-size: 0.85rem;
+    padding: 4px 6px;
+    outline: none;
+  }
+
+  .ctx-syllable-input:focus {
+    border-color: #4fc3f7;
+  }
+
+  .ctx-pitch {
+    color: #888;
+    font-family: monospace;
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .ctx-divider {
+    height: 1px;
+    background: #333;
+    margin: 2px 0;
+  }
+
+  .ctx-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 0.83rem;
+    text-align: left;
+  }
+
+  .ctx-item:hover {
+    background: #2a2a4e;
+  }
+
+  .ctx-item.danger {
+    color: #ef5350;
+  }
+
+  .ctx-item.danger:hover {
+    background: #3a1a1a;
+  }
+
+  .ctx-shortcut {
+    color: #666;
+    font-size: 0.75rem;
+    font-family: monospace;
+    margin-left: 1rem;
+  }
+
+  .ctx-type-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+  }
+
+  .ctx-type-label {
+    color: #888;
+    font-size: 0.75rem;
+    margin-right: 4px;
+  }
+
+  .ctx-type-btn {
+    padding: 3px 8px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+
+  .ctx-type-btn:hover {
+    background: #333;
+  }
+
+  .ctx-type-btn.active {
+    background: #4fc3f7;
+    color: #0d1117;
+    border-color: #4fc3f7;
+    font-weight: bold;
+  }
+
+  .ctx-type-btn.golden.active {
+    background: #ffd700;
+    border-color: #ffd700;
+  }
+
+  .ctx-type-btn.rap.active {
+    background: #ff9800;
+    border-color: #ff9800;
+  }
+
+  .ctx-break-label {
+    color: #ef5350;
+    font-family: monospace;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .ctx-location-label {
+    color: #aaa;
+    font-family: monospace;
+    font-size: 0.8rem;
+  }
 </style>

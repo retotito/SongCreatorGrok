@@ -1,15 +1,21 @@
-"""Whisper-based alignment: uses Whisper word timestamps + proportional syllable splitting.
+"""WhisperX-based alignment: uses phoneme-aligned word timestamps + character timestamps
+for precise syllable splitting.
 
-This replaces MFA chunked alignment, which suffered from catastrophic drift (+15-30s)
-due to chunk stitching errors. Whisper processes the entire audio at once, so there's
-no drift — measured accuracy is ~150ms mean absolute error vs reference.
+When WhisperX is used, we get:
+- Word-level timestamps with ~50ms accuracy (from wav2vec2 forced alignment)
+- Character-level timestamps for sub-word precision
+
+When vanilla Whisper is used (fallback), we get:
+- Word-level timestamps with ~200ms accuracy
+- No character timestamps (proportional splitting as before)
 
 Algorithm:
-1. Parse lyrics into syllables (reuse parse_lyrics from alignment.py)
+1. Parse lyrics into syllables (reuse parse_lyrics)
 2. Reconstruct words from syllable groups
-3. Match lyrics words to Whisper word timestamps (fuzzy sequential matching)
-4. For each matched word: distribute syllables proportionally within word's time span
-5. Interpolate any unmatched words from neighbors
+3. Match lyrics words to Whisper/X word timestamps (fuzzy sequential matching)
+4. For matched words with char timestamps: use char boundaries for syllable splits
+5. For matched words without char timestamps: proportional splitting by char count
+6. Interpolate any unmatched words from neighbors
 """
 
 import re
@@ -69,19 +75,23 @@ def parse_lyrics(lyrics_text: str) -> List[List[dict]]:
 def align_whisper(
     lyrics_text: str,
     whisper_words: List[dict],
-    language: str = "english"
+    language: str = "english",
+    char_timestamps: Optional[List[dict]] = None,
 ) -> List[dict]:
-    """Align lyrics to audio using Whisper word timestamps.
+    """Align lyrics to audio using Whisper/WhisperX word timestamps.
     
     Args:
         lyrics_text: Full lyrics text with lines and hyphenated syllables
-        whisper_words: List of {word, start, end} from Whisper transcription
+        whisper_words: List of {word, start, end} from Whisper/WhisperX
         language: Language (unused for now, reserved for future)
+        char_timestamps: Optional list of {char, start, end} from WhisperX
+                        forced alignment. When present, enables precise
+                        character-level syllable splitting.
         
     Returns:
         List of dicts matching alignment.py format:
         [{"syllable": "beau", "start": 1.23, "end": 1.56, "confidence": 0.85,
-          "is_rap": False, "method": "whisper", "line_index": 0}, ...]
+          "is_rap": False, "method": "whisperx", "line_index": 0}, ...]
     """
     parsed = parse_lyrics(lyrics_text)
     flat_syllables = [s for line in parsed for s in line]
@@ -94,7 +104,12 @@ def align_whisper(
         log_step("ALIGN", "No Whisper words available, cannot align")
         return []
     
-    log_step("ALIGN", f"Whisper alignment: {len(flat_syllables)} syllables, {len(whisper_words)} Whisper words")
+    method_name = "whisperx" if char_timestamps else "whisper"
+    log_step("ALIGN", f"{method_name} alignment: {len(flat_syllables)} syllables, "
+             f"{len(whisper_words)} words, {len(char_timestamps or [])} chars")
+    
+    # Build char-timestamp lookup for character-level syllable splitting
+    char_lookup = _build_char_lookup(char_timestamps) if char_timestamps else None
     
     # ── Step 1: Build word groups from syllables ──
     word_groups = _build_word_groups(flat_syllables)
@@ -103,20 +118,73 @@ def align_whisper(
     # ── Step 2: Match lyrics words to Whisper words ──
     matches = _match_words(word_groups, whisper_words)
     matched_count = sum(1 for m in matches if m is not None)
-    log_step("ALIGN", f"Matched {matched_count}/{len(word_groups)} words to Whisper timestamps")
+    log_step("ALIGN", f"Matched {matched_count}/{len(word_groups)} words to timestamps")
     
     # ── Step 3: Interpolate unmatched words ──
     _interpolate_unmatched(word_groups, matches, whisper_words)
     
     # ── Step 4: Distribute syllables within each word's time span ──
-    results = _distribute_syllables(word_groups, matches)
+    results = _distribute_syllables(word_groups, matches, char_lookup, method_name)
     
-    log_step("ALIGN", f"Whisper alignment complete: {len(results)} syllables")
+    log_step("ALIGN", f"Alignment complete: {len(results)} syllables ({method_name})")
     if results:
         log_step("ALIGN", f"  First: '{results[0]['syllable']}' at {results[0]['start']:.3f}s")
         log_step("ALIGN", f"  Last:  '{results[-1]['syllable']}' at {results[-1]['end']:.3f}s")
+        # Count char-split vs proportional
+        char_split = sum(1 for r in results if r.get("split_method") == "char")
+        prop_split = sum(1 for r in results if r.get("split_method") == "proportional")
+        if char_split > 0:
+            log_step("ALIGN", f"  Char-level splits: {char_split}, Proportional: {prop_split}")
     
     return results
+
+
+def _build_char_lookup(char_timestamps: List[dict]) -> dict:
+    """Build a time-indexed lookup from character timestamps.
+    
+    Returns a dict mapping approximate time ranges to character info,
+    enabling us to find character boundaries within a word's time span.
+    
+    The lookup is structured as a sorted list of (time, char) tuples
+    for efficient binary search.
+    """
+    if not char_timestamps:
+        return {"chars": [], "by_time": []}
+    
+    # Build sorted list of (start_time, end_time, char) for binary search
+    by_time = []
+    for c in char_timestamps:
+        start = c.get("start")
+        end = c.get("end")
+        char = c.get("char", "")
+        if start is not None and end is not None:
+            by_time.append((start, end, char))
+    
+    by_time.sort(key=lambda x: x[0])
+    
+    return {"chars": char_timestamps, "by_time": by_time}
+
+
+def _find_chars_in_range(char_lookup: dict, start: float, end: float) -> list:
+    """Find all characters within a time range.
+    
+    Returns list of (start, end, char) tuples within [start-tolerance, end+tolerance].
+    """
+    if not char_lookup or not char_lookup["by_time"]:
+        return []
+    
+    by_time = char_lookup["by_time"]
+    tolerance = 0.05  # 50ms tolerance for boundary matching
+    
+    result = []
+    for t_start, t_end, char in by_time:
+        if t_start >= end + tolerance:
+            break
+        if t_end <= start - tolerance:
+            continue
+        result.append((t_start, t_end, char))
+    
+    return result
 
 
 def _build_word_groups(flat_syllables: list) -> list:
@@ -309,19 +377,23 @@ def _interpolate_unmatched(word_groups: list, matches: list, whisper_words: list
         }
 
 
-def _distribute_syllables(word_groups: list, matches: list) -> list:
-    """Distribute syllables within each word's time span proportionally.
+def _distribute_syllables(word_groups: list, matches: list,
+                          char_lookup: Optional[dict] = None,
+                          method_name: str = "whisper") -> list:
+    """Distribute syllables within each word's time span.
     
-    For single-syllable words: syllable gets the full word time.
-    For multi-syllable words: time is distributed proportionally by character count
-    (rough proxy for duration — consonant clusters take longer).
+    When char_lookup is available (from WhisperX):
+    - Uses character-level timestamps to split syllables at exact char boundaries
+    - Much more accurate than proportional splitting
+    
+    Fallback (no char_lookup):
+    - Proportional splitting by character count (same as before)
     """
     results = []
     
     for g_idx, group in enumerate(word_groups):
         match = matches[g_idx]
         if match is None:
-            # This shouldn't happen after interpolation, but handle gracefully
             continue
         
         syllables = group["syllables"]
@@ -338,40 +410,161 @@ def _distribute_syllables(word_groups: list, matches: list) -> list:
                 "end": word_end,
                 "confidence": confidence,
                 "is_rap": syllables[0].get("is_rap", False),
-                "method": "whisper",
+                "method": method_name,
                 "line_index": group["line_index"],
+                "split_method": "single",
             })
+        elif char_lookup and char_lookup["by_time"]:
+            # ── Character-level splitting (WhisperX) ──
+            _distribute_by_chars(
+                results, syllables, group, match,
+                word_start, word_end, confidence,
+                char_lookup, method_name,
+            )
         else:
-            # Multiple syllables — distribute proportionally by character weight
-            weights = []
-            for syl in syllables:
-                text = syl["text"].strip()
-                # Weight: character count with minimum of 1
-                w = max(1, len(text))
-                weights.append(w)
-            
-            total_weight = sum(weights)
-            current_time = word_start
-            
-            for syl_idx, syl in enumerate(syllables):
-                syl_dur = word_dur * weights[syl_idx] / total_weight
-                syl_start = current_time
-                syl_end = current_time + syl_dur
-                
-                # Ensure last syllable ends at word_end
-                if syl_idx == len(syllables) - 1:
-                    syl_end = word_end
-                
-                results.append({
-                    "syllable": syl["text"],
-                    "start": syl_start,
-                    "end": syl_end,
-                    "confidence": confidence * 0.9,  # slightly lower for split syllables
-                    "is_rap": syl.get("is_rap", False),
-                    "method": "whisper",
-                    "line_index": group["line_index"],
-                })
-                
-                current_time = syl_end
+            # ── Proportional splitting (fallback) ──
+            _distribute_proportional(
+                results, syllables, group, match,
+                word_start, word_end, word_dur, confidence,
+                method_name,
+            )
     
     return results
+
+
+def _distribute_by_chars(
+    results: list, syllables: list, group: dict, match: dict,
+    word_start: float, word_end: float, confidence: float,
+    char_lookup: dict, method_name: str,
+):
+    """Split syllables using character-level timestamps from WhisperX.
+    
+    For each syllable, find the characters that belong to it (by counting
+    characters through the word), then use those characters' time range.
+    """
+    # Get chars in this word's time range
+    word_chars = _find_chars_in_range(char_lookup, word_start, word_end)
+    
+    if not word_chars:
+        # No char data for this word — fall back to proportional
+        word_dur = word_end - word_start
+        _distribute_proportional(
+            results, syllables, group, match,
+            word_start, word_end, word_dur, confidence,
+            method_name,
+        )
+        return
+    
+    # Map syllables to character spans
+    # Reconstruct the clean word from syllables to count characters
+    syl_texts = []
+    for syl in syllables:
+        text = syl["text"].strip().lower()
+        text = re.sub(r"[^\w']", '', text)
+        syl_texts.append(text)
+    
+    # Build character position → syllable index mapping
+    char_to_syl = []
+    for syl_idx, text in enumerate(syl_texts):
+        for _ in text:
+            char_to_syl.append(syl_idx)
+    
+    # Match word_chars to syllable indices
+    # word_chars are the WhisperX characters, char_to_syl maps position to syllable
+    syl_time_ranges = {}  # syl_idx -> (min_start, max_end)
+    
+    # Filter word_chars to only alphabetical chars for matching
+    alpha_chars = [(s, e, c) for s, e, c in word_chars if c.strip() and c.isalpha()]
+    
+    for pos, (c_start, c_end, c_char) in enumerate(alpha_chars):
+        if pos < len(char_to_syl):
+            syl_idx = char_to_syl[pos]
+            if syl_idx not in syl_time_ranges:
+                syl_time_ranges[syl_idx] = (c_start, c_end)
+            else:
+                prev_start, prev_end = syl_time_ranges[syl_idx]
+                syl_time_ranges[syl_idx] = (min(prev_start, c_start), max(prev_end, c_end))
+    
+    # Build results using char-derived boundaries
+    used_char_split = False
+    for syl_idx, syl in enumerate(syllables):
+        if syl_idx in syl_time_ranges:
+            syl_start, syl_end = syl_time_ranges[syl_idx]
+            # Clamp to word boundaries
+            syl_start = max(syl_start, word_start)
+            syl_end = min(syl_end, word_end)
+            if syl_end <= syl_start:
+                syl_end = syl_start + 0.02  # minimum 20ms
+            used_char_split = True
+            split_method = "char"
+        else:
+            # This syllable has no char matches — estimate from neighbors
+            syl_start = word_start if syl_idx == 0 else results[-1]["end"] if results else word_start
+            syl_end = word_end if syl_idx == len(syllables) - 1 else syl_start + 0.05
+            split_method = "proportional"
+        
+        results.append({
+            "syllable": syl["text"],
+            "start": syl_start,
+            "end": syl_end,
+            "confidence": confidence * (0.95 if split_method == "char" else 0.85),
+            "is_rap": syl.get("is_rap", False),
+            "method": method_name,
+            "line_index": group["line_index"],
+            "split_method": split_method,
+        })
+    
+    # Fix gaps/overlaps between syllables within this word
+    word_results = results[-(len(syllables)):]
+    for i in range(1, len(word_results)):
+        # Close gaps: set start of next to end of previous
+        if word_results[i]["start"] > word_results[i-1]["end"]:
+            # Small gap — close it by extending previous syllable
+            word_results[i-1]["end"] = word_results[i]["start"]
+        elif word_results[i]["start"] < word_results[i-1]["end"]:
+            # Overlap — split at midpoint
+            mid = (word_results[i]["start"] + word_results[i-1]["end"]) / 2
+            word_results[i-1]["end"] = mid
+            word_results[i]["start"] = mid
+    
+    # Ensure first syllable starts at word_start and last ends at word_end
+    if word_results:
+        word_results[0]["start"] = word_start
+        word_results[-1]["end"] = word_end
+
+
+def _distribute_proportional(
+    results: list, syllables: list, group: dict, match: dict,
+    word_start: float, word_end: float, word_dur: float,
+    confidence: float, method_name: str,
+):
+    """Distribute syllables proportionally by character count (fallback)."""
+    weights = []
+    for syl in syllables:
+        text = syl["text"].strip()
+        w = max(1, len(text))
+        weights.append(w)
+    
+    total_weight = sum(weights)
+    current_time = word_start
+    
+    for syl_idx, syl in enumerate(syllables):
+        syl_dur = word_dur * weights[syl_idx] / total_weight
+        syl_start = current_time
+        syl_end = current_time + syl_dur
+        
+        if syl_idx == len(syllables) - 1:
+            syl_end = word_end
+        
+        results.append({
+            "syllable": syl["text"],
+            "start": syl_start,
+            "end": syl_end,
+            "confidence": confidence * 0.9,
+            "is_rap": syl.get("is_rap", False),
+            "method": method_name,
+            "line_index": group["line_index"],
+            "split_method": "proportional",
+        })
+        
+        current_time = syl_end

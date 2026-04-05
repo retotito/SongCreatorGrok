@@ -1,10 +1,45 @@
-# Ultrastar Song Generator v2.0
+# Ultrastar Song Creator
 
-AI-powered tool that generates Ultrastar karaoke .txt files from audio + lyrics input. Uses deep learning models for pitch detection, vocal separation, and forced alignment.
+AI-powered tool that generates **Ultrastar karaoke files** from any song. Upload audio + lyrics, and the app creates perfectly timed karaoke notes using deep learning — then fine-tune everything in a professional piano roll editor.
+
+**Goal**: Make it easy for anyone to create Ultrastar songs, so more people sing together. 🎤
+
+## Features
+
+### AI Pipeline
+- **Vocal separation** (Demucs v4) — isolates vocals from full mix
+- **Pitch detection** (CREPE) — deep learning pitch tracking
+- **Forced alignment** (MFA/WhisperX) — syllable-level timing with ~42ms median accuracy
+- **BPM detection** — automatic tempo analysis
+- **One-click generation** — audio → Ultrastar format in minutes
+
+### Piano Roll Editor
+- **Full note editing** — move, resize, split, merge, delete notes
+- **Golden/Rap note types** — visual indicators (★ gold, orange rap)
+- **Reference overlay** — compare AI-generated notes with reference songs
+- **Waveform display** — see the audio waveform behind the notes
+- **Context menus** — right-click on notes or empty space for quick actions
+
+### Playback & Audio
+- **MIDI pitch playback** — hear synthesized pitches during playback (triangle wave)
+- **Vocal mute toggle** — isolate MIDI pitches or hear both
+- **Audio scrub** — drag the playhead to hear frozen audio grains at any position
+- **Drag pitch preview** — hear the pitch while moving notes
+
+### Loop & Navigation
+- **Loop regions** — Shift+drag on the time ruler to set a loop, with draggable handles
+- **Playhead scrub** — drag the playhead handle with audio + MIDI preview
+- **Smart cursors** — move/resize indicators when hovering over notes
+- **Keyboard shortcuts** — Space (play), L (loop), Escape (clear loop), arrow keys (seek)
+
+### Export
+- **Ultrastar .txt** — standard format, compatible with all Ultrastar players
+- **MIDI export** — pitch data as MIDI file
+- **Processing summary** — detailed report of the AI pipeline
 
 ## Architecture
 
-- **Frontend**: Svelte + Vite (port 5173) — 5-step wizard with built-in piano roll editor
+- **Frontend**: Svelte + Vite (port 5173) — 5-step wizard UI
 - **Backend**: Python FastAPI (port 8001) — service-based with isolated AI workers
 
 ## AI Models
