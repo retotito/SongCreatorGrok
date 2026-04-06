@@ -989,7 +989,7 @@ async def get_generation_result(session_id: str):
     
     result = session.get("result", {})
     # Build response safely — exclude large fields
-    exclude_keys = {"syllable_timings", "ultrastar_content"}
+    exclude_keys = {"syllable_timings", "ultrastar_content", "pitch_data"}
     response = {"status": "ok", "session_id": session_id}
     for k, v in result.items():
         if k not in exclude_keys:

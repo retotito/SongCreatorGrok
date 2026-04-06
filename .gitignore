@@ -36,3 +36,6 @@ frontendTest/*.mp3
 # Temporary files
 *.tmp
 *.temp
+
+# Session data
+backend/sessions/

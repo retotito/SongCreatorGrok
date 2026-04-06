@@ -103,6 +103,13 @@
   let scrubSource = null;      // current BufferSourceNode
   let scrubGain = null;        // gain node for scrub
 
+  // Metronome
+  let metronomeEnabled = false;
+  let metronomeCtx = null;
+  let lastMetronomeBeat = -1; // tracks which quarter-note beat we last clicked
+  let metronomeOffset = 0;    // offset in ultrastar beats (0 = on beat, 4 = half beat / 8th note off)
+  const BEATS_PER_QUARTER = 8; // 8 ultrastar beats = 1 real quarter note (BPM is doubled, formula uses /15)
+
   // Waveform
   let waveformPeaks = [];   // pre-computed peaks array
   let waveformDuration = 0; // actual decoded audio duration (seconds)
@@ -130,13 +137,16 @@
         if (isRap) prefix = 'F:';
         else if (isGolden) prefix = '*';
         else prefix = ':';
-        const parts = trimmed.substring(prefix.length).trim().split(/\s+/);
+        // Parse 3 numeric fields, then preserve the rest as syllable text
+        // (including any leading space which signals a word boundary in Ultrastar)
+        const rest = trimmed.substring(prefix.length);
+        const match = rest.match(/^\s+(-?\d+)\s+(\d+)\s+(-?\d+) (.*)$/);
         
-        if (parts.length >= 4) {
-          const startBeat = parseInt(parts[0]);
-          const duration = parseInt(parts[1]);
-          const pitch = parseInt(parts[2]);
-          const syllable = parts.slice(3).join(' ');
+        if (match) {
+          const startBeat = parseInt(match[1]);
+          const duration = parseInt(match[2]);
+          const pitch = parseInt(match[3]);
+          const syllable = match[4];
 
           parsed.push({
             id: id++,
@@ -541,16 +551,35 @@
       }
     }
 
-    // Grid lines (beats) + time axis labels
+    // Grid lines (beats) — musical subdivisions
+    // BEATS_PER_QUARTER = 8 ultrastar beats per real quarter note
+    // Quarter note lines (thickest), 8th note lines (medium), fine lines (thinnest)
     const startBeat = Math.floor(xToBeat(0));
     const endBeat = Math.ceil(xToBeat(w));
+    const beatsPerMeasure = BEATS_PER_QUARTER * 4; // 4/4 time = 4 quarter notes per measure
+    const beatsPerEighth = BEATS_PER_QUARTER / 2;  // half a quarter note
     
     for (let b = startBeat; b <= endBeat; b++) {
       const x = beatToX(b);
-      const isMeasure = b % Math.round(bpm / 60) === 0;
+      const isMeasure = b % beatsPerMeasure === 0;
+      const isQuarter = b % BEATS_PER_QUARTER === 0;
+      const isEighth = b % beatsPerEighth === 0;
       
-      ctx.strokeStyle = isMeasure ? '#2a2a4e' : '#161625';
-      ctx.lineWidth = isMeasure ? 1 : 0.5;
+      if (isMeasure) {
+        ctx.strokeStyle = '#3a3a5e';
+        ctx.lineWidth = 1.5;
+      } else if (isQuarter) {
+        ctx.strokeStyle = '#2a2a4e';
+        ctx.lineWidth = 1;
+      } else if (isEighth) {
+        ctx.strokeStyle = '#1e1e38';
+        ctx.lineWidth = 0.5;
+      } else {
+        // 16th note level — only show if zoomed in enough (> 4px per beat)
+        if (zoom < 4) continue;
+        ctx.strokeStyle = '#161625';
+        ctx.lineWidth = 0.3;
+      }
       ctx.beginPath();
       ctx.moveTo(x, wt);
       ctx.lineTo(x, pianoH);
@@ -718,6 +747,21 @@
         ctx.fillStyle = '#eee';
         ctx.font = '10px sans-serif';
         ctx.fillText(note.syllable.trim(), x + 2, y + 3);
+      }
+
+      // Red dot indicator for mid-word syllables (no leading space)
+      // Skip the very first note and the first note after each break
+      if (!note.syllable.startsWith(' ')) {
+        const noteIdx = notes.indexOf(note);
+        const isFirstAfterBreakOrStart = noteIdx === 0 ||
+          (noteIdx > 0 && notes[noteIdx - 1].type === 'break');
+        if (!isFirstAfterBreakOrStart) {
+          const dotR = 3;
+          ctx.fillStyle = '#ef5350';
+          ctx.beginPath();
+          ctx.arc(x + width - dotR - 1, y - noteHeight / 2 + dotR + 1, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
@@ -946,7 +990,9 @@
       }
     } else {
       selectedNote = null;
-      console.log('[Mouse] No note selected');
+      // Click on empty canvas space → seek playhead there
+      seekToTime(beatToTime(beat));
+      console.log(`[Mouse] No note — seek to beat ${beat.toFixed(1)}`);
     }
 
     draw();
@@ -1227,11 +1273,13 @@
       selectedNote = found.id;
       syllableUndoPushed = false;
       if (!isBreak) editingSyllable = found.syllable;
+      // Store the exact beat where user right-clicked (for split-at-cursor)
+      const clickBeat = xToBeat(mx);
       // Position menu, clamping to viewport
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, beat: 0, pitch: 0 };
+      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, beat: clickBeat, pitch: 0 };
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -1268,7 +1316,7 @@
     draw();
   }
 
-  function splitNote(noteId) {
+  function splitNote(noteId, splitBeat) {
     const id = noteId ?? selectedNote;
     if (id === null) return;
     const idx = notes.findIndex(n => n.id === id);
@@ -1277,7 +1325,13 @@
     if (note.type === 'break' || note.duration < 2) return;
 
     pushUndo();
-    const halfDur = Math.floor(note.duration / 2);
+    // Use the click position if provided, otherwise split at midpoint
+    let halfDur;
+    if (splitBeat !== undefined) {
+      halfDur = Math.max(1, Math.min(note.duration - 1, Math.round(splitBeat - note.startBeat)));
+    } else {
+      halfDur = Math.floor(note.duration / 2);
+    }
     const maxId = Math.max(...notes.map(n => n.id)) + 1;
 
     const note1 = { ...note, duration: halfDur };
@@ -1286,7 +1340,7 @@
       id: maxId,
       startBeat: note.startBeat + halfDur,
       duration: note.duration - halfDur,
-      syllable: '~',
+      syllable: ' ~',
       original: { startBeat: note.startBeat + halfDur, duration: note.duration - halfDur, pitch: note.pitch },
     };
 
@@ -1369,7 +1423,7 @@
       startBeat: Math.max(0, beat),
       duration,
       pitch: Math.max(minPitch, Math.min(maxPitch, pitch)),
-      syllable: '~',
+      syllable: ' ~',
       isRap: false,
       isGolden: false,
       confidence: 1.0,
@@ -1414,6 +1468,65 @@
     markUnsaved();
     closeContextMenu();
     draw();
+  }
+
+  function toggleWordSpace(noteId, hasSpace) {
+    const note = notes.find(n => n.id === noteId);
+    if (!note || note.type === 'break') return;
+    pushUndo();
+    if (hasSpace && !note.syllable.startsWith(' ')) {
+      note.syllable = ' ' + note.syllable;
+    } else if (!hasSpace && note.syllable.startsWith(' ')) {
+      note.syllable = note.syllable.substring(1);
+    }
+    editingSyllable = note.syllable;
+    notes = [...notes];
+    markUnsaved();
+    draw();
+  }
+
+  function autoFixWordSpaces() {
+    // Auto-detect word boundaries and add leading spaces.
+    // Rules:
+    // - First note of song: no space
+    // - First note after a break: no space
+    // - '~' ties: no space (keep as-is)
+    // - Syllable that looks like a continuation (lowercase, no punctuation before it): no space
+    // - Otherwise: add leading space (word start)
+    pushUndo();
+    let changed = 0;
+    let prevWasBreak = true; // treat start of song like after a break
+    for (const note of notes) {
+      if (note.type === 'break') {
+        prevWasBreak = true;
+        continue;
+      }
+      const trimmed = note.syllable.trimStart();
+      if (prevWasBreak) {
+        // First note after break/start — remove any leading space
+        if (note.syllable !== trimmed) {
+          note.syllable = trimmed;
+          changed++;
+        }
+        prevWasBreak = false;
+        continue;
+      }
+      // '~' ties: leave as-is
+      if (trimmed === '~') {
+        prevWasBreak = false;
+        continue;
+      }
+      // If syllable doesn't have a leading space, add one (word boundary)
+      if (!note.syllable.startsWith(' ')) {
+        note.syllable = ' ' + note.syllable;
+        changed++;
+      }
+      prevWasBreak = false;
+    }
+    notes = [...notes];
+    markUnsaved();
+    draw();
+    console.log(`[AutoFix] Fixed word spaces on ${changed} notes`);
   }
 
   // Track syllable undo only once when the context menu opens (not per keystroke)
@@ -1688,6 +1801,7 @@
 
     draw();
     if (midiPlayback) updateMidiPlayback(playbackBeat);
+    if (metronomeEnabled) updateMetronome(playbackBeat);
     animFrame = requestAnimationFrame(updatePlayback);
   }
 
@@ -1738,6 +1852,48 @@
         midiActiveNotes.delete(note.id);
       }
     }
+  }
+
+  // ──── Metronome ────────────────────────────
+  function ensureMetronomeCtx() {
+    if (!metronomeCtx || metronomeCtx.state === 'closed') {
+      metronomeCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+  }
+
+  function playMetronomeClick(isDownbeat) {
+    ensureMetronomeCtx();
+    const osc = metronomeCtx.createOscillator();
+    const gain = metronomeCtx.createGain();
+    osc.connect(gain);
+    gain.connect(metronomeCtx.destination);
+    osc.type = 'sine';
+    // Higher pitch for downbeat (beat 1 of measure), lower for other beats
+    osc.frequency.value = isDownbeat ? 1200 : 800;
+    gain.gain.setValueAtTime(0.3, metronomeCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, metronomeCtx.currentTime + 0.06);
+    osc.start(metronomeCtx.currentTime);
+    osc.stop(metronomeCtx.currentTime + 0.06);
+  }
+
+  function updateMetronome(currentBeat) {
+    // Click on every quarter note (every BEATS_PER_QUARTER ultrastar beats)
+    // Apply offset to shift the click grid
+    const offsetBeat = currentBeat - metronomeOffset;
+    const quarterBeat = Math.floor(offsetBeat / BEATS_PER_QUARTER);
+    if (quarterBeat !== lastMetronomeBeat && currentBeat >= 0) {
+      lastMetronomeBeat = quarterBeat;
+      // Downbeat = first beat of measure (assuming 4/4 time, every 4 quarter notes)
+      const isDownbeat = quarterBeat % 4 === 0;
+      playMetronomeClick(isDownbeat);
+    }
+  }
+
+  function toggleMetronome() {
+    metronomeEnabled = !metronomeEnabled;
+    if (metronomeEnabled) ensureMetronomeCtx();
+    lastMetronomeBeat = -1;
+    console.log('[Metronome]', metronomeEnabled ? 'ON' : 'OFF');
   }
 
   function stopAllMidiNotes() {
@@ -1901,10 +2057,7 @@
     if (!$generationResult) return;
 
     // Skip if already loaded for this session (prevents reactive re-triggers)
-    if (dataLoadedSession === session) {
-      console.log('[Step4] Already loaded for session', session, '— skipping');
-      return;
-    }
+    if (dataLoadedSession === session) return;
     dataLoadedSession = session;
 
     try {
@@ -1947,8 +2100,8 @@
         loadWaveform(vocalUrl);
       }
 
-      // Always try to load reference notes (don't gate on store state)
-      {
+      // Only load reference notes if a reference was actually uploaded
+      if ($referenceData && $referenceData.uploaded) {
         try {
           const refData = await getReferenceNotes($sessionId);
           refBpm = refData.bpm || bpm;
@@ -1993,7 +2146,10 @@
             }
           }
         } catch (e) {
-          console.warn('[Step4] Failed to load reference notes:', e);
+          // 404 is expected when no reference was uploaded — don't warn
+          if (!e.message?.includes('404')) {
+            console.warn('[Step4] Failed to load reference notes:', e);
+          }
           referenceNotes = [];
         }
       }
@@ -2028,8 +2184,8 @@
     window.removeEventListener('click', handleGlobalClick);
   });
 
-  // Reload when we enter this step
-  $: if ($generationResult && canvasEl) {
+  // Reload when we enter this step (one-shot per session)
+  $: if ($generationResult && canvasEl && $sessionId && dataLoadedSession !== $sessionId) {
     loadData();
   }
 </script>
@@ -2071,6 +2227,14 @@
         <input type="checkbox" checked={muteVocal} on:change={toggleMuteVocal} />
         🔇 Mute
       </label>
+      <label title="Metronome click on each beat">
+        <input type="checkbox" checked={metronomeEnabled} on:change={toggleMetronome} />
+        🥁 Metro
+      </label>
+      {#if metronomeEnabled}
+        <button class="tool-btn sm" class:active={metronomeOffset === 0} on:click={() => { metronomeOffset = 0; lastMetronomeBeat = -1; }} title="On beat">♩</button>
+        <button class="tool-btn sm" class:active={metronomeOffset === 4} on:click={() => { metronomeOffset = 4; lastMetronomeBeat = -1; }} title="Half beat offset (8th note)">♩½</button>
+      {/if}
       <label title="Loop region (Shift+drag on time ruler to set, L to toggle, Esc to clear)">
         <input type="checkbox" checked={loopEnabled} on:change={toggleLoop} />
         🔁 Loop
@@ -2125,6 +2289,9 @@
       </button>
       <button class="tool-btn" on:click={handleReload} title="Reload from last save">
         🔄 Reload
+      </button>
+      <button class="tool-btn" on:click={autoFixWordSpaces} title="Auto-add leading spaces for word boundaries">
+        🔤 Fix Spaces
       </button>
       {#if hasUnsavedChanges}
         <span class="unsaved-indicator">● unsaved</span>
@@ -2195,11 +2362,18 @@
             />
             <span class="ctx-pitch">{noteName(ctxNote.pitch)}</span>
           </div>
+          <label class="ctx-checkbox" class:space-on={ctxNote.syllable.startsWith(' ')} class:space-off={!ctxNote.syllable.startsWith(' ')}>
+            <input type="checkbox"
+              checked={ctxNote.syllable.startsWith(' ')}
+              on:change={(e) => toggleWordSpace(ctxNote.id, e.target.checked)}
+            />
+            Word space
+          </label>
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={() => playNotePitch(ctxNote.id)}>
             🔊 Play Pitch <span class="ctx-shortcut">P</span>
           </button>
-          <button class="ctx-item" on:click={() => splitNote(ctxNote.id)}>
+          <button class="ctx-item" on:click={() => splitNote(ctxNote.id, contextMenu.beat)}>
             ✂️ Split Note <span class="ctx-shortcut">S</span>
           </button>
           <button class="ctx-item" on:click={() => mergeWithNext(ctxNote.id)}>
@@ -2722,6 +2896,33 @@
     align-items: center;
     gap: 4px;
     padding: 4px 10px;
+  }
+
+  .ctx-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    color: #ccc;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .ctx-checkbox.space-on {
+    background: #1b5e2022;
+    color: #66bb6a;
+  }
+  .ctx-checkbox.space-off {
+    background: #b7161622;
+    color: #ef5350;
+  }
+  .ctx-checkbox.space-on input[type="checkbox"] {
+    accent-color: #66bb6a;
+    cursor: pointer;
+  }
+  .ctx-checkbox.space-off input[type="checkbox"] {
+    accent-color: #ef5350;
+    cursor: pointer;
   }
 
   .ctx-type-label {

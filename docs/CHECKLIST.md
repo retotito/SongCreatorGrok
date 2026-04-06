@@ -37,6 +37,23 @@
 - [ ] **Play selected note tone**: Add a button in the note info panel (top right) to play the pitch of the currently selected note.
 - [ ] **Vibrato indicator in piano roll**: Show a visual indicator (e.g. wavy line or icon) on notes where vibrato is detected, so the user can double-check the pitch is correct. Nice-to-have — can also be done manually.
 - [ ] **Save/Load project to disk**: Export the full project (audio, Ultrastar file, editor state, session data) as a folder/archive to the local filesystem, and re-import it later to continue editing.
+- [ ] **Sing-along mode (live mic pitch overlay)**: Capture microphone via `getUserMedia`, detect pitch in real-time, and draw the singer's voice on the piano roll — like UltraStar gameplay. Show note hits/misses visually, optional score counter.
+  - **Research — How UltraStar Deluxe does it** (from USDX source `URecord.pas` + `UNote.pas`):
+    - **Pitch detection**: AMDF (Average Magnitude Difference Function) or CAMDF (Circular variant) on a 4096-sample buffer (~93ms at 44.1kHz). Detects 49 halftones from C2 to C6. No FFT — purely time-domain correlation.
+    - **Octave-folding**: Detected `Tone` is reduced to 0–11 range (one octave). When comparing, the player's tone is shifted by ±12 until the difference to the expected note is within ±6 semitones. This means **octave errors don't matter** — only the chroma (note class) matters.
+    - **Hit tolerance**: `Range = 2 - DifficultyLevel` where difficulty is 0 (Easy), 1 (Medium), 2 (Hard). So: **Easy = ±2 semitones**, **Medium = ±1 semitone**, **Hard = exact match only (±0)**.
+    - **Rap/freestyle notes**: Rap notes (`F:`) always count as hit regardless of pitch. Freestyle notes are ignored entirely.
+    - **Golden notes**: Score is multiplied by `ScoreFactor` (2x for golden notes).
+    - **Scoring**: Max 10000 points split into: normal notes (up to 8000–9000), golden notes bonus, and line bonus (perfect sentence = bonus points). Each beat of a note is worth `(MaxPoints / TotalScoreValue) * ScoreFactor`.
+    - **Beat-level detection**: Pitch is checked once per beat (not per frame). Each beat within a note's duration is independently scored.
+    - **Volume threshold**: There's a volume gate — if the microphone input is below threshold, the tone is marked invalid (silence/noise).
+  - **Our implementation plan**:
+    - Use Web Audio `AnalyserNode` + autocorrelation (similar to AMDF) or the `pitchy` library for browser pitch detection
+    - ~50ms analysis window at 44.1kHz, ~20fps update rate
+    - Octave-fold detected pitch and compare against note chroma (same as USDX)
+    - Draw green dots/trail on piano roll for detected pitch, red when missing
+    - Default tolerance: ±2 semitones (Easy mode), configurable
+    - Headphones recommended (to avoid speaker feedback into mic)
 
 ## Execution Guidelines
 PROGRESS TRACKING:

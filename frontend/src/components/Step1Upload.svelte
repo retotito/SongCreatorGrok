@@ -181,9 +181,14 @@
         } else {
           console.log('[Resume] has_result=false — no previous generation');
         }
-        // Jump to step 3 (generate) since lyrics are already submitted
-        console.log('[Resume] Jumping to step 3');
-        currentStep.set(3);
+        // Jump to step 4 (editor) if result was restored, otherwise step 3
+        if (result.has_result && $generationResult) {
+          console.log('[Resume] Jumping to step 4 (piano roll)');
+          currentStep.set(4);
+        } else {
+          console.log('[Resume] Jumping to step 3');
+          currentStep.set(3);
+        }
       } else {
         console.log('[Resume] No lyrics, jumping to step 2');
         currentStep.set(2);
