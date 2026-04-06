@@ -1,26 +1,9 @@
 <script>
-  import { sessionId, generationResult, errorMessage, isProcessing } from '../stores/appStore.js';
-  import { getDownloadUrl, exportFiles } from '../services/api.js';
+  import { sessionId, generationResult, errorMessage, isProcessing, lyricsData } from '../stores/appStore.js';
+  import { getDownloadUrl, getAudioUrl } from '../services/api.js';
   import { resetSession } from '../stores/appStore.js';
 
   let exported = false;
-
-  async function handleExport() {
-    console.log('[Step5] handleExport, session:', $sessionId);
-    isProcessing.set(true);
-    errorMessage.set('');
-
-    try {
-      await exportFiles($sessionId);
-      console.log('[Step5] Export complete');
-      exported = true;
-    } catch (err) {
-      console.error('[Step5] Export error:', err);
-      errorMessage.set(err.message);
-    } finally {
-      isProcessing.set(false);
-    }
-  }
 
   function downloadFile(type) {
     const url = getDownloadUrl($sessionId, type);
@@ -33,6 +16,32 @@
     a.remove();
   }
 
+  function downloadAudio(type) {
+    const url = getAudioUrl($sessionId, type);
+    console.log('[Step5] Download audio:', type, url);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  async function downloadAll() {
+    // Download each file with a small delay so browser doesn't block them
+    const files = ['txt'];
+    if ($generationResult?.midi_file) files.push('midi');
+    if ($generationResult?.summary_file) files.push('summary');
+
+    for (const type of files) {
+      downloadFile(type);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    // Also download audio
+    downloadAudio('vocals');
+    exported = true;
+  }
+
   function startOver() {
     resetSession();
   }
@@ -43,8 +52,12 @@
 
   {#if $generationResult}
     <div class="summary-card">
-      <h3>Generation Summary</h3>
+      <h3>Song Info</h3>
       <div class="summary-grid">
+        <div class="summary-item wide">
+          <span class="label">Song</span>
+          <span class="value">{$lyricsData?.artist || 'Unknown'} — {$lyricsData?.title || 'Untitled'}</span>
+        </div>
         <div class="summary-item">
           <span class="label">BPM</span>
           <span class="value">{$generationResult.bpm}</span>
@@ -54,51 +67,64 @@
           <span class="value">{$generationResult.gap_ms}ms</span>
         </div>
         <div class="summary-item">
-          <span class="label">Syllables</span>
+          <span class="label">Notes</span>
           <span class="value">{$generationResult.syllable_count}</span>
-        </div>
-        <div class="summary-item">
-          <span class="label">Duration</span>
-          <span class="value">{$generationResult.audio_duration}s</span>
-        </div>
-        <div class="summary-item">
-          <span class="label">Pitch</span>
-          <span class="value">{$generationResult.pitch_method}</span>
-        </div>
-        <div class="summary-item">
-          <span class="label">Alignment</span>
-          <span class="value">{$generationResult.alignment_method}</span>
         </div>
       </div>
     </div>
 
     <div class="download-section">
-      <h3>Download Files</h3>
+      <div class="download-header">
+        <h3>Download Files</h3>
+        <button class="btn btn-primary download-all" on:click={downloadAll}>
+          ⬇ Download All
+        </button>
+      </div>
 
       <div class="download-grid">
         <button class="download-btn" on:click={() => downloadFile('txt')}>
           <span class="file-icon">📄</span>
           <span class="file-name">Ultrastar .txt</span>
-          <span class="file-desc">Note file for Ultrastar</span>
+          <span class="file-desc">Note file for Ultrastar players</span>
         </button>
 
-        <button class="download-btn" on:click={() => downloadFile('midi')}>
-          <span class="file-icon">🎵</span>
-          <span class="file-name">MIDI</span>
-          <span class="file-desc">Pitch data</span>
+        {#if $generationResult?.midi_file}
+          <button class="download-btn" on:click={() => downloadFile('midi')}>
+            <span class="file-icon">🎵</span>
+            <span class="file-name">MIDI</span>
+            <span class="file-desc">Pitch data as MIDI</span>
+          </button>
+        {/if}
+
+        <button class="download-btn" on:click={() => downloadAudio('vocals')}>
+          <span class="file-icon">🎤</span>
+          <span class="file-name">Vocals</span>
+          <span class="file-desc">Separated vocal track</span>
         </button>
 
-        <button class="download-btn" on:click={() => downloadFile('summary')}>
-          <span class="file-icon">📋</span>
-          <span class="file-name">Summary</span>
-          <span class="file-desc">Processing details</span>
+        <button class="download-btn" on:click={() => downloadAudio('original')}>
+          <span class="file-icon">🎶</span>
+          <span class="file-name">Full Mix</span>
+          <span class="file-desc">Original audio file</span>
         </button>
+
+        {#if $generationResult?.summary_file}
+          <button class="download-btn" on:click={() => downloadFile('summary')}>
+            <span class="file-icon">📋</span>
+            <span class="file-name">Summary</span>
+            <span class="file-desc">Processing report</span>
+          </button>
+        {/if}
       </div>
     </div>
 
+    {#if exported}
+      <div class="success-banner">✓ Files downloaded</div>
+    {/if}
+
     <div class="actions">
       <button class="btn btn-secondary" on:click={startOver}>
-        ↩ Start Over
+        ↩ Start New Song
       </button>
     </div>
   {:else}
@@ -117,7 +143,7 @@
   }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
-  h3 { color: #aaa; margin: 1.5rem 0 0.75rem; font-size: 0.95rem; }
+  h3 { color: #aaa; margin: 0; font-size: 0.95rem; }
 
   .summary-card {
     background: #1a1a2e;
@@ -125,6 +151,8 @@
     border-radius: 8px;
     padding: 1rem;
   }
+
+  .summary-card h3 { margin-bottom: 0.75rem; }
 
   .summary-grid {
     display: grid;
@@ -134,6 +162,10 @@
 
   .summary-item {
     text-align: center;
+  }
+
+  .summary-item.wide {
+    grid-column: 1 / -1;
   }
 
   .label {
@@ -150,6 +182,22 @@
     font-weight: 600;
   }
 
+  .download-section {
+    margin-top: 1.5rem;
+  }
+
+  .download-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+
+  .download-all {
+    font-size: 0.9rem;
+    padding: 0.5rem 1.25rem;
+  }
+
   .download-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -161,7 +209,7 @@
     flex-direction: column;
     align-items: center;
     gap: 0.3rem;
-    padding: 1.25rem;
+    padding: 1.25rem 0.5rem;
     border: 1px solid #444;
     border-radius: 8px;
     background: #1a1a2e;
@@ -177,7 +225,18 @@
 
   .file-icon { font-size: 2rem; }
   .file-name { font-weight: 600; font-size: 0.9rem; }
-  .file-desc { font-size: 0.75rem; color: #666; }
+  .file-desc { font-size: 0.7rem; color: #666; text-align: center; }
+
+  .success-banner {
+    text-align: center;
+    padding: 0.5rem;
+    margin-top: 1rem;
+    background: #1a3a2a;
+    border: 1px solid #66bb6a;
+    border-radius: 8px;
+    color: #66bb6a;
+    font-size: 0.85rem;
+  }
 
   .actions {
     margin-top: 2rem;
@@ -185,11 +244,12 @@
   }
 
   .btn {
-    padding: 0.75rem 1.5rem;
+    padding: 0.6rem 1.5rem;
     border: none;
     border-radius: 8px;
     font-size: 0.9rem;
     cursor: pointer;
+    transition: all 0.15s;
   }
 
   .btn-secondary {
@@ -198,6 +258,12 @@
     border: 1px solid #555;
   }
   .btn-secondary:hover { background: #444; }
+
+  .btn-primary {
+    background: #238636;
+    color: #fff;
+  }
+  .btn-primary:hover { background: #2ea043; }
 
   .no-result {
     color: #666;

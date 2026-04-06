@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { sessionId, generationResult, editorState, referenceData, errorMessage } from '../stores/appStore.js';
+  import { sessionId, generationResult, editorState, referenceData, errorMessage, lyricsData } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, getReferenceNotes, applyBpm, saveEditorState } from '../services/api.js';
 
   // Canvas refs
@@ -115,6 +115,14 @@
   let waveformDuration = 0; // actual decoded audio duration (seconds)
   let showWaveform = true;
   const waveformHeight = 60; // px reserved at top of canvas for waveform
+
+  // Audio source toggle (vocals vs full mix)
+  let audioSource = 'vocals'; // 'vocals' | 'original'
+  let originalUrl = '';
+
+  // Text editor modal
+  let showTextEditor = false;
+  let textEditorContent = '';
 
   // Total beats for scrollbar
   let totalBeats = 0;
@@ -1529,6 +1537,76 @@
     console.log(`[AutoFix] Fixed word spaces on ${changed} notes`);
   }
 
+  // ── Audio source toggle ──
+  function switchAudioSource(source) {
+    audioSource = source;
+    const url = source === 'original' ? originalUrl : vocalUrl;
+    const wasPlaying = isPlaying;
+    const time = audioEl?.currentTime || 0;
+    if (wasPlaying) stopPlayback();
+    if (audioEl) {
+      audioEl.src = url;
+      audioEl.load();
+      audioEl.currentTime = time;
+    }
+    // Re-load waveform for new source
+    loadWaveform(url);
+    if (wasPlaying) {
+      audioEl.oncanplay = () => { togglePlayback(); audioEl.oncanplay = null; };
+    }
+    console.log('[Step4] Audio source:', source);
+  }
+
+  // ── Text editor (raw Ultrastar .txt) ──
+  function openTextEditor() {
+    textEditorContent = buildUltrastarContent();
+    showTextEditor = true;
+  }
+
+  function buildUltrastarContent() {
+    // Reconstruct Ultrastar .txt from current editor notes
+    const lines = [];
+    // Headers
+    lines.push(`#TITLE:${$lyricsData?.title || 'Unknown'}`);
+    lines.push(`#ARTIST:${$lyricsData?.artist || 'Unknown'}`);
+    lines.push(`#BPM:${bpm}`);
+    lines.push(`#GAP:${gapMs}`);
+    // Notes
+    for (const note of notes) {
+      if (note.type === 'break') {
+        lines.push(`- ${note.startBeat}`);
+      } else {
+        const prefix = note.type === 'golden' ? '*' : note.type === 'rap' ? 'F:' : ':';
+        lines.push(`${prefix} ${note.startBeat} ${note.duration} ${note.pitch} ${note.syllable}`);
+      }
+    }
+    lines.push('E');
+    return lines.join('\n');
+  }
+
+  function applyTextEditorContent() {
+    const newNotes = parseUltrastar(textEditorContent);
+    if (newNotes.length === 0) {
+      alert('No valid notes found in the text. Check the format.');
+      return;
+    }
+    // Extract BPM/GAP from edited text
+    for (const line of textEditorContent.split('\n')) {
+      const m = line.match(/^#(\w+):(.*)/);
+      if (m) {
+        if (m[1].toUpperCase() === 'BPM') bpm = parseFloat(m[2].replace(',', '.')) || bpm;
+        if (m[1].toUpperCase() === 'GAP') gapMs = parseInt(m[2]) || gapMs;
+      }
+    }
+    pushUndo();
+    notes = newNotes;
+    computeTotalBeats();
+    markUnsaved();
+    draw();
+    showTextEditor = false;
+    console.log(`[TextEditor] Applied: ${notes.length} notes, BPM=${bpm}, GAP=${gapMs}`);
+  }
+
   // Track syllable undo only once when the context menu opens (not per keystroke)
   let syllableUndoPushed = false;
   function updateSyllable(noteId, text) {
@@ -2085,6 +2163,8 @@
       lastSaveTime = data.last_saved ? new Date(data.last_saved * 1000) : null;
       hasUnsavedChanges = false;
       vocalUrl = data.vocal_url;
+      originalUrl = `/api/preview-audio/${$sessionId}/original`;
+      audioSource = 'vocals';
       console.log('[Step4] Vocal URL for playback:', vocalUrl);
       computeTotalBeats();
 
@@ -2293,6 +2373,13 @@
       <button class="tool-btn" on:click={autoFixWordSpaces} title="Auto-add leading spaces for word boundaries">
         🔤 Fix Spaces
       </button>
+      <button class="tool-btn" on:click={openTextEditor} title="Edit raw Ultrastar .txt">
+        📝 Text
+      </button>
+      <div class="audio-source-toggle" title="Audio source">
+        <button class="tool-btn sm" class:active={audioSource === 'vocals'} on:click={() => switchAudioSource('vocals')}>🎤</button>
+        <button class="tool-btn sm" class:active={audioSource === 'original'} on:click={() => switchAudioSource('original')}>🎵</button>
+      </div>
       {#if hasUnsavedChanges}
         <span class="unsaved-indicator">● unsaved</span>
       {:else if lastSaveTime}
@@ -2484,6 +2571,29 @@
     <p><strong>Controls:</strong> Click note to select • Drag to move • Drag edges to resize • Ctrl+Scroll to zoom • Scrollbar to pan • ←→: seek ±5s (Shift: ±1s) • Space: play/pause • ⌥+click to seek • Right-click for context menu • Click/drag breaks to move</p>
     <p><strong>Shortcuts:</strong> ⌘Z: undo • ⇧⌘Z: redo • P: play pitch • S: split • M: merge • Del: delete • ⌘S: save</p>
   </div>
+
+  <!-- Text Editor Modal -->
+  {#if showTextEditor}
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+    <div class="modal-overlay" on:click={() => showTextEditor = false} on:keydown={(e) => e.key === 'Escape' && (showTextEditor = false)} role="dialog" aria-label="Text Editor" tabindex="-1">
+      <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+      <div class="modal-content text-editor-modal" on:click|stopPropagation role="document">
+        <div class="modal-header">
+          <h3>Ultrastar Text Editor</h3>
+          <button class="modal-close" on:click={() => showTextEditor = false}>✕</button>
+        </div>
+        <textarea
+          class="text-editor-textarea"
+          bind:value={textEditorContent}
+          spellcheck="false"
+        ></textarea>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" on:click={() => showTextEditor = false}>Cancel</button>
+          <button class="btn btn-primary" on:click={applyTextEditorContent}>Apply Changes</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -2973,5 +3083,125 @@
     color: #aaa;
     font-family: monospace;
     font-size: 0.8rem;
+  }
+
+  /* Audio source toggle */
+  .audio-source-toggle {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: 4px;
+    background: #111;
+    border-radius: 6px;
+    padding: 1px;
+  }
+
+  /* Text editor modal */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 1.5rem;
+    max-width: 90vw;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .text-editor-modal {
+    width: 800px;
+    height: 80vh;
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+  }
+
+  .modal-header h3 {
+    margin: 0;
+    color: #4fc3f7;
+    font-size: 1.1rem;
+  }
+
+  .modal-close {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+  }
+
+  .modal-close:hover {
+    color: #ef5350;
+    background: rgba(239, 83, 80, 0.1);
+  }
+
+  .text-editor-textarea {
+    flex: 1;
+    width: 100%;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    background: #0d1117;
+    color: #e0e0e0;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 1rem;
+    resize: none;
+    outline: none;
+    tab-size: 4;
+  }
+
+  .text-editor-textarea:focus {
+    border-color: #4fc3f7;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+
+  .btn {
+    padding: 0.5rem 1.25rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-secondary {
+    background: #21262d;
+    color: #ccc;
+    border: 1px solid #30363d;
+  }
+
+  .btn-secondary:hover {
+    background: #30363d;
+  }
+
+  .btn-primary {
+    background: #238636;
+    color: #fff;
+  }
+
+  .btn-primary:hover {
+    background: #2ea043;
   }
 </style>
