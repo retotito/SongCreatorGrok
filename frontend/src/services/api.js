@@ -166,21 +166,4 @@ export function getDownloadUrl(sessionId, fileType) {
   return `${BASE}/download/${sessionId}/${fileType}`;
 }
 
-// ─── Reference Comparison ──────────────────────
-export async function uploadReference(sessionId, file) {
-  const form = new FormData();
-  form.append('reference', file);
-  return request('POST', `/reference/upload/${sessionId}`, form, true);
-}
 
-export async function compareReference(sessionId) {
-  return request('POST', `/reference/compare/${sessionId}`);
-}
-
-export async function getReferenceStats() {
-  return request('GET', '/reference/stats');
-}
-
-export async function getReferenceNotes(sessionId) {
-  return request('GET', `/reference/notes/${sessionId}`);
-}

@@ -1,31 +1,10 @@
 <script>
-  import { sessionId, generationResult, referenceData, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationComparison, generationShowPreview } from '../stores/appStore.js';
-  import { generateUltrastar, compareReference, uploadReference } from '../services/api.js';
-
-  async function handleReferenceUpload(event) {
-    const file = event.target.files?.[0];
-    if (!file || !$sessionId) return;
-    errorMessage.set('');
-    try {
-      const result = await uploadReference($sessionId, file);
-      referenceData.set({
-        uploaded: true,
-        filename: result.filename,
-        notesCount: result.notes_count,
-        bpm: result.bpm,
-        gap: result.gap,
-        comparison: null,
-        lyricsComparison: result.lyrics_comparison || null,
-      });
-    } catch (err) {
-      errorMessage.set(err.message);
-    }
-  }
+  import { sessionId, generationResult, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationShowPreview } from '../stores/appStore.js';
+  import { generateUltrastar } from '../services/api.js';
 
   // Use store-backed variables so data survives navigation
   $: logMessages = $generationLog;
   $: showPreview = $generationShowPreview;
-  $: comparisonResult = $generationComparison;
 
   async function handleGenerate() {
     console.log('[Step3] handleGenerate, session:', $sessionId);
@@ -33,7 +12,6 @@
     isProcessing.set(true);
     generationLog.set([]);
     generationShowPreview.set(false);
-    generationComparison.set(null);
 
     addLog('Starting generation pipeline...');
 
@@ -67,37 +45,6 @@
         addLog(`   ≤200ms: ${mc.within_200ms} (${mc.pct_within_200ms}%) | ≤500ms: ${mc.within_500ms} (${mc.pct_within_500ms}%)`);
         addLog(`   Drift: ${mc.mean_drift_sec > 0 ? '+' : ''}${(mc.mean_drift_sec * 1000).toFixed(0)}ms | Max error: ${(mc.max_error_sec * 1000).toFixed(0)}ms`);
       }
-
-      // Auto-compare with reference if available (beat-based)
-      if ($referenceData.uploaded) {
-        addLog('📚 Comparing with reference file (beat-based)...');
-        try {
-          const comp = await compareReference($sessionId);
-          comparisonResult = comp.comparison;
-          generationComparison.set(comp.comparison);
-          referenceData.update(d => ({ ...d, comparison: comp.comparison }));
-          
-          const s = comp.comparison.summary;
-          addLog(`📊 Reference comparison:`);
-          addLog(`   Matched: ${s.matched_notes}/${s.total_notes_ref} notes`);
-          addLog(`   Pitch bias: ${s.avg_pitch_diff > 0 ? '+' : ''}${s.avg_pitch_diff} semitones (${s.pitch_bias})`);
-          addLog(`   Duration bias: ${s.avg_duration_diff > 0 ? '+' : ''}${s.avg_duration_diff} beats (${s.duration_bias})`);
-          addLog(`   Timing bias: ${s.avg_start_diff > 0 ? '+' : ''}${s.avg_start_diff} beats (${s.timing_bias})`);
-          addLog(`   GAP diff: ${comp.comparison.ai_gap - comp.comparison.ref_gap}ms`);
-          
-          // Lyrics comparison
-          if (comp.comparison.lyrics_comparison) {
-            const lc = comp.comparison.lyrics_comparison;
-            if (lc.exact_match) {
-              addLog(`📝 Lyrics: ✅ match reference exactly`);
-            } else {
-              addLog(`📝 Lyrics: ⚠️ ${Math.round(lc.similarity * 100)}% similar (${lc.matching_lines}/${lc.total_lines_ref} lines match, ${lc.differences.length} differences)`);
-            }
-          }
-        } catch (err) {
-          addLog(`⚠️ Reference comparison failed: ${err.message}`);
-        }
-      }
     } catch (err) {
       addLog(`❌ Error: ${err.message}`);
       errorMessage.set(err.message);
@@ -122,18 +69,6 @@
       <li>Align syllables to audio with WhisperX</li>
       <li>Generate Ultrastar .txt + MIDI files</li>
     </ol>
-  </div>
-
-  <!-- Reference file upload (optional) -->
-  <div class="reference-section">
-    {#if $referenceData.uploaded}
-      <p class="reference-info">📚 Reference: {$referenceData.filename} ({$referenceData.notesCount} notes, BPM: {$referenceData.bpm})</p>
-    {:else}
-      <label class="btn btn-reference">
-        📄 Upload Reference .txt (optional)
-        <input type="file" accept=".txt" on:change={handleReferenceUpload} hidden />
-      </label>
-    {/if}
   </div>
 
   <button
@@ -244,46 +179,6 @@
             </div>
           </details>
         {/if}
-      </div>
-    </div>
-  {/if}
-
-  {#if comparisonResult}
-    <div class="comparison-panel">
-      <h3>📚 Reference Comparison</h3>
-      <div class="stats-row">
-        <div class="stat">
-          <span class="stat-label">Pitch Bias</span>
-          <span class="stat-value" class:positive={comparisonResult.summary.avg_pitch_diff > 0} class:negative={comparisonResult.summary.avg_pitch_diff < 0}>
-            {comparisonResult.summary.avg_pitch_diff > 0 ? '+' : ''}{comparisonResult.summary.avg_pitch_diff}
-          </span>
-          <span class="stat-unit">semitones</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Duration Bias</span>
-          <span class="stat-value" class:positive={comparisonResult.summary.avg_duration_diff > 0} class:negative={comparisonResult.summary.avg_duration_diff < 0}>
-            {comparisonResult.summary.avg_duration_diff > 0 ? '+' : ''}{comparisonResult.summary.avg_duration_diff}
-          </span>
-          <span class="stat-unit">beats</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Timing Bias</span>
-          <span class="stat-value" class:positive={comparisonResult.summary.avg_start_diff > 0} class:negative={comparisonResult.summary.avg_start_diff < 0}>
-            {comparisonResult.summary.avg_start_diff > 0 ? '+' : ''}{comparisonResult.summary.avg_start_diff}
-          </span>
-          <span class="stat-unit">beats</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Matched</span>
-          <span class="stat-value">{comparisonResult.summary.matched_notes}/{comparisonResult.summary.total_notes_ref}</span>
-          <span class="stat-unit">notes</span>
-        </div>
-      </div>
-      <div class="comparison-details">
-        <p>BPM: AI {comparisonResult.ai_bpm} vs Ref {comparisonResult.ref_bpm} (diff: {comparisonResult.summary.bpm_diff})</p>
-        <p>GAP: AI {comparisonResult.ai_gap}ms vs Ref {comparisonResult.ref_gap}ms (diff: {comparisonResult.summary.gap_diff}ms)</p>
-        <p>Exact pitch matches: {comparisonResult.summary.exact_pitch_matches} | Within 1 semitone: {comparisonResult.summary.close_pitch_matches}</p>
-        <p class="hint">This comparison has been stored for future learning.</p>
       </div>
     </div>
   {/if}
@@ -479,42 +374,11 @@
     margin-top: 0.5rem;
   }
 
-  .comparison-panel {
-    border: 1px solid #7b1fa2;
-    border-radius: 8px;
-    padding: 1rem;
-    margin-top: 1rem;
-    background: #1a1025;
-  }
-
-  .comparison-panel h3 {
-    color: #ce93d8;
-  }
-
-  .comparison-details {
-    font-size: 0.8rem;
-    color: #aaa;
-    margin-top: 0.75rem;
-  }
-
-  .comparison-details p {
-    margin: 0.2rem 0;
-  }
-
-  .comparison-details .hint {
-    color: #666;
-    margin-top: 0.5rem;
-    font-style: italic;
-  }
-
   .stat-unit {
     display: block;
     color: #555;
     font-size: 0.65rem;
   }
-
-  .stat-value.positive { color: #ef5350; }
-  .stat-value.negative { color: #42a5f5; }
 
   .error-bar {
     background: #3e1a1a;
@@ -524,31 +388,5 @@
     margin-top: 1rem;
     color: #ef9a9a;
     text-align: center;
-  }
-
-  .reference-section {
-    margin-bottom: 1rem;
-  }
-
-  .reference-info {
-    color: #a5d6a7;
-    font-size: 0.9rem;
-  }
-
-  .btn-reference {
-    background: #37474f;
-    color: #b0bec5;
-    padding: 0.6rem 1.2rem;
-    border: 1px dashed #546e7a;
-    border-radius: 8px;
-    cursor: pointer;
-    font-size: 0.85rem;
-    transition: all 0.2s;
-    display: inline-block;
-  }
-
-  .btn-reference:hover {
-    background: #455a64;
-    border-color: #78909c;
   }
 </style>

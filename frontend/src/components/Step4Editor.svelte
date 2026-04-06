@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { sessionId, generationResult, editorState, referenceData, errorMessage, lyricsData, currentStep } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, getReferenceNotes, applyBpm, saveEditorState } from '../services/api.js';
+  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep } from '../stores/appStore.js';
+  import { getEditorData, getAudioUrl, applyBpm, saveEditorState } from '../services/api.js';
 
   // Canvas refs
   let canvasEl;
@@ -9,16 +9,10 @@
 
   // Data
   let notes = [];
-  let referenceNotes = [];
-  let showReference = true;
   let bpm = 272;
   let gapMs = 0;
   let audioDuration = 0;
   let vocalUrl = '';
-
-  // Reference metadata (for coordinate conversion)
-  let refBpm = 0;
-  let refGapMs = 0;
 
   // Raw ms timings for BPM re-quantization
   let rawTimings = [];   // syllable_timings from backend (start/end in seconds)
@@ -191,21 +185,8 @@
     if (pitchNotes.length === 0) return;
     
     const pitches = pitchNotes.map(n => n.pitch);
-    // Also include reference pitches (after offset normalization) for range calc
-    if (referenceNotes.length > 0) {
-      const refPitches = referenceNotes.filter(n => n.pitch !== undefined && n.type !== 'break').map(n => n.pitch);
-      pitches.push(...refPitches);
-    }
     minPitch = Math.max(24, Math.min(...pitches) - 6);
     maxPitch = Math.min(108, Math.max(...pitches) + 6);
-  }
-
-  // Compute median of a numeric array
-  function median(arr) {
-    if (arr.length === 0) return 0;
-    const sorted = [...arr].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
   // Beat to X pixel
@@ -641,41 +622,6 @@
     }
 
     ctx.textAlign = 'left'; // Reset
-
-    // Draw reference notes (ghost overlay) — convert from absolute time to current beat-space
-    if (showReference && referenceNotes.length > 0) {
-      const curGapSec = gapMs / 1000;
-      for (const note of referenceNotes) {
-        if (note.type === 'break') continue;
-
-        // Convert absolute time → current beat-space on the fly
-        const startBeat = ((note.startTimeSec - curGapSec) * bpm) / 15;
-        const endBeat = ((note.endTimeSec - curGapSec) * bpm) / 15;
-        const dur = Math.max(0.5, endBeat - startBeat);
-
-        const x = beatToX(startBeat);
-        const y = pitchToY(note.pitch);
-        const width = dur * zoom;
-
-        // Ghost outline style
-        ctx.strokeStyle = '#66bb6a88';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
-        ctx.setLineDash([]);
-
-        // Faint fill
-        ctx.fillStyle = '#66bb6a11';
-        ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
-
-        // Syllable text for reference notes
-        if (zoom > 1 && width > 10 && note.syllable) {
-          ctx.fillStyle = '#66bb6a99';
-          ctx.font = '9px sans-serif';
-          ctx.fillText(note.syllable.trim(), x + 2, y - noteHeight / 2 - 2);
-        }
-      }
-    }
 
     // Draw notes
     for (const note of notes) {
@@ -2201,60 +2147,6 @@
         loadWaveform(vocalUrl);
       }
 
-      // Only load reference notes if a reference was actually uploaded
-      if ($referenceData && $referenceData.uploaded) {
-        try {
-          const refData = await getReferenceNotes($sessionId);
-          refBpm = refData.bpm || bpm;
-          refGapMs = refData.gap || 0;
-
-          // Store reference notes with ABSOLUTE TIME (seconds) so they stay
-          // aligned regardless of which BPM/GAP the user sets.
-          // Conversion to current beat-space happens dynamically at draw time.
-          const refGapSec = refGapMs / 1000;
-
-          referenceNotes = (refData.notes || []).map(n => {
-            const startTimeSec = refGapSec + (n.start_beat * 15) / refBpm;
-            const endTimeSec = refGapSec + ((n.start_beat + n.duration) * 15) / refBpm;
-            return {
-              ...n,
-              startTimeSec,
-              endTimeSec,
-              original_start_beat: n.start_beat,
-              original_duration: n.duration,
-            };
-          });
-
-          console.log('[Step4] Loaded', referenceNotes.length, 'reference notes as absolute times (ref BPM', refBpm, 'GAP', refGapMs, ')');
-
-          // Auto-detect and normalize pitch offset between AI notes and reference
-          // AI uses MIDI pitches (e.g., 46-71), reference may use Ultrastar relative (e.g., 5-22)
-          const aiPitchNotes = notes.filter(n => n.pitch !== undefined && n.type !== 'break');
-          const refPitchNotes = referenceNotes.filter(n => n.pitch !== undefined && n.type !== 'break');
-          if (aiPitchNotes.length > 0 && refPitchNotes.length > 0) {
-            const aiMed = median(aiPitchNotes.map(n => n.pitch));
-            const refMed = median(refPitchNotes.map(n => n.pitch));
-            const rawOffset = aiMed - refMed;
-            // Round to nearest octave (12 semitones)
-            const octaveOffset = Math.round(rawOffset / 12) * 12;
-            if (octaveOffset !== 0) {
-              console.log(`[Step4] Shifting reference pitches by ${octaveOffset} semitones (AI median: ${aiMed}, ref median: ${refMed})`);
-              referenceNotes = referenceNotes.map(n => ({
-                ...n,
-                pitch: n.pitch + octaveOffset,
-                original_pitch: n.original_pitch || n.pitch,
-              }));
-            }
-          }
-        } catch (e) {
-          // 404 is expected when no reference was uploaded — don't warn
-          if (!e.message?.includes('404')) {
-            console.warn('[Step4] Failed to load reference notes:', e);
-          }
-          referenceNotes = [];
-        }
-      }
-
       updatePitchRange();
       console.log('[Step4] Pitch range:', minPitch, '-', maxPitch);
       draw();
@@ -2374,15 +2266,6 @@
         </button>
       {/if}
     </div>
-
-    {#if referenceNotes.length > 0}
-      <div class="ref-toggle">
-        <label>
-          <input type="checkbox" bind:checked={showReference} on:change={draw} />
-          📚 Reference
-        </label>
-      </div>
-    {/if}
 
     <div class="save-controls">
       <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save (⌘S)">
@@ -2554,9 +2437,6 @@
     <span class="legend-item"><span class="dot gold"></span> Golden note</span>
     <span class="legend-item"><span class="dot orange"></span> Rap note</span>
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
-    {#if referenceNotes.length > 0}
-      <span class="legend-item"><span class="dot green-dash"></span> Reference note</span>
-    {/if}
   </div>
 
   <!-- Stats bar for debugging timing -->
@@ -2572,14 +2452,6 @@
         {bpmChanged ? '⚠ Modified: ' : 'Generated: '}BPM {(bpm ?? 0).toFixed(1)}{bpmChanged ? ` (was ${(initialBpm ?? 0).toFixed(1)})` : ''} | GAP {gapMs ?? 0}ms{bpmChanged ? ` (was ${initialGap ?? 0}ms)` : ''} | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}
         {#if bpmChanged}<em style="color: #fdd835"> — click Apply to save</em>{/if}
       </span>
-      {#if referenceNotes.length > 0}
-        {@const refRealNotes = referenceNotes.filter(n => !n.type)}
-        {@const refFirst = refRealNotes.length > 0 ? refRealNotes[0] : null}
-        {@const refLast = refRealNotes.length > 0 ? refRealNotes[refRealNotes.length - 1] : null}
-        {@const refFirstTimeSec = refFirst ? refFirst.startTimeSec : 0}
-        {@const refLastTimeSec = refLast ? refLast.endTimeSec : 0}
-        <span>Reference: BPM {(refBpm ?? 0).toFixed(1)} | GAP {refGapMs ?? 0}ms | {formatTime(refFirstTimeSec)}–{formatTime(refLastTimeSec)}</span>
-      {/if}
     </div>
   {/if}
 
@@ -2772,16 +2644,6 @@
   .dot.gold { background: #ffd700; }
   .dot.orange { background: #ff9800; }
   .dot.red-line { background: #c62828; width: 2px; height: 12px; }
-  .dot.green-dash { background: #66bb6a; width: 10px; height: 10px; border: 1px dashed #66bb6a; background: transparent; }
-
-  .ref-toggle {
-    font-size: 0.8rem;
-    color: #66bb6a;
-  }
-
-  .ref-toggle input[type="checkbox"] {
-    margin-right: 0.3rem;
-  }
 
   .save-controls {
     display: flex;
