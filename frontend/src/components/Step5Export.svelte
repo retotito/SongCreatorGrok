@@ -1,5 +1,5 @@
 <script>
-  import { sessionId, generationResult, errorMessage, isProcessing, lyricsData } from '../stores/appStore.js';
+  import { sessionId, generationResult, errorMessage, isProcessing, lyricsData, uploadData } from '../stores/appStore.js';
   import { getDownloadUrl, getAudioUrl } from '../services/api.js';
   import { resetSession } from '../stores/appStore.js';
 
@@ -37,8 +37,14 @@
       downloadFile(type);
       await new Promise(r => setTimeout(r, 300));
     }
-    // Also download audio
-    downloadAudio('vocals');
+    // Download available audio
+    if ($uploadData.hasVocals) {
+      downloadAudio('vocals');
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if ($uploadData.hasOriginal) {
+      downloadAudio('original');
+    }
     exported = true;
   }
 
@@ -96,16 +102,16 @@
           </button>
         {/if}
 
-        <button class="download-btn" on:click={() => downloadAudio('vocals')}>
+        <button class="download-btn" on:click={() => downloadAudio('vocals')} disabled={!$uploadData.hasVocals}>
           <span class="file-icon">🎤</span>
           <span class="file-name">Vocals</span>
-          <span class="file-desc">Separated vocal track</span>
+          <span class="file-desc">{$uploadData.hasVocals ? 'Separated vocal track' : 'Not available'}</span>
         </button>
 
-        <button class="download-btn" on:click={() => downloadAudio('original')}>
+        <button class="download-btn" on:click={() => downloadAudio('original')} disabled={!$uploadData.hasOriginal}>
           <span class="file-icon">🎶</span>
           <span class="file-name">Full Mix</span>
-          <span class="file-desc">Original audio file</span>
+          <span class="file-desc">{$uploadData.hasOriginal ? 'Original audio file' : 'Not available'}</span>
         </button>
 
         {#if $generationResult?.summary_file}
@@ -218,9 +224,14 @@
     transition: all 0.2s;
   }
 
-  .download-btn:hover {
+  .download-btn:hover:not(:disabled) {
     border-color: #4fc3f7;
     background: #1a2e4a;
+  }
+
+  .download-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   .file-icon { font-size: 2rem; }
