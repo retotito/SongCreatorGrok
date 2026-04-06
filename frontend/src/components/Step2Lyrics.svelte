@@ -23,11 +23,14 @@
     audioSrc = getAudioUrl($sessionId, $uploadData.hasVocals ? 'vocals' : 'original');
   }
 
-  // Sync from store if test session loaded
-  $: if ($lyricsData.text) {
+  // Sync from store ONCE on mount (e.g. when navigating back to Step 2)
+  let initializedFromStore = false;
+  $: if ($lyricsData.text && !initializedFromStore) {
+    initializedFromStore = true;
     lyricsText = $lyricsData.text;
     artist = $lyricsData.artist || artist;
     title = $lyricsData.title || title;
+    language = $lyricsData.language || language;
   }
 
   async function handleLoadTestLyrics() {
