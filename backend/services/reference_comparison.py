@@ -201,30 +201,36 @@ def parse_ultrastar_file(content: str) -> dict:
                 prefix = ':'
             parts = line[len(prefix):].strip().split(None, 3)
 
-            if len(parts) >= 4:
-                notes.append({
-                    "start_beat": int(parts[0]),
-                    "duration": int(parts[1]),
-                    "pitch": int(parts[2]),
-                    "syllable": parts[3],
-                    "is_rap": is_rap,
-                })
-            elif len(parts) == 3:
-                notes.append({
-                    "start_beat": int(parts[0]),
-                    "duration": int(parts[1]),
-                    "pitch": int(parts[2]),
-                    "syllable": "",
-                    "is_rap": is_rap,
-                })
+            try:
+                if len(parts) >= 4:
+                    notes.append({
+                        "start_beat": int(parts[0]),
+                        "duration": int(parts[1]),
+                        "pitch": int(parts[2]),
+                        "syllable": parts[3],
+                        "is_rap": is_rap,
+                    })
+                elif len(parts) == 3:
+                    notes.append({
+                        "start_beat": int(parts[0]),
+                        "duration": int(parts[1]),
+                        "pitch": int(parts[2]),
+                        "syllable": "",
+                        "is_rap": is_rap,
+                    })
+            except (ValueError, IndexError):
+                pass  # Skip malformed note lines
 
         # Break line: "- beat" or "- end start"
         elif line.startswith("-"):
             parts = line[1:].strip().split()
-            breaks.append({
-                "beat1": int(parts[0]) if parts else 0,
-                "beat2": int(parts[1]) if len(parts) > 1 else None,
-            })
+            try:
+                breaks.append({
+                    "beat1": int(parts[0]) if parts else 0,
+                    "beat2": int(parts[1]) if len(parts) > 1 else None,
+                })
+            except (ValueError, IndexError):
+                pass  # Not a valid break line (e.g. "---" separators)
 
         # End marker
         elif line.startswith("E"):

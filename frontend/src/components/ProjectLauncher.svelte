@@ -152,7 +152,7 @@
     } catch (e) {
       const msg = e.message || 'Import failed';
       // Show .txt-related errors inline on the txt slot
-      if (msg.includes('Ultrastar') || msg.includes('notes') || msg.includes('BPM') || msg.includes('headers')) {
+      if (msg.includes('Ultrastar') || msg.includes('notes') || msg.includes('BPM') || msg.includes('headers') || msg.includes('int()') || msg.includes('500')) {
         txtError = 'Please upload a valid Ultrastar .txt file. The file must contain note data (lines starting with : or *).';
         importError = '';
       } else {
