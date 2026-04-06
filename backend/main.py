@@ -240,7 +240,15 @@ async def import_ultrastar(
     parsed = parse_ultrastar_file(txt_content)
 
     if not parsed["notes"]:
-        raise HTTPException(status_code=400, detail="No notes found in Ultrastar file")
+        # Give a specific error depending on what's missing
+        has_headers = bool(parsed["headers"])
+        has_bpm = parsed["bpm"] > 0
+        if not has_headers:
+            raise HTTPException(status_code=400, detail="Not a valid Ultrastar file — no #TITLE, #BPM or other headers found")
+        elif not has_bpm:
+            raise HTTPException(status_code=400, detail="Ultrastar file has no #BPM header — cannot parse notes")
+        else:
+            raise HTTPException(status_code=400, detail="No notes found in Ultrastar file (expected lines starting with : or * or F:)")
 
     bpm = parsed["bpm"]
     gap_ms = int(parsed["gap"])
