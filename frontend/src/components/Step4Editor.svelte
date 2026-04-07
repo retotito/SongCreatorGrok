@@ -57,6 +57,12 @@
   let pastePreviewBeat = null; // ghost preview beat position
   let cutNoteIds = new Set();  // ids of notes being cut (rendered semi-transparent)
 
+  // Grid slide (G+drag to move beat grid)
+  let gKeyDown = false;       // is G key currently held
+  let isGridSliding = false;  // currently dragging the grid
+  let gridSlideStartX = 0;    // mouse X at drag start
+  let gridSlideStartGap = 0;  // gapMs at drag start
+
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
   let dragGain = null;
@@ -900,6 +906,17 @@
     // Ignore right-click — let contextmenu handler deal with it
     if (event.button === 2) return;
 
+    // ── G+drag: start grid slide ──
+    if (gKeyDown) {
+      isGridSliding = true;
+      gridSlideStartX = mx;
+      gridSlideStartGap = gapMs;
+      pushUndo();
+      canvasEl.style.cursor = 'ew-resize';
+      console.log(`[GridSlide] Start at gap=${gapMs}ms`);
+      return;
+    }
+
     // Close context menu on left-click
     if (contextMenu.visible) closeContextMenu();
 
@@ -1066,6 +1083,26 @@
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
+
+    // ── Grid slide tracking ──
+    if (isGridSliding) {
+      const dx = mx - gridSlideStartX;
+      // Convert pixel delta to ms: dx pixels / (pixels/beat) = beats, then beats * 15000/bpm = ms
+      const beatDelta = dx / zoom;
+      const msDelta = (beatDelta * 15000) / bpm;
+      // Snap to 1 Ultrastar beat (= 1/8 musical beat)
+      const oneBeatMs = 15000 / bpm;
+      const snappedMs = Math.round(msDelta / oneBeatMs) * oneBeatMs;
+      gapMs = Math.max(0, Math.round(gridSlideStartGap - snappedMs));
+      // Re-quantize notes to the new grid
+      requantizeFromMs();
+      // Update playback cursor
+      if (currentTimeSec > 0) {
+        playbackBeat = timeToBeat(currentTimeSec);
+      }
+      bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
+      return;
+    }
 
     // Playhead drag (scrub)
     if (playheadDrag) {
@@ -1248,6 +1285,16 @@
   }
 
   function handleMouseUp() {
+    // ── Finish grid slide ──
+    if (isGridSliding) {
+      isGridSliding = false;
+      canvasEl.style.cursor = gKeyDown ? 'ew-resize' : '';
+      console.log(`[GridSlide] Done, GAP=${gapMs}ms`);
+      markUnsaved();
+      draw();
+      return;
+    }
+
     // Finish playhead drag
     if (playheadDrag) {
       playheadDrag = false;
@@ -2039,6 +2086,13 @@
     // Skip shortcuts when typing in context menu input
     if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
 
+    // Track G key for grid slide
+    if (e.code === 'KeyG' && !e.metaKey && !e.ctrlKey && !e.altKey && selectedNote === null) {
+      gKeyDown = true;
+      if (canvasEl) canvasEl.style.cursor = 'ew-resize';
+      return; // don't log, just track
+    }
+
     console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
 
     // Undo / Redo (Cmd+Z / Cmd+Shift+Z on Mac, Ctrl+Z / Ctrl+Shift+Z on others)
@@ -2142,6 +2196,13 @@
         e.preventDefault();
         mergeWithNext(selectedNote);
       }
+    }
+  }
+
+  function handleKeyup(e) {
+    if (e.code === 'KeyG') {
+      gKeyDown = false;
+      if (!isGridSliding && canvasEl) canvasEl.style.cursor = '';
     }
   }
 
@@ -2510,6 +2571,7 @@
     }
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('keydown', handleKeydownSave);
+    window.addEventListener('keyup', handleKeyup);
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('click', handleGlobalClick);
   });
@@ -2518,6 +2580,7 @@
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
     window.removeEventListener('keydown', handleKeydownSave);
+    window.removeEventListener('keyup', handleKeyup);
     window.removeEventListener('resize', resizeCanvas);
     window.removeEventListener('click', handleGlobalClick);
   });
@@ -2600,10 +2663,12 @@
       <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; console.log('[UI] bpm+', bpm); handleBpmGapChange(); }}>+</button>
 
       <span class="bpm-label gap-label">GAP</span>
-      <button class="tool-btn sm" on:click={() => { gapMs = Math.max(0, gapMs - 100); console.log('[UI] gap-', gapMs); handleBpmGapChange(); }}>−</button>
-      <input type="number" class="gap-input" bind:value={gapMs} on:change={() => { console.log('[UI] gap input', gapMs); handleBpmGapChange(); }} step="100" min="0" />
-      <button class="tool-btn sm" on:click={() => { gapMs = gapMs + 100; console.log('[UI] gap+', gapMs); handleBpmGapChange(); }}>+</button>
-      <span class="bpm-label">ms</span>
+      <button class="tool-btn sm" on:click={() => { gapMs = Math.max(0, gapMs - Math.round(15000 / bpm)); console.log('[UI] gap-', gapMs); handleBpmGapChange(); }}>−</button>
+      <input type="number" class="gap-input" bind:value={gapMs} on:change={() => { console.log('[UI] gap input', gapMs); handleBpmGapChange(); }} step="1" min="0" />
+      <button class="tool-btn sm" on:click={() => { gapMs = gapMs + Math.round(15000 / bpm); console.log('[UI] gap+', gapMs); handleBpmGapChange(); }}>+</button>
+      <span class="bpm-label gap-beats" title="GAP in musical beats (hold G + drag canvas to slide grid)">
+        {(gapMs * bpm / 15000).toFixed(1)}♩
+      </span>
 
       {#if bpmChanged}
         <button class="tool-btn apply-btn" on:click={handleApplyBpm} disabled={applyingBpm}>
@@ -3152,6 +3217,13 @@
 
   .gap-label {
     margin-left: 0.6rem;
+  }
+
+  .gap-beats {
+    color: #4fc3f7;
+    font-family: monospace;
+    font-size: 0.75rem;
+    opacity: 0.7;
   }
 
   .bpm-input, .gap-input {
