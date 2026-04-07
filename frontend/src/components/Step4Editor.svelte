@@ -61,6 +61,14 @@
   let setGapMode = false;       // user is picking a new GAP position
   let setGapHoverBeat = null;   // beat of the grid line currently hovered
 
+  // Grid Align mode (Ctrl/Cmd+G)
+  let gridAlignMode = false;       // user is sliding the grid
+  let gridAlignOffsetMs = 0;       // accumulated offset in ms (preview only)
+  let gridAlignOriginalGapMs = 0;  // gapMs before entering mode (for Esc revert)
+  let gridAlignDragging = false;   // currently dragging
+  let gridAlignDragStartX = 0;     // mouse X at drag start
+  let gridAlignDragStartOffsetMs = 0; // offset at drag start
+
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
   let dragGain = null;
@@ -453,8 +461,8 @@
       if (setGapMode) {
         // Already in set-gap mode — exit
         cancelSetGapMode();
-      } else {
-        // Enter set-gap mode
+      } else if (!isPlaying) {
+        // Enter set-gap mode (not while playing)
         setGapMode = true;
         setGapHoverBeat = null;
         if (canvasEl) canvasEl.style.cursor = 'crosshair';
@@ -468,6 +476,51 @@
     setGapHoverBeat = null;
     if (canvasEl) canvasEl.style.cursor = '';
     draw();
+  }
+
+  // ── Grid Align mode functions ──
+  function enterGridAlignMode() {
+    if (isPlaying) return; // don't enter while playing
+    gridAlignMode = true;
+    gridAlignOffsetMs = 0;
+    gridAlignOriginalGapMs = gapMs;
+    gridAlignDragging = false;
+    if (canvasEl) canvasEl.style.cursor = 'ew-resize';
+    draw();
+  }
+
+  function confirmGridAlign() {
+    const newGapMs = gridAlignOriginalGapMs + gridAlignOffsetMs;
+    console.log(`[GridAlign] Confirm: offset=${gridAlignOffsetMs}ms, newGap=${newGapMs}ms`);
+    gapMs = newGapMs;
+    gridAlignMode = false;
+    gridAlignOffsetMs = 0;
+    gridAlignDragging = false;
+    if (canvasEl) canvasEl.style.cursor = '';
+    handleBpmGapChange();
+    markUnsaved();
+  }
+
+  function cancelGridAlign() {
+    console.log(`[GridAlign] Cancel, reverting to gap=${gridAlignOriginalGapMs}ms`);
+    gapMs = gridAlignOriginalGapMs;
+    gridAlignMode = false;
+    gridAlignOffsetMs = 0;
+    gridAlignDragging = false;
+    if (canvasEl) canvasEl.style.cursor = '';
+    draw();
+  }
+
+  /** Convert a ms offset to a pixel offset at the current zoom/bpm */
+  function msToPixels(ms) {
+    // 1 beat = zoom pixels, 1 beat = 15000/bpm ms
+    // so 1ms = zoom * bpm / 15000 pixels
+    return (ms / 1000) * (bpm / 15) * zoom;
+  }
+
+  /** Convert a pixel offset to ms at the current zoom/bpm */
+  function pixelsToMs(px) {
+    return (px / zoom) * (15000 / bpm);
   }
 
   /** Max allowed GAP time (seconds) = earliest raw timing start */
@@ -607,13 +660,15 @@
     // Grid lines (beats) — musical subdivisions
     // BEATS_PER_QUARTER = 8 ultrastar beats per real quarter note
     // Quarter note lines (thickest), 8th note lines (medium), fine lines (thinnest)
-    const startBeat = Math.floor(xToBeat(0));
-    const endBeat = Math.ceil(xToBeat(w));
+    // In gridAlignMode, grid lines are offset by gridAlignOffsetMs (preview shift)
+    const gridOffsetPx = gridAlignMode ? msToPixels(gridAlignOffsetMs) : 0;
+    const startBeat = Math.floor(xToBeat(0 - gridOffsetPx));
+    const endBeat = Math.ceil(xToBeat(w - gridOffsetPx));
     const beatsPerMeasure = BEATS_PER_QUARTER * 4; // 4/4 time = 4 quarter notes per measure
     const beatsPerEighth = BEATS_PER_QUARTER / 2;  // half a quarter note
     
     for (let b = startBeat; b <= endBeat; b++) {
-      const x = beatToX(b);
+      const x = beatToX(b) + gridOffsetPx;
       const isMeasure = b % beatsPerMeasure === 0;
       const isQuarter = b % BEATS_PER_QUARTER === 0;
       const isEighth = b % beatsPerEighth === 0;
@@ -641,7 +696,7 @@
 
     // ── GAP marker (beat 0) — yellow dashed line ──
     {
-      const gapX = beatToX(0);
+      const gapX = beatToX(0) + gridOffsetPx;
       if (gapX >= -1 && gapX <= w + 1) {
         ctx.save();
         ctx.strokeStyle = '#ffd700';
@@ -993,6 +1048,14 @@
     // Ignore right-click — let contextmenu handler deal with it
     if (event.button === 2) return;
 
+    // ── Grid Align mode: start drag ──
+    if (gridAlignMode) {
+      gridAlignDragging = true;
+      gridAlignDragStartX = mx;
+      gridAlignDragStartOffsetMs = gridAlignOffsetMs;
+      return;
+    }
+
     // ── Set GAP mode click ──
     if (setGapMode && setGapHoverBeat !== null) {
       // Compute the new GAP: the absolute time of the hovered grid line becomes the new GAP
@@ -1002,6 +1065,7 @@
       gapMs = newGapMs;
       cancelSetGapMode();
       handleBpmGapChange();
+      markUnsaved();
       return;
     }
 
@@ -1217,6 +1281,16 @@
       return;
     }
 
+    // ── Grid Align mode: drag to slide grid ──
+    if (gridAlignMode) {
+      if (gridAlignDragging) {
+        const dx = mx - gridAlignDragStartX;
+        gridAlignOffsetMs = gridAlignDragStartOffsetMs + pixelsToMs(dx);
+      }
+      draw();
+      return;
+    }
+
     // ── Set GAP mode hover: highlight nearest valid grid line ──
     if (setGapMode) {
       const hoverBeat = nearestGridBeat(mx);
@@ -1369,6 +1443,14 @@
   }
 
   function handleMouseUp() {
+    // Finish grid align drag
+    if (gridAlignDragging) {
+      gridAlignDragging = false;
+      console.log(`[GridAlign] Drag done, offset=${gridAlignOffsetMs.toFixed(1)}ms`);
+      draw();
+      return;
+    }
+
     // Finish playhead drag
     if (playheadDrag) {
       playheadDrag = false;
@@ -2039,6 +2121,15 @@
 
   function handleWheel(event) {
     event.preventDefault();
+
+    // Grid Align mode: trackpad scroll adjusts grid offset
+    if (gridAlignMode) {
+      if (Math.abs(event.deltaX) > 0.5) {
+        gridAlignOffsetMs -= pixelsToMs(event.deltaX);
+        draw();
+      }
+      return;
+    }
     
     if (event.ctrlKey || event.metaKey) {
       // Zoom
@@ -2068,6 +2159,7 @@
       console.log('[Play] No audioEl');
       return;
     }
+    if (gridAlignMode || setGapMode) return; // block playback during grid/gap modes
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
@@ -2203,7 +2295,7 @@
     // Spacebar: toggle play/pause
     if (e.code === 'Space') {
       e.preventDefault();
-      togglePlayback();
+      if (!gridAlignMode && !setGapMode) togglePlayback();
     }
     // Left arrow: move cursor (seek) — 5s or 1s with Shift
     if (e.code === 'ArrowLeft') {
@@ -2221,10 +2313,30 @@
       e.preventDefault();
       toggleLoop();
     }
-    // Escape: cancel setGap mode, paste mode, clear loop, or deselect
+    // Ctrl/Cmd+G: enter Grid Align mode
+    if ((e.metaKey || e.ctrlKey) && e.code === 'KeyG') {
+      e.preventDefault();
+      if (gridAlignMode) {
+        cancelGridAlign();
+      } else {
+        enterGridAlignMode();
+      }
+      return;
+    }
+
+    // Enter: confirm grid align
+    if (e.code === 'Enter' && gridAlignMode) {
+      e.preventDefault();
+      confirmGridAlign();
+      return;
+    }
+
+    // Escape: cancel gridAlign, setGap mode, paste mode, clear loop, or deselect
     if (e.code === 'Escape') {
       e.preventDefault();
-      if (setGapMode) {
+      if (gridAlignMode) {
+        cancelGridAlign();
+      } else if (setGapMode) {
         cancelSetGapMode();
       } else if (pasteMode) {
         cancelPaste();
@@ -2783,6 +2895,20 @@
     ></canvas>
   </div>
 
+  <!-- Grid Align mode overlay bar -->
+  {#if gridAlignMode}
+    <div class="gridalign-mode-bar">
+      <span class="gridalign-mode-text">
+        GRID ALIGN MODE — Drag or scroll to slide grid, Enter to confirm, Esc to cancel
+      </span>
+      <span class="gridalign-mode-offset">
+        {gridAlignOffsetMs >= 0 ? '+' : ''}{gridAlignOffsetMs.toFixed(1)}ms
+      </span>
+      <button class="gridalign-confirm-btn" on:click={confirmGridAlign}>✓ Confirm</button>
+      <button class="gridalign-cancel-btn" on:click={cancelGridAlign}>✕ Cancel</button>
+    </div>
+  {/if}
+
   <!-- Set GAP mode overlay bar -->
   {#if setGapMode}
     <div class="setgap-mode-bar">
@@ -3073,6 +3199,59 @@
     transition: background 0.2s;
   }
   .setgap-cancel-btn:hover { background: #e53935; }
+
+  /* ── Grid Align mode bar ── */
+  .gridalign-mode-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    background: linear-gradient(90deg, #2a1a3a, #3a2a5a);
+    border: 1px solid #9c27b0;
+    border-radius: 6px;
+    padding: 6px 16px;
+    margin: 4px 0;
+    animation: gridalign-pulse 1.5s ease-in-out infinite alternate;
+  }
+  @keyframes gridalign-pulse {
+    from { border-color: #9c27b0; }
+    to { border-color: #ce93d8; box-shadow: 0 0 8px rgba(156, 39, 176, 0.3); }
+  }
+  .gridalign-mode-text {
+    color: #e1bee7;
+    font-size: 0.82rem;
+    font-weight: 500;
+  }
+  .gridalign-mode-offset {
+    color: #ffd700;
+    font-size: 0.95rem;
+    font-weight: bold;
+    font-family: monospace;
+    min-width: 80px;
+    text-align: center;
+  }
+  .gridalign-confirm-btn {
+    background: #2e7d32;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .gridalign-confirm-btn:hover { background: #43a047; }
+  .gridalign-cancel-btn {
+    background: #c62828;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .gridalign-cancel-btn:hover { background: #e53935; }
 
   /* ── Selection info bar ── */
   .selection-info-bar {
