@@ -952,7 +952,7 @@
       }
     }
 
-    // Playback cursor (show when playing OR when paused at non-zero position)
+    // Playback cursor
     if (isPlaying || currentTimeSec > 0) {
       const cx = beatToX(playbackBeat);
       const pianoBottom = h - timeAxisHeight;
@@ -2218,6 +2218,13 @@
     audioEl.currentTime = t;
     currentTimeSec = t;
     playbackBeat = timeToBeat(t);
+    // Scroll only if the playhead would be off-screen
+    const canvasWidth = canvasEl?.width || 800;
+    const px = beatToX(playbackBeat);
+    if (px < 0 || px > canvasWidth) {
+      const minScrollX = getMinBeat() * zoom;
+      scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.1);
+    }
     draw();
   }
 
@@ -2768,12 +2775,13 @@
 
   <div class="toolbar">
     <div class="playback-controls">
+      <button class="tool-btn" on:click={() => { console.log('[UI] jump to 0s'); seekToTime(0); }} title="Jump to 0s">⏮⏮</button>
+      <button class="tool-btn" on:click={() => { console.log('[UI] jump to GAP'); seekToTime(gapMs / 1000); }} title="Jump to GAP (beat 0)">⏮</button>
       <button class="tool-btn" on:click={() => { console.log('[UI] seek -5'); seekPlayback(-5); }} title="Back 5s (←)">⏪</button>
       <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
         {isPlaying ? '⏸ Pause' : '▶ Play'}
       </button>
       <button class="tool-btn" on:click={() => { console.log('[UI] seek +5'); seekPlayback(5); }} title="Forward 5s (→)">⏩</button>
-      <button class="tool-btn" on:click={() => { console.log('[UI] stop'); stopPlayback(); }}>⏹ Stop</button>
       <span class="time-display">{formatTime(currentTimeSec)}</span>
     </div>
 
