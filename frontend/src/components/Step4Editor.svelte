@@ -62,6 +62,7 @@
   let isGridSliding = false;  // currently dragging the grid
   let gridSlideStartX = 0;    // mouse X at drag start
   let gridSlideStartGap = 0;  // gapMs at drag start
+  let gridSlideWheelTimer = null; // debounce timer for wheel-based grid slide
 
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
@@ -1965,6 +1966,35 @@
 
   function handleWheel(event) {
     event.preventDefault();
+
+    // ── G held: horizontal wheel slides the beat grid ──
+    if (gKeyDown && Math.abs(event.deltaX) > 1) {
+      if (!isGridSliding) {
+        // First wheel tick while G held — treat as grid-slide start
+        gridSlideStartGap = gapMs;
+        pushUndo();
+      }
+      isGridSliding = true;
+      // Convert pixel delta to ms, snap to 1 Ultrastar beat
+      const beatDelta = event.deltaX / zoom;
+      const msDelta = (beatDelta * 15000) / bpm;
+      const oneBeatMs = 15000 / bpm;
+      const snappedMs = Math.round(msDelta / oneBeatMs) * oneBeatMs;
+      if (snappedMs !== 0) {
+        gapMs = Math.max(0, Math.round(gapMs + snappedMs));
+        requantizeFromMs();
+        if (currentTimeSec > 0) playbackBeat = timeToBeat(currentTimeSec);
+        bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
+      }
+      // Clear the slide after a short idle (wheel events come in bursts)
+      clearTimeout(gridSlideWheelTimer);
+      gridSlideWheelTimer = setTimeout(() => {
+        isGridSliding = false;
+        console.log(`[GridSlide] Wheel done, gap=${gapMs}ms`);
+      }, 300);
+      draw();
+      return;
+    }
     
     if (event.ctrlKey || event.metaKey) {
       // Zoom
@@ -2087,7 +2117,7 @@
     if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
 
     // Track G key for grid slide
-    if (e.code === 'KeyG' && !e.metaKey && !e.ctrlKey && !e.altKey && selectedNote === null) {
+    if (e.code === 'KeyG' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       gKeyDown = true;
       if (canvasEl) canvasEl.style.cursor = 'ew-resize';
       return; // don't log, just track
@@ -2323,12 +2353,14 @@
   function updateMetronome(currentBeat) {
     // Click on every quarter note (every BEATS_PER_QUARTER ultrastar beats)
     // Apply offset to shift the click grid
+    // Works for negative beats (before GAP) too, so the grid is audible from audio start
     const offsetBeat = currentBeat - metronomeOffset;
     const quarterBeat = Math.floor(offsetBeat / BEATS_PER_QUARTER);
-    if (quarterBeat !== lastMetronomeBeat && currentBeat >= 0) {
+    if (quarterBeat !== lastMetronomeBeat) {
       lastMetronomeBeat = quarterBeat;
-      // Downbeat = first beat of measure (assuming 4/4 time, every 4 quarter notes)
-      const isDownbeat = quarterBeat % 4 === 0;
+      // Downbeat = beat 0 (where GAP is). Use modulo that works for negatives.
+      const mod = ((quarterBeat % 4) + 4) % 4;
+      const isDownbeat = mod === 0;
       playMetronomeClick(isDownbeat);
     }
   }
