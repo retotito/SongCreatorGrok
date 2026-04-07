@@ -854,7 +854,7 @@
       ctx.fillStyle = '#42a5f5aa';
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('Drag to set beat 0 • click to place • G to cancel', w / 2, pianoBottom - 6);
+      ctx.fillText('Drag to align • ←→ nudge by beat • G to cancel', w / 2, pianoBottom - 6);
       ctx.textAlign = 'left';
     }
 
@@ -2150,12 +2150,15 @@
     // Toggle grid alignment mode with G
     if (e.code === 'KeyG' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (!gridAlignMode) {
-        // Enter alignment mode — show line at current beat 0
+        // Enter alignment mode — place line at nearest quarter-note beat to playhead
         gridAlignMode = true;
-        gridAlignTimeSec = gapMs / 1000;
         gridAlignDragging = false;
+        // Find the nearest quarter-note grid line to the playhead
+        const nearestQuarter = Math.round(playbackBeat / BEATS_PER_QUARTER) * BEATS_PER_QUARTER;
+        gridAlignTimeSec = beatToTime(nearestQuarter);
+        if (gridAlignTimeSec < 0) gridAlignTimeSec = beatToTime(0);
         if (canvasEl) canvasEl.style.cursor = 'ew-resize';
-        console.log(`[GridAlign] ON — line at ${gridAlignTimeSec.toFixed(3)}s`);
+        console.log(`[GridAlign] ON — line at ${gridAlignTimeSec.toFixed(3)}s (beat ${nearestQuarter})`);
         draw();
       } else {
         // Cancel alignment mode without changing GAP
@@ -2213,15 +2216,29 @@
       e.preventDefault();
       togglePlayback();
     }
-    // Left arrow: move cursor (seek) — 5s or 1s with Shift
+    // Left arrow: in grid align mode, nudge line one quarter note left; otherwise seek
     if (e.code === 'ArrowLeft') {
       e.preventDefault();
-      seekPlayback(e.shiftKey ? -1 : -5);
+      if (gridAlignMode) {
+        const beatPeriodSec = (BEATS_PER_QUARTER * 15) / bpm;
+        gridAlignTimeSec = Math.max(0, gridAlignTimeSec - beatPeriodSec);
+        console.log(`[GridAlign] ← ${gridAlignTimeSec.toFixed(3)}s`);
+        draw();
+      } else {
+        seekPlayback(e.shiftKey ? -1 : -5);
+      }
     }
-    // Right arrow: move cursor (seek) — 5s or 1s with Shift
+    // Right arrow: in grid align mode, nudge line one quarter note right; otherwise seek
     if (e.code === 'ArrowRight') {
       e.preventDefault();
-      seekPlayback(e.shiftKey ? 1 : 5);
+      if (gridAlignMode) {
+        const beatPeriodSec = (BEATS_PER_QUARTER * 15) / bpm;
+        gridAlignTimeSec = gridAlignTimeSec + beatPeriodSec;
+        console.log(`[GridAlign] → ${gridAlignTimeSec.toFixed(3)}s`);
+        draw();
+      } else {
+        seekPlayback(e.shiftKey ? 1 : 5);
+      }
     }
 
     // L: toggle loop on/off
