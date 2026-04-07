@@ -141,13 +141,6 @@ export async function saveCorrections(sessionId, corrections) {
   return request('POST', `/corrections/${sessionId}`, corrections);
 }
 
-export async function applyBpm(sessionId, bpm, gapMs) {
-  const form = new FormData();
-  form.append('bpm', bpm);
-  form.append('gap_ms', gapMs);
-  return request('POST', `/apply-bpm/${sessionId}`, form, true);
-}
-
 export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders = []) {
   return request('POST', `/save-editor/${sessionId}`, { notes, bpm, gap_ms: gapMs, extra_headers: extraHeaders });
 }

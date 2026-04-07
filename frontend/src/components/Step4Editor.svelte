@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, applyBpm, saveEditorState } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState } from '../services/api.js';
 
   // Canvas refs
   let canvasEl;
@@ -20,7 +20,6 @@
   let initialBpm = 0;    // original detected BPM
   let initialGap = 0;    // original detected GAP
   let bpmChanged = false; // track if user modified BPM/GAP
-  let applyingBpm = false; // loading state for Apply button
 
   // Save state
   let isSaving = false;
@@ -379,39 +378,46 @@
   }
 
   // ──── Undo / Redo ───────────────────────────
-  function snapshotNotes() {
-    return JSON.parse(JSON.stringify(notes));
+  function snapshot() {
+    return {
+      notes: JSON.parse(JSON.stringify(notes)),
+      bpm,
+      gapMs,
+      extraHeaders: JSON.parse(JSON.stringify(extraHeaders)),
+    };
+  }
+
+  function restoreSnapshot(snap) {
+    notes = snap.notes;
+    if (snap.bpm !== undefined) bpm = snap.bpm;
+    if (snap.gapMs !== undefined) gapMs = snap.gapMs;
+    if (snap.extraHeaders !== undefined) extraHeaders = snap.extraHeaders;
+    selectedNote = null;
+    selectedNotes = new Set();
+    closeContextMenu();
+    markUnsaved();
+    updatePitchRange();
+    computeTotalBeats();
+    draw();
   }
 
   function pushUndo() {
-    undoStack.push(snapshotNotes());
+    undoStack.push(snapshot());
     if (undoStack.length > MAX_UNDO) undoStack.shift();
     redoStack = []; // new action clears redo
   }
 
   function undo() {
     if (undoStack.length === 0) return;
-    redoStack.push(snapshotNotes());
-    notes = undoStack.pop();
-    selectedNote = null;
-    closeContextMenu();
-    markUnsaved();
-    updatePitchRange();
-    computeTotalBeats();
-    draw();
+    redoStack.push(snapshot());
+    restoreSnapshot(undoStack.pop());
     console.log(`[Undo] Restored (${undoStack.length} left, ${redoStack.length} redo)`);
   }
 
   function redo() {
     if (redoStack.length === 0) return;
-    undoStack.push(snapshotNotes());
-    notes = redoStack.pop();
-    selectedNote = null;
-    closeContextMenu();
-    markUnsaved();
-    updatePitchRange();
-    computeTotalBeats();
-    draw();
+    undoStack.push(snapshot());
+    restoreSnapshot(redoStack.pop());
     console.log(`[Redo] Restored (${undoStack.length} undo, ${redoStack.length} left)`);
   }
 
@@ -568,31 +574,6 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs();
-  }
-
-  // Apply BPM to backend (regenerate Ultrastar file)
-  async function handleApplyBpm() {
-    if (!$sessionId) return;
-    applyingBpm = true;
-    try {
-      const result = await applyBpm($sessionId, bpm, gapMs);
-      // Update generationResult store so Step 5 gets correct BPM/GAP
-      generationResult.update(r => ({ ...r, bpm, gap_ms: gapMs }));
-      initialBpm = bpm;
-      initialGap = gapMs;
-      bpmChanged = false;
-      // Re-parse the returned Ultrastar content to get updated notes
-      if (result.ultrastar_content) {
-        notes = parseUltrastar(result.ultrastar_content);
-        updatePitchRange();
-        draw();
-      }
-    } catch (err) {
-      console.error('[Step4] Apply BPM error:', err);
-      errorMessage.set(err.message);
-    } finally {
-      applyingBpm = false;
-    }
   }
 
   // ──── Drawing ────────────────────────────────
@@ -2279,8 +2260,8 @@
   function handleKeydown(e) {
     // Skip all shortcuts when text editor modal is open
     if (showTextEditor) return;
-    // Skip shortcuts when typing in context menu input
-    if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
+    // Skip shortcuts when typing in an input field (BPM, GAP, context menu, etc.)
+    if (e.target.tagName === 'INPUT') return;
 
     console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
 
@@ -2882,12 +2863,6 @@
       <input type="number" class="gap-input" bind:value={gapMs} on:change={() => { console.log('[UI] gap input', gapMs); handleBpmGapChange(); }} step="100" min="0" />
       <button class="tool-btn sm" on:click={() => { gapMs = gapMs + 100; console.log('[UI] gap+', gapMs); handleBpmGapChange(); }}>+</button>
       <span class="bpm-label">ms</span>
-
-      {#if bpmChanged}
-        <button class="tool-btn apply-btn" on:click={handleApplyBpm} disabled={applyingBpm}>
-          {applyingBpm ? '⏳' : '✓'} Apply
-        </button>
-      {/if}
     </div>
 
     <div class="save-controls">
@@ -3128,7 +3103,6 @@
     <div class="stats-bar">
       <span>
         {bpmChanged ? '⚠ Modified: ' : 'Generated: '}BPM {(bpm ?? 0).toFixed(1)}{bpmChanged ? ` (was ${(initialBpm ?? 0).toFixed(1)})` : ''} | GAP {gapMs ?? 0}ms{bpmChanged ? ` (was ${initialGap ?? 0}ms)` : ''} | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}
-        {#if bpmChanged}<em style="color: #fdd835"> — click Apply to save</em>{/if}
       </span>
     </div>
   {/if}
@@ -3601,22 +3575,6 @@
     padding: 0.2rem 0.4rem;
     font-size: 0.75rem;
     min-width: 22px;
-  }
-
-  .apply-btn {
-    background: #2e7d32 !important;
-    color: #fff !important;
-    margin-left: 0.4rem;
-    font-weight: 600;
-  }
-
-  .apply-btn:hover {
-    background: #388e3c !important;
-  }
-
-  .apply-btn:disabled {
-    opacity: 0.6;
-    cursor: wait;
   }
 
   .shortcut-bar {

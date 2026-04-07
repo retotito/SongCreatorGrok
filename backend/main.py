@@ -1452,65 +1452,6 @@ async def save_corrections(session_id: str, corrections: dict = None):
     return {"status": "ok", "saved": correction_file}
 
 
-# ────────────────────────────────────────────────────────────
-# Step 4b: Apply BPM / GAP (re-quantize from raw ms timings)
-# ────────────────────────────────────────────────────────────
-@app.post("/api/apply-bpm/{session_id}")
-async def apply_bpm(session_id: str, bpm: float = Form(...), gap_ms: int = Form(...)):
-    """Regenerate Ultrastar content with user-specified BPM and GAP.
-    
-    Uses the stored raw syllable_timings (in seconds) and pitch_data to
-    re-quantize notes to the new beat grid.  This lets the user adjust BPM
-    in the piano-roll editor and then export a clean Ultrastar file.
-    """
-    session = sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    result = session.get("result")
-    if not result:
-        raise ServiceError("No generation result", "Run generation first")
-
-    syllable_timings = result.get("syllable_timings")
-    pitch_data = result.get("pitch_data")
-    if not syllable_timings:
-        raise ServiceError("No syllable timings available")
-
-    # Regenerate Ultrastar content with new BPM / GAP
-    from services.ultrastar import generate_ultrastar, generate_processing_summary
-    ultrastar_content = generate_ultrastar(
-        syllable_timings=syllable_timings,
-        pitch_data=pitch_data,
-        bpm=bpm,
-        gap_ms=gap_ms,
-        artist=session.get("artist", "Unknown Artist"),
-        title=session.get("title", "Unknown Song"),
-        language=session.get("language", "English"),
-    )
-
-    # Save the new txt file
-    timestamp = int(time.time())
-    txt_filename = f"song_{timestamp}.txt"
-    txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(ultrastar_content)
-
-    # Update session result
-    result["bpm"] = bpm
-    result["gap_ms"] = gap_ms
-    result["ultrastar_content"] = ultrastar_content
-    result["txt_file"] = txt_filename
-
-    log_step("APPLY-BPM", f"Session {session_id}: BPM={bpm:.2f}, GAP={gap_ms}ms → {txt_filename}")
-    save_session(session_id)
-
-    return {
-        "status": "ok",
-        "bpm": bpm,
-        "gap_ms": gap_ms,
-        "ultrastar_content": ultrastar_content,
-    }
-
 
 # ────────────────────────────────────────────────────────────
 # Step 5: Export & Download
