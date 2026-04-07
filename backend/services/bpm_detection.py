@@ -158,6 +158,48 @@ def detect_bpm(audio_path: str, original_audio_path: str = None) -> float:
     return ultrastar_bpm
 
 
+def detect_beat_phase(audio_path: str, ultrastar_bpm: float) -> float:
+    """Detect where musical beats fall in the audio (beat phase).
+    
+    Uses librosa beat tracking to find actual beat positions, then
+    computes the phase offset — the time of the first beat modulo
+    the beat period.
+    
+    Args:
+        audio_path: Path to audio file (prefer original mix with drums)
+        ultrastar_bpm: Ultrastar BPM (2x musical BPM)
+    
+    Returns:
+        Phase offset in seconds (0 <= phase < beat_period).
+        The musical beat grid is: phase, phase + period, phase + 2*period, ...
+    """
+    musical_bpm = ultrastar_bpm / 2.0
+    beat_period = 60.0 / musical_bpm  # seconds per musical beat
+    
+    y, sr = librosa.load(audio_path, sr=22050)
+    
+    # Use librosa beat tracker with BPM hint
+    tempo, beat_frames = librosa.beat_track(y=y, sr=sr, bpm=musical_bpm)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+    
+    if len(beat_times) < 4:
+        log_step("BPM", "Not enough beats for phase estimation, defaulting to 0")
+        return 0.0
+    
+    # Compute phase using circular mean (handles wrap-around at beat boundaries)
+    angles = [2 * np.pi * (bt % beat_period) / beat_period for bt in beat_times]
+    sin_mean = float(np.mean(np.sin(angles)))
+    cos_mean = float(np.mean(np.cos(angles)))
+    phase_angle = np.arctan2(sin_mean, cos_mean)
+    if phase_angle < 0:
+        phase_angle += 2 * np.pi
+    phase = phase_angle / (2 * np.pi) * beat_period
+    
+    log_step("BPM", f"Beat phase: {phase:.3f}s (period={beat_period:.3f}s, "
+             f"from {len(beat_times)} detected beats)")
+    return phase
+
+
 def refine_bpm(syllable_timings: list, gap_ms: int, initial_bpm: float) -> float:
     """Refine BPM using syllable timestamps after alignment.
     

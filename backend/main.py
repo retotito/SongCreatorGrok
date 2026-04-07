@@ -1023,11 +1023,14 @@ async def generate_ultrastar_files(session_id: str):
     try:
         # Step 3a: BPM Detection
         log_step("GENERATE", "Step 1/4: BPM detection")
-        from services.bpm_detection import detect_bpm, get_audio_duration, refine_bpm
+        from services.bpm_detection import detect_bpm, get_audio_duration, refine_bpm, detect_beat_phase
         
         original_path = session.get("original_audio")
         bpm = detect_bpm(vocal_path, original_audio_path=original_path)
         audio_duration = get_audio_duration(vocal_path)
+        
+        # Detect beat phase (where musical beats actually fall in the audio)
+        beat_phase_sec = detect_beat_phase(original_path or vocal_path, bpm)
         
         # Step 3b: Pitch Detection
         log_step("GENERATE", "Step 2/4: Pitch detection")
@@ -1076,11 +1079,31 @@ async def generate_ultrastar_files(session_id: str):
             from services.alignment import align_lyrics_to_audio
             syllable_timings = align_lyrics_to_audio(vocal_path, lyrics, language)
         
-        # Calculate GAP from first syllable
+        # Calculate GAP aligned to the musical beat grid
+        # Instead of GAP = first syllable (forces beat 0 = first note),
+        # we find the last musical beat at or before the first syllable.
+        # This way the beat grid follows the music's rhythm and notes
+        # can start at fractional beats (e.g., beat 3.5).
         gap_ms = 0
         if syllable_timings:
-            gap_ms = int(syllable_timings[0]["start"] * 1000)
-            log_step("GENERATE", f"GAP: {gap_ms}ms (first syllable at {syllable_timings[0]['start']:.3f}s)")
+            first_start_ms = syllable_timings[0]["start"] * 1000
+            musical_bpm = bpm / 2.0
+            beat_period_ms = 60000.0 / musical_bpm
+            phase_ms = beat_phase_sec * 1000.0
+            
+            # Find the last musical beat at or before the first syllable
+            n_beats = int((first_start_ms - phase_ms) / beat_period_ms)
+            gap_ms = int(phase_ms + n_beats * beat_period_ms)
+            if gap_ms > first_start_ms:
+                gap_ms = int(gap_ms - beat_period_ms)
+            gap_ms = max(0, gap_ms)
+            
+            first_note_offset_ms = first_start_ms - gap_ms
+            first_note_beat = first_note_offset_ms * bpm / 15000
+            log_step("GENERATE", f"GAP: {gap_ms}ms (phase={phase_ms:.0f}ms, "
+                     f"first syllable={first_start_ms:.0f}ms, "
+                     f"first note at beat {first_note_beat:.1f}, "
+                     f"period={beat_period_ms:.0f}ms)")
         
         # Refine BPM using syllable timestamps (can recover exact BPM)
         bpm = refine_bpm(syllable_timings, gap_ms, bpm)
@@ -1172,6 +1195,7 @@ async def generate_ultrastar_files(session_id: str):
             "summary_file": summary_filename,
             "bpm": bpm,
             "gap_ms": gap_ms,
+            "beat_phase_sec": beat_phase_sec,
             "syllable_count": len(syllable_timings),
             "audio_duration": audio_duration,
             "pitch_method": pitch_method,
@@ -1278,6 +1302,7 @@ async def get_editor_data(session_id: str):
         "session_id": session_id,
         "bpm": result["bpm"],
         "gap_ms": result["gap_ms"],
+        "beat_phase_ms": result.get("beat_phase_sec", 0.0) * 1000,
         "audio_duration": result["audio_duration"],
         "syllable_timings": result["syllable_timings"],
         "ultrastar_content": result["ultrastar_content"],
