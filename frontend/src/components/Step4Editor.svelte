@@ -62,6 +62,10 @@
   let gridAlignTimeSec = 0;       // line position in absolute audio seconds
   let gridAlignDragging = false;  // currently dragging the alignment line
 
+  // Set GAP mode (Ctrl+S: pick which grid line becomes Ultrastar beat 0)
+  let setGapMode = false;          // set-GAP mode active
+  let setGapHoverBeat = null;      // beat of the grid line currently hovered (or null)
+
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
   let dragGain = null;
@@ -616,6 +620,55 @@
       }
     }
 
+    // ── Set GAP mode: highlight hovered grid line ──
+    if (setGapMode && setGapHoverBeat !== null) {
+      const hx = beatToX(setGapHoverBeat);
+      if (hx >= -2 && hx <= w + 2) {
+        // Bright yellow highlight line
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(hx, wt);
+        ctx.lineTo(hx, pianoH);
+        ctx.stroke();
+
+        // Handle dot at top
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath();
+        ctx.arc(hx, wt + 14, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('S', hx, wt + 17);
+        ctx.textAlign = 'left';
+
+        // Label showing time
+        const hoverTimeSec = beatToTime(setGapHoverBeat);
+        const ms = Math.round(hoverTimeSec * 1000);
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`GAP → ${ms}ms`, hx, pianoH + 14);
+        ctx.textAlign = 'left';
+
+        // Hint at top
+        ctx.fillStyle = '#ffd700cc';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Click to set GAP here · Esc to cancel', w / 2, wt + 30);
+        ctx.textAlign = 'left';
+      }
+    } else if (setGapMode) {
+      // Show hint even when not hovering a line
+      ctx.fillStyle = '#ffd700aa';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Hover a grid line to set as GAP · Esc to cancel', w / 2, wt + 30);
+      ctx.textAlign = 'left';
+    }
+
     // ── Time axis (bottom strip) ──
     ctx.fillStyle = '#12121e';
     ctx.fillRect(0, pianoH, w, timeAxisHeight);
@@ -977,6 +1030,30 @@
     if (event.button === 2) return;
 
     // ── Grid alignment line: click near line to start dragging ──
+    // ── Set GAP mode: click on hovered grid line → set GAP ──
+    if (setGapMode) {
+      if (setGapHoverBeat !== null) {
+        const newGapTimeSec = beatToTime(setGapHoverBeat);
+        const newGapMs = Math.max(0, Math.round(newGapTimeSec * 1000));
+        const oldGapMs = gapMs;
+        if (newGapMs !== oldGapMs) {
+          pushUndo();
+          gapMs = newGapMs;
+          requantizeFromMs();
+          if (currentTimeSec > 0) playbackBeat = timeToBeat(currentTimeSec);
+          bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
+          markUnsaved();
+          console.log(`[SetGAP] Applied GAP: ${oldGapMs}ms → ${gapMs}ms (beat ${setGapHoverBeat})`);
+        }
+        // Exit set-GAP mode
+        setGapMode = false;
+        setGapHoverBeat = null;
+        canvasEl.style.cursor = '';
+        draw();
+      }
+      return;
+    }
+
     if (gridAlignMode) {
       const lineTimeSec = gridAlignTimeSec;
       const lineBeat = ((lineTimeSec - gapMs / 1000) * bpm) / 15;
@@ -1215,6 +1292,28 @@
     if (isSettingLoop) {
       loopEndBeat = Math.round(xToBeat(mx));
       draw();
+      return;
+    }
+
+    // ── Set GAP mode: detect nearest grid line under cursor ──
+    if (setGapMode) {
+      const hoverBeat = xToBeat(mx);
+      // Snap to nearest quarter-note grid line
+      const nearestQuarter = Math.round(hoverBeat / BEATS_PER_QUARTER) * BEATS_PER_QUARTER;
+      const nearestX = beatToX(nearestQuarter);
+      if (Math.abs(mx - nearestX) <= 12) {
+        if (setGapHoverBeat !== nearestQuarter) {
+          setGapHoverBeat = nearestQuarter;
+          canvasEl.style.cursor = 'pointer';
+          draw();
+        }
+      } else {
+        if (setGapHoverBeat !== null) {
+          setGapHoverBeat = null;
+          canvasEl.style.cursor = 'crosshair';
+          draw();
+        }
+      }
       return;
     }
 
@@ -2177,6 +2276,25 @@
     // Skip shortcuts when typing in context menu input
     if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
 
+    // Toggle Set GAP mode with Ctrl/Cmd+S
+    if (e.code === 'KeyS' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      if (!setGapMode) {
+        setGapMode = true;
+        setGapHoverBeat = null;
+        if (canvasEl) canvasEl.style.cursor = 'crosshair';
+        console.log('[SetGAP] ON');
+        draw();
+      } else {
+        setGapMode = false;
+        setGapHoverBeat = null;
+        if (canvasEl) canvasEl.style.cursor = '';
+        console.log('[SetGAP] Cancelled');
+        draw();
+      }
+      return;
+    }
+
     // Toggle grid alignment mode with Ctrl/Cmd+G
     if (e.code === 'KeyG' && (e.metaKey || e.ctrlKey) && !e.altKey) {
       e.preventDefault();
@@ -2277,10 +2395,16 @@
       e.preventDefault();
       toggleLoop();
     }
-    // Escape: cancel paste mode, or clear loop, or deselect
+    // Escape: cancel paste mode, setGap mode, or clear loop, or deselect
     if (e.code === 'Escape') {
       e.preventDefault();
-      if (pasteMode) {
+      if (setGapMode) {
+        setGapMode = false;
+        setGapHoverBeat = null;
+        if (canvasEl) canvasEl.style.cursor = '';
+        console.log('[SetGAP] Cancelled via Escape');
+        draw();
+      } else if (pasteMode) {
         cancelPaste();
       } else if (selectedNotes.size > 0) {
         selectedNotes = new Set();
