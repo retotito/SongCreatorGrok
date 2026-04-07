@@ -144,6 +144,9 @@
   let showTextEditor = false;
   let textEditorContent = '';
 
+  // Extra Ultrastar headers (e.g. #YOUTUBE, #COVER, etc.) — preserved across edits
+  let extraHeaders = [];
+
   // Total beats for scrollbar
   let totalBeats = 0;
 
@@ -432,7 +435,7 @@
         };
       });
 
-      const result = await saveEditorState($sessionId, noteData, bpm, gapMs);
+      const result = await saveEditorState($sessionId, noteData, bpm, gapMs, extraHeaders);
       editCount = result.edit_count || editCount + 1;
       lastSaveTime = new Date();
       hasUnsavedChanges = false;
@@ -457,6 +460,7 @@
 
   // Keyboard shortcut: Ctrl/Cmd+S to enter Set GAP mode (or save if already in setGapMode)
   function handleKeydownSave(e) {
+    if (showTextEditor) return; // skip when text editor is open
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
       if (setGapMode) {
@@ -2032,11 +2036,18 @@
   function buildUltrastarContent() {
     // Reconstruct Ultrastar .txt from current editor notes
     const lines = [];
-    // Headers
+    // Standard headers
     lines.push(`#TITLE:${$lyricsData?.title || 'Unknown'}`);
     lines.push(`#ARTIST:${$lyricsData?.artist || 'Unknown'}`);
     lines.push(`#BPM:${bpm}`);
     lines.push(`#GAP:${gapMs}`);
+    // Extra headers (YOUTUBE, COVER, LANGUAGE, etc.)
+    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP']);
+    for (const h of extraHeaders) {
+      if (!standardKeys.has(h.key.toUpperCase())) {
+        lines.push(`#${h.key}:${h.value}`);
+      }
+    }
     // Notes
     for (const note of notes) {
       if (note.type === 'break') {
@@ -2056,21 +2067,30 @@
       alert('No valid notes found in the text. Check the format.');
       return;
     }
-    // Extract BPM/GAP from edited text
+    // Extract all headers from edited text
+    const parsedHeaders = [];
     for (const line of textEditorContent.split('\n')) {
-      const m = line.match(/^#(\w+):(.*)/);
+      const m = line.match(/^#([\w]+):(.*)/);
       if (m) {
-        if (m[1].toUpperCase() === 'BPM') bpm = parseFloat(m[2].replace(',', '.')) || bpm;
-        if (m[1].toUpperCase() === 'GAP') gapMs = parseInt(m[2]) || gapMs;
+        const key = m[1];
+        const value = m[2];
+        if (key.toUpperCase() === 'BPM') bpm = parseFloat(value.replace(',', '.')) || bpm;
+        else if (key.toUpperCase() === 'GAP') gapMs = parseInt(value) || gapMs;
+        else if (key.toUpperCase() === 'TITLE') { /* handled by lyricsData */ }
+        else if (key.toUpperCase() === 'ARTIST') { /* handled by lyricsData */ }
+        else parsedHeaders.push({ key, value });
       }
     }
+    extraHeaders = parsedHeaders;
     pushUndo();
     notes = newNotes;
     computeTotalBeats();
     markUnsaved();
     draw();
     showTextEditor = false;
-    console.log(`[TextEditor] Applied: ${notes.length} notes, BPM=${bpm}, GAP=${gapMs}`);
+    console.log(`[TextEditor] Applied: ${notes.length} notes, BPM=${bpm}, GAP=${gapMs}, ${extraHeaders.length} extra headers`);
+    // Auto-save to backend
+    handleSave();
   }
 
   // Track syllable undo only once when the context menu opens (not per keystroke)
@@ -2257,6 +2277,8 @@
   }
 
   function handleKeydown(e) {
+    // Skip all shortcuts when text editor modal is open
+    if (showTextEditor) return;
     // Skip shortcuts when typing in context menu input
     if (e.target.tagName === 'INPUT' && e.target.classList.contains('ctx-syllable-input')) return;
 
@@ -2692,6 +2714,20 @@
       
       notes = parseUltrastar(data.ultrastar_content);
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
+
+      // Parse extra headers from ultrastar content
+      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP']);
+      extraHeaders = [];
+      for (const line of (data.ultrastar_content || '').split('\n')) {
+        const m = line.match(/^#([\w]+):(.*)/);
+        if (m && !standardKeys.has(m[1].toUpperCase())) {
+          extraHeaders.push({ key: m[1], value: m[2] });
+        }
+      }
+      if (extraHeaders.length > 0) {
+        console.log('[Step4] Extra headers:', extraHeaders.map(h => h.key).join(', '));
+      }
+
       bpm = data.bpm;
       gapMs = data.gap_ms;
 

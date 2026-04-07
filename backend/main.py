@@ -1337,6 +1337,7 @@ async def save_editor_state(session_id: str, request: Request):
     editor_notes = body.get("notes", [])
     editor_bpm = body.get("bpm")
     editor_gap = body.get("gap_ms")
+    extra_headers = body.get("extra_headers", [])
 
     if not editor_notes:
         raise ServiceError("No notes provided")
@@ -1355,6 +1356,14 @@ async def save_editor_state(session_id: str, request: Request):
                  "ko": "Korean", "zh": "Chinese"}.get(lang, lang.title())
     lines.append(f"#LANGUAGE:{lang_name}")
     lines.append(f"#MP3:{os.path.basename(session.get('original_audio', 'song.mp3'))}")
+
+    # Extra headers from the editor (e.g. YOUTUBE, COVER, etc.)
+    standard_keys = {'TITLE', 'ARTIST', 'BPM', 'GAP', 'LANGUAGE', 'MP3'}
+    for header in extra_headers:
+        key = header.get('key', '')
+        value = header.get('value', '')
+        if key.upper() not in standard_keys:
+            lines.append(f"#{key}:{value}")
 
     for note in editor_notes:
         note_type = note.get("type", "")
@@ -1395,7 +1404,7 @@ async def save_editor_state(session_id: str, request: Request):
     save_session(session_id)
 
     note_count = sum(1 for n in editor_notes if n.get("type") != "break")
-    log_step("SAVE-EDITOR", f"Session {session_id}: {note_count} notes, BPM={editor_bpm:.1f}, GAP={editor_gap}ms (save #{result['edit_count']})")
+    log_step("SAVE-EDITOR", f"Session {session_id}: {note_count} notes, BPM={editor_bpm:.1f}, GAP={editor_gap}ms, {len(extra_headers)} extra headers (save #{result['edit_count']})")
 
     return {
         "status": "ok",
