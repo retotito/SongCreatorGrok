@@ -57,6 +57,10 @@
   let pastePreviewBeat = null; // ghost preview beat position
   let cutNoteIds = new Set();  // ids of notes being cut (rendered semi-transparent)
 
+  // Set GAP mode (Ctrl/Cmd+S)
+  let setGapMode = false;       // user is picking a new GAP position
+  let setGapHoverBeat = null;   // beat of the grid line currently hovered
+
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
   let dragGain = null;
@@ -442,12 +446,58 @@
     editorState.update(s => ({ ...s, hasChanges: false }));
   }
 
-  // Keyboard shortcut: Ctrl/Cmd+S to save
+  // Keyboard shortcut: Ctrl/Cmd+S to enter Set GAP mode (or save if already in setGapMode)
   function handleKeydownSave(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      handleSave();
+      if (setGapMode) {
+        // Already in set-gap mode — exit
+        cancelSetGapMode();
+      } else {
+        // Enter set-gap mode
+        setGapMode = true;
+        setGapHoverBeat = null;
+        if (canvasEl) canvasEl.style.cursor = 'crosshair';
+        draw();
+      }
     }
+  }
+
+  function cancelSetGapMode() {
+    setGapMode = false;
+    setGapHoverBeat = null;
+    if (canvasEl) canvasEl.style.cursor = '';
+    draw();
+  }
+
+  /** Max allowed GAP time (seconds) = earliest raw timing start */
+  function getMaxGapSec() {
+    if (rawTimings && rawTimings.length > 0) {
+      return Math.min(...rawTimings.map(t => t.start));
+    }
+    // Fallback: earliest note's time
+    if (notes.length > 0) {
+      const firstBeat = Math.min(...notes.filter(n => n.type !== 'break').map(n => n.startBeat));
+      return beatToTime(firstBeat);
+    }
+    return Infinity;
+  }
+
+  /** Find the nearest visible grid line beat to a given x pixel */
+  function nearestGridBeat(mx) {
+    const beat = xToBeat(mx);
+    // Snap to the nearest integer beat (every ultrastar beat is a grid line)
+    // But only to lines that are actually visible at the current zoom level
+    const beatsPerMeasure = BEATS_PER_QUARTER * 4;
+    const beatsPerEighth = BEATS_PER_QUARTER / 2;
+    let snapResolution;
+    if (zoom >= 4) {
+      snapResolution = 1;  // every beat line visible
+    } else {
+      snapResolution = beatsPerEighth; // only eighth-note and above lines visible
+    }
+    const snapped = Math.round(beat / snapResolution) * snapResolution;
+    return snapped;
   }
 
   // Handle BPM or GAP adjustment — re-quantize visually
@@ -587,6 +637,49 @@
       ctx.moveTo(x, wt);
       ctx.lineTo(x, pianoH);
       ctx.stroke();
+    }
+
+    // ── GAP marker (beat 0) — yellow dashed line ──
+    {
+      const gapX = beatToX(0);
+      if (gapX >= -1 && gapX <= w + 1) {
+        ctx.save();
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(gapX, 0);
+        ctx.lineTo(gapX, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
+    // ── Set GAP mode: yellow hover highlight on nearest grid line ──
+    if (setGapMode && setGapHoverBeat !== null) {
+      const hoverX = beatToX(setGapHoverBeat);
+      if (hoverX >= 0 && hoverX <= w) {
+        ctx.save();
+        ctx.strokeStyle = '#ffd700';
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(hoverX, 0);
+        ctx.lineTo(hoverX, pianoH);
+        ctx.stroke();
+        // Small label
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        const hoverTimeSec = beatToTime(setGapHoverBeat);
+        // Show where GAP would be set (the time at this beat position converted to new GAP)
+        // New GAP = time of this grid line (since this line becomes beat 0)
+        const newGapMs = Math.round(hoverTimeSec * 1000);
+        ctx.fillText(`GAP ${newGapMs}ms`, hoverX, 12);
+        ctx.restore();
+      }
     }
 
     // ── Time axis (bottom strip) ──
@@ -900,6 +993,18 @@
     // Ignore right-click — let contextmenu handler deal with it
     if (event.button === 2) return;
 
+    // ── Set GAP mode click ──
+    if (setGapMode && setGapHoverBeat !== null) {
+      // Compute the new GAP: the absolute time of the hovered grid line becomes the new GAP
+      const newGapSec = beatToTime(setGapHoverBeat);
+      const newGapMs = Math.round(newGapSec * 1000);
+      console.log(`[SetGAP] Setting GAP to ${newGapMs}ms (beat ${setGapHoverBeat} → time ${newGapSec.toFixed(3)}s)`);
+      gapMs = newGapMs;
+      cancelSetGapMode();
+      handleBpmGapChange();
+      return;
+    }
+
     // Close context menu on left-click
     if (contextMenu.visible) closeContextMenu();
 
@@ -1108,6 +1213,22 @@
     // Loop region drag on time axis
     if (isSettingLoop) {
       loopEndBeat = Math.round(xToBeat(mx));
+      draw();
+      return;
+    }
+
+    // ── Set GAP mode hover: highlight nearest valid grid line ──
+    if (setGapMode) {
+      const hoverBeat = nearestGridBeat(mx);
+      const hoverTimeSec = beatToTime(hoverBeat);
+      const maxGapSec = getMaxGapSec();
+      // Only allow if this position is at or before the first note's raw start time
+      if (hoverTimeSec <= maxGapSec) {
+        setGapHoverBeat = hoverBeat;
+      } else {
+        setGapHoverBeat = null;
+      }
+      canvasEl.style.cursor = setGapHoverBeat !== null ? 'crosshair' : 'not-allowed';
       draw();
       return;
     }
@@ -2100,10 +2221,12 @@
       e.preventDefault();
       toggleLoop();
     }
-    // Escape: cancel paste mode, or clear loop, or deselect
+    // Escape: cancel setGap mode, paste mode, clear loop, or deselect
     if (e.code === 'Escape') {
       e.preventDefault();
-      if (pasteMode) {
+      if (setGapMode) {
+        cancelSetGapMode();
+      } else if (pasteMode) {
         cancelPaste();
       } else if (selectedNotes.size > 0) {
         selectedNotes = new Set();
@@ -2613,7 +2736,7 @@
     </div>
 
     <div class="save-controls">
-      <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save (⌘S)">
+      <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save">
         {isSaving ? '⏳' : '💾'} Save
       </button>
       <button class="tool-btn" on:click={handleReload} title="Reload from last save">
@@ -2659,6 +2782,16 @@
       on:contextmenu={handleContextMenu}
     ></canvas>
   </div>
+
+  <!-- Set GAP mode overlay bar -->
+  {#if setGapMode}
+    <div class="setgap-mode-bar">
+      <span class="setgap-mode-text">
+        SET GAP MODE — Click a grid line to set the GAP position, or press Esc to cancel
+      </span>
+      <button class="setgap-cancel-btn" on:click={cancelSetGapMode}>✕ Cancel</button>
+    </div>
+  {/if}
 
   <!-- Paste mode overlay bar -->
   {#if pasteMode}
@@ -2906,6 +3039,40 @@
     transition: background 0.2s;
   }
   .paste-cancel-btn:hover { background: #e53935; }
+
+  /* ── Set GAP mode bar ── */
+  .setgap-mode-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    background: linear-gradient(90deg, #3a3a1a, #5a5a2a);
+    border: 1px solid #ffd700;
+    border-radius: 6px;
+    padding: 6px 16px;
+    margin: 4px 0;
+    animation: setgap-pulse 1.5s ease-in-out infinite alternate;
+  }
+  @keyframes setgap-pulse {
+    from { border-color: #ffd700; }
+    to { border-color: #ffeb3b; box-shadow: 0 0 8px rgba(255, 215, 0, 0.3); }
+  }
+  .setgap-mode-text {
+    color: #fff9c4;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .setgap-cancel-btn {
+    background: #c62828;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .setgap-cancel-btn:hover { background: #e53935; }
 
   /* ── Selection info bar ── */
   .selection-info-bar {
