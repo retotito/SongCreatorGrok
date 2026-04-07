@@ -660,18 +660,18 @@
       const isEighth = b % beatsPerEighth === 0;
       
       if (isMeasure) {
-        ctx.strokeStyle = '#3a3a5e';
+        ctx.strokeStyle = '#5555a0';
         ctx.lineWidth = 1.5;
       } else if (isQuarter) {
-        ctx.strokeStyle = '#2a2a4e';
+        ctx.strokeStyle = '#404078';
         ctx.lineWidth = 1;
       } else if (isEighth) {
-        ctx.strokeStyle = '#1e1e38';
+        ctx.strokeStyle = '#30305a';
         ctx.lineWidth = 0.5;
       } else {
         // 16th note level — only show if zoomed in enough (> 4px per beat)
         if (zoom < 4) continue;
-        ctx.strokeStyle = '#161625';
+        ctx.strokeStyle = '#252545';
         ctx.lineWidth = 0.3;
       }
       ctx.beginPath();
