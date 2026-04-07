@@ -1200,6 +1200,15 @@
     if (!isDragging && !isSettingLoop && !loopHandleDrag && !playheadDrag) {
       let cursor = '';
 
+      // Check grid alignment line hover
+      if (gridAlignMode && !gridAlignDragging) {
+        const lineBeat = ((gridAlignTimeSec - gapMs / 1000) * bpm) / 15;
+        const lineX = beatToX(lineBeat);
+        if (Math.abs(mx - lineX) <= 20) {
+          cursor = 'grab';
+        }
+      }
+
       // Check playhead handle (when paused)
       if (!isPlaying && currentTimeSec > 0) {
         const cx = beatToX(playbackBeat);
