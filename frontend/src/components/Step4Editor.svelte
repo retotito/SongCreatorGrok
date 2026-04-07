@@ -1366,9 +1366,8 @@
     // ── Finish grid alignment drag → apply new GAP ──
     if (gridAlignDragging) {
       gridAlignDragging = false;
-      // Snap to nearest Ultrastar beat
-      const oneBeatMs = 15000 / bpm;
-      const newGapMs = Math.max(0, Math.round((gridAlignTimeSec * 1000) / oneBeatMs) * oneBeatMs);
+      // No snapping — GAP goes exactly where you placed the line
+      const newGapMs = Math.max(0, Math.round(gridAlignTimeSec * 1000));
       const oldGapMs = gapMs;
       if (newGapMs !== oldGapMs) {
         pushUndo();
