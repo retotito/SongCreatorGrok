@@ -159,6 +159,7 @@
   // Sticky prediction state for smoothing
   let micLastPitch = -1;
   let micPitchConfidence = 0;
+  let micRecentPitches = []; // rolling window for median smoothing
 
   // Text editor modal
   let showTextEditor = false;
@@ -915,9 +916,17 @@
           continue;
         }
         // Check if this sample continues the current bar
-        if (currentBar && s.pitch === currentBar.pitch && (s.time - currentBar.endTime) < 0.06) {
-          currentBar.endTime = s.time;
-          currentBar.endBeat = beat;
+        // Allow ±1 semitone wobble and up to 150ms time gap
+        if (currentBar && Math.abs(s.pitch - currentBar.pitch) <= 1 && (s.time - currentBar.endTime) < 0.15) {
+          // Use the more common pitch in the bar (mode tracking)
+          if (s.pitch === currentBar.pitch) {
+            currentBar.endTime = s.time;
+            currentBar.endBeat = beat;
+          } else {
+            // Wobble within ±1: keep bar pitch, extend time
+            currentBar.endTime = s.time;
+            currentBar.endBeat = beat;
+          }
         } else {
           if (currentBar) bars.push(currentBar);
           currentBar = { pitch: s.pitch, startTime: s.time, endTime: s.time, startBeat: beat, endBeat: beat };
@@ -2723,9 +2732,9 @@
     const [frequency, clarity] = micDetector.findPitch(micInputBuffer, micAudioCtx.sampleRate);
 
     if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) {
-      // Silence: decay confidence, reset sticky pitch
+      // Silence: decay confidence, reset sticky pitch and rolling window
       if (micPitchConfidence > 0) micPitchConfidence--;
-      if (micPitchConfidence === 0) micLastPitch = -1;
+      if (micPitchConfidence === 0) { micLastPitch = -1; micRecentPitches = []; }
       return;
     }
 
@@ -2733,22 +2742,36 @@
     let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
     const rawPitch = midiPitch;
 
-    // ── Smoothing: sticky prediction ──
-    if (micSmoothing !== 'raw' && micLastPitch > 0) {
-      const drift = Math.abs(midiPitch - micLastPitch);
-      if (drift <= 1) {
-        // Close enough — accept and boost confidence
-        micPitchConfidence = Math.min(5, micPitchConfidence + 1);
-      } else if (micPitchConfidence >= 3) {
-        // Big jump but high confidence — keep previous pitch (suppress jitter)
-        midiPitch = micLastPitch;
-        micPitchConfidence--;
+    // ── Smoothing ──
+    if (micSmoothing !== 'raw') {
+      // Rolling median: collect recent pitches and take the median
+      micRecentPitches.push(midiPitch);
+      if (micRecentPitches.length > 5) micRecentPitches.shift();
+
+      // Median of last 5 samples — much more stable than sticky prediction alone
+      const sorted = [...micRecentPitches].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+
+      // If current pitch is within 2 semitones of median, use median (suppresses vibrato)
+      if (Math.abs(midiPitch - median) <= 2) {
+        midiPitch = median;
+      }
+      // Sticky prediction: if we have a stable pitch, hold it through brief jumps
+      if (micLastPitch > 0) {
+        const drift = Math.abs(midiPitch - micLastPitch);
+        if (drift === 0) {
+          micPitchConfidence = Math.min(8, micPitchConfidence + 1);
+        } else if (drift <= 2 && micPitchConfidence >= 4) {
+          // Small drift but high confidence — hold the previous pitch
+          midiPitch = micLastPitch;
+          micPitchConfidence--;
+        } else {
+          // Accept the new pitch
+          micPitchConfidence = 1;
+        }
       } else {
-        // Low confidence — accept new pitch
         micPitchConfidence = 1;
       }
-    } else if (micSmoothing !== 'raw') {
-      micPitchConfidence = 1;
     }
     micLastPitch = midiPitch;
 
@@ -2804,6 +2827,9 @@
 
   function clearMicTrail() {
     micPitchTrail = [];
+    micLastPitch = -1;
+    micPitchConfidence = 0;
+    micRecentPitches = [];
     draw();
   }
 
