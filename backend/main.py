@@ -1639,36 +1639,55 @@ async def get_reference_notes(session_id: str):
 
 
 @app.post("/api/save-mic-trail/{session_id}")
-async def save_mic_trail(session_id: str, request: Request):
-    """Save a mic pitch trail recording to the session's downloads folder.
+async def save_mic_trail(session_id: str, trail: str = Form(...), audio: UploadFile = File(None)):
+    """Save a mic pitch trail recording + optional voice audio to downloads folder.
     
+    Accepts multipart form: 'trail' (JSON string) and optional 'audio' (webm file).
     Keeps only the last 5 recordings, auto-deleting the oldest.
     """
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    body = await request.json()
+    body = json.loads(trail)
     
     # Save to downloads folder with timestamp
     import glob as glob_mod
     timestamp = int(time.time())
-    filename = f"mic_trail_{session_id[:8]}_{timestamp}.json"
-    filepath = os.path.join(DOWNLOADS_DIR, filename)
     
-    with open(filepath, "w") as f:
+    # Save trail JSON
+    trail_filename = f"mic_trail_{session_id[:8]}_{timestamp}.json"
+    trail_filepath = os.path.join(DOWNLOADS_DIR, trail_filename)
+    with open(trail_filepath, "w") as f:
         json.dump(body, f, indent=2)
     
-    # Keep only last 5 mic trail files for this session
-    pattern = os.path.join(DOWNLOADS_DIR, f"mic_trail_{session_id[:8]}_*.json")
-    existing = sorted(glob_mod.glob(pattern))
-    while len(existing) > 5:
-        oldest = existing.pop(0)
-        os.remove(oldest)
-        log_step("MIC", f"Removed old mic trail: {os.path.basename(oldest)}")
+    # Save audio if provided
+    audio_filename = None
+    if audio and audio.filename:
+        ext = audio.filename.rsplit('.', 1)[-1] if '.' in audio.filename else 'webm'
+        audio_filename = f"mic_audio_{session_id[:8]}_{timestamp}.{ext}"
+        audio_filepath = os.path.join(DOWNLOADS_DIR, audio_filename)
+        audio_data = await audio.read()
+        with open(audio_filepath, "wb") as f:
+            f.write(audio_data)
+        log_step("MIC", f"Saved mic audio: {audio_filename} ({len(audio_data) // 1024} KB)")
     
-    log_step("MIC", f"Saved mic trail: {filename} ({len(body.get('samples', []))} samples)")
-    return {"status": "ok", "filename": filename, "count": len(existing)}
+    # Keep only last 5 mic trail files for this session
+    for prefix in ("mic_trail_", "mic_audio_"):
+        pattern = os.path.join(DOWNLOADS_DIR, f"{prefix}{session_id[:8]}_*")
+        existing = sorted(glob_mod.glob(pattern))
+        while len(existing) > 5:
+            oldest = existing.pop(0)
+            os.remove(oldest)
+            log_step("MIC", f"Removed old: {os.path.basename(oldest)}")
+    
+    sample_count = len(body.get('samples', []))
+    log_step("MIC", f"Saved mic trail: {trail_filename} ({sample_count} samples)")
+    
+    result = {"status": "ok", "filename": trail_filename}
+    if audio_filename:
+        result["audioFile"] = audio_filename
+    return result
 
 
 if __name__ == "__main__":
