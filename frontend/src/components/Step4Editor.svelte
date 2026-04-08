@@ -100,6 +100,7 @@
   // MIDI pitch playback during track play
   let midiPlayback = false;
   let muteVocal = false;
+  let audioVolume = 0.8; // 0..1 audio volume
   let midiAudioCtx = null;
   let midiActiveNotes = new Map(); // noteId -> { osc, gain }
   let midiVolume = 0.25;
@@ -2202,7 +2203,7 @@
       audioEl.currentTime = currentTimeSec;
       audioEl.playbackRate = playbackRate;
       audioEl.preservesPitch = true;
-      audioEl.volume = muteVocal ? 0 : 1;
+      audioEl.volume = muteVocal ? 0 : audioVolume;
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
@@ -2564,8 +2565,13 @@
 
   function toggleMuteVocal() {
     muteVocal = !muteVocal;
-    if (audioEl) audioEl.volume = muteVocal ? 0 : 1;
+    if (audioEl) audioEl.volume = muteVocal ? 0 : audioVolume;
     console.log('[Audio] Mute vocal:', muteVocal);
+  }
+
+  function handleVolumeChange(e) {
+    audioVolume = parseFloat(e.target.value);
+    if (audioEl && !muteVocal) audioEl.volume = audioVolume;
   }
 
   // ──── Grain Scrub ────────────────────────────
@@ -2898,6 +2904,10 @@
       <div class="audio-source-toggle" title="Audio source">
         <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Vocals' : 'No vocals — go to Step 1 to extract or upload'}>🎤</button>
         <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>🎵</button>
+      </div>
+      <div class="volume-control" title="Audio volume">
+        <span class="volume-icon">{muteVocal ? '🔇' : audioVolume < 0.3 ? '🔈' : audioVolume < 0.7 ? '🔉' : '🔊'}</span>
+        <input type="range" min="0" max="1" step="0.05" value={audioVolume} on:input={handleVolumeChange} class="volume-slider" />
       </div>
       {#if hasUnsavedChanges}
         <span class="unsaved-indicator">● unsaved</span>
@@ -3830,6 +3840,48 @@
     background: #111;
     border-radius: 6px;
     padding: 1px;
+  }
+
+  .volume-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+  }
+
+  .volume-icon {
+    font-size: 0.85rem;
+    cursor: default;
+    user-select: none;
+  }
+
+  .volume-slider {
+    width: 60px;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #333;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+  }
+
+  .volume-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+    border: none;
   }
 
   .tool-btn.disabled-audio {
