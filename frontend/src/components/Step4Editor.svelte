@@ -2699,6 +2699,8 @@
   }
 
   async function toggleMic() {
+    // Redraw immediately so trail visibility responds instantly
+    draw();
     if (micEnabled) {
       await startMic();
     } else {
