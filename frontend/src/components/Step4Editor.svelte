@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState, saveMicTrail } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState } from '../services/api.js';
   import { PitchDetector } from 'pitchy';
 
   // Canvas refs
@@ -158,6 +158,9 @@
   let micOctaveCorrect = true;
   let micStarting = false; // true while mic is initializing
   let micDebug = false;    // show raw pitch dots + enable export
+  let micRecorder = null;   // MediaRecorder for voice capture
+  let micRecordedChunks = []; // recorded audio chunks
+  let micRecordingStartTime = 0; // playback time when recording started
   // Sticky prediction state for smoothing
   let micLastPitch = -1;
   let micPitchConfidence = 0;
@@ -2700,6 +2703,18 @@
       micInputBuffer = new Float32Array(micAnalyser.fftSize);
       micDetector = PitchDetector.forFloat32Array(micAnalyser.fftSize);
 
+      // Start MediaRecorder for voice capture
+      try {
+        micRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus' });
+        micRecordedChunks = [];
+        micRecorder.ondataavailable = (e) => { if (e.data.size > 0) micRecordedChunks.push(e.data); };
+        micRecorder.start(1000); // collect in 1s chunks
+        console.log('[Mic] MediaRecorder started');
+      } catch (recErr) {
+        console.warn('[Mic] MediaRecorder not available:', recErr);
+        micRecorder = null;
+      }
+
       // Load device list after permission is granted (labels become available)
       await loadMicDevices();
 
@@ -2711,6 +2726,10 @@
   }
 
   function stopMic() {
+    if (micRecorder && micRecorder.state !== 'inactive') {
+      micRecorder.stop();
+      console.log('[Mic] MediaRecorder stopped,', micRecordedChunks.length, 'chunks');
+    }
     if (micStream) {
       micStream.getTracks().forEach(t => t.stop());
       micStream = null;
@@ -2869,10 +2888,13 @@
   }
 
   async function exportMicTrail() {
-    const data = {
+    const trailData = {
       exported: new Date().toISOString(),
       settings: { smoothing: micSmoothing, octaveCorrect: micOctaveCorrect, clarityThreshold: micClarityThreshold },
       song: { bpm, gapMs, noteCount: notes.filter(n => n.type !== 'break').length },
+      notes: notes.filter(n => n.type !== 'break').map(n => ({
+        start: n.startBeat, dur: n.duration, pitch: n.pitch, text: n.text
+      })),
       samples: micPitchTrail.map(s => ({
         time: +s.time.toFixed(4),
         freq: s.frequency ? +s.frequency.toFixed(1) : null,
@@ -2885,8 +2907,26 @@
       }))
     };
     try {
-      const result = await saveMicTrail($sessionId, data);
+      // Build FormData with trail JSON + optional audio recording
+      const formData = new FormData();
+      formData.append('trail', JSON.stringify(trailData));
+
+      if (micRecordedChunks.length > 0) {
+        const audioBlob = new Blob(micRecordedChunks, { type: 'audio/webm' });
+        formData.append('audio', audioBlob, 'mic-recording.webm');
+        console.log(`[Mic] Uploading audio: ${(audioBlob.size / 1024).toFixed(1)} KB`);
+      }
+
+      const resp = await fetch(`/api/save-mic-trail/${$sessionId}`, {
+        method: 'POST',
+        body: formData
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const result = await resp.json();
       console.log(`[Mic] Saved ${micPitchTrail.length} samples to server: ${result.filename}`);
+      if (result.analysis) {
+        console.log('[Mic] Server analysis:', result.analysis);
+      }
     } catch (err) {
       console.error('[Mic] Failed to save trail to server:', err);
     }

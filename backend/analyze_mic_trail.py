@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Analyze a mic trail JSON export."""
-import json, sys, os
+"""Analyze a mic trail JSON export and optionally compare with recorded audio."""
+import json, sys, os, glob
 from collections import Counter
 
 # Find the latest mic trail file
@@ -122,3 +122,162 @@ if hit_diffs:
     print(f"Exact match: {exact}/{len(hit_diffs)} ({100*exact/len(hit_diffs):.1f}%)")
     print(f"Within ±1: {within1}/{len(hit_diffs)} ({100*within1/len(hit_diffs):.1f}%)")
     print(f"Within ±2: {within2}/{len(hit_diffs)} ({100*within2/len(hit_diffs):.1f}%)")
+
+# ──── Audio Analysis with librosa pyin ────
+# Find matching audio file
+trail_base = files[0].replace("mic_trail_", "mic_audio_").replace(".json", "")
+audio_matches = glob.glob(os.path.join(downloads, f"{trail_base}.*"))
+if not audio_matches:
+    # Try to find any audio with same session prefix and close timestamp
+    parts = files[0].replace(".json", "").split("_")
+    session_prefix = parts[2]  # e.g. "f7e975ce"
+    audio_matches = sorted(
+        glob.glob(os.path.join(downloads, f"mic_audio_{session_prefix}_*")),
+        key=os.path.getmtime, reverse=True
+    )
+
+if audio_matches:
+    audio_path = audio_matches[0]
+    print(f"\n{'='*60}")
+    print(f"=== AUDIO ANALYSIS (pyin) ===")
+    print(f"Audio file: {os.path.basename(audio_path)}")
+    print(f"Audio size: {os.path.getsize(audio_path) / 1024:.1f} KB")
+
+    try:
+        import subprocess
+        import numpy as np
+
+        # Convert webm to wav using ffmpeg
+        wav_path = audio_path.rsplit(".", 1)[0] + ".wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", audio_path, "-ar", "22050", "-ac", "1", wav_path],
+            capture_output=True, timeout=30
+        )
+
+        if os.path.exists(wav_path):
+            import librosa
+
+            y, sr = librosa.load(wav_path, sr=22050)
+            duration = len(y) / sr
+            print(f"Audio duration: {duration:.2f}s, sample rate: {sr}")
+
+            # Run pyin pitch detection
+            f0, voiced, probs = librosa.pyin(
+                y, fmin=65, fmax=1000, sr=sr,
+                frame_length=2048, hop_length=512
+            )
+
+            # Convert to MIDI and timestamps
+            pyin_times = librosa.frames_to_time(
+                range(len(f0)), sr=sr, hop_length=512
+            )
+            pyin_midi = np.where(
+                np.isnan(f0), np.nan,
+                12 * np.log2(f0 / 440) + 69
+            )
+
+            # Stats
+            valid_pyin = pyin_midi[~np.isnan(pyin_midi)]
+            print(f"\npyin detected {len(valid_pyin)}/{len(pyin_midi)} voiced frames")
+            if len(valid_pyin) > 0:
+                print(f"pyin MIDI range: {np.min(valid_pyin):.1f} - {np.max(valid_pyin):.1f}")
+                print(f"pyin MIDI mean: {np.mean(valid_pyin):.1f}")
+
+            # Compare pyin vs pitchy raw at matching time points
+            print(f"\n=== PYIN vs PITCHY RAW COMPARISON ===")
+            matched = 0
+            pyin_vs_raw_diffs = []
+            pyin_vs_smooth_diffs = []
+
+            for s in samples:
+                t = s["time"]
+                idx = np.argmin(np.abs(pyin_times - t))
+                if abs(pyin_times[idx] - t) > 0.05:
+                    continue
+                if np.isnan(pyin_midi[idx]):
+                    continue
+
+                pyin_note = round(pyin_midi[idx])
+                matched += 1
+
+                if s["rawMidi"] is not None:
+                    raw_diff = abs(s["rawMidi"] - pyin_note) % 12
+                    raw_diff = min(raw_diff, 12 - raw_diff)
+                    pyin_vs_raw_diffs.append(raw_diff)
+
+                if s["smoothed"] is not None:
+                    smooth_diff = abs(s["smoothed"] - pyin_note) % 12
+                    smooth_diff = min(smooth_diff, 12 - smooth_diff)
+                    pyin_vs_smooth_diffs.append(smooth_diff)
+
+            print(f"Matched time points: {matched}")
+
+            if pyin_vs_raw_diffs:
+                print(f"\npyin vs pitchy RAW (octave-normalized):")
+                print(f"  Avg diff: {sum(pyin_vs_raw_diffs)/len(pyin_vs_raw_diffs):.2f} semitones")
+                exact = sum(1 for d in pyin_vs_raw_diffs if d == 0)
+                within1 = sum(1 for d in pyin_vs_raw_diffs if d <= 1)
+                within2 = sum(1 for d in pyin_vs_raw_diffs if d <= 2)
+                print(f"  Exact (mod octave): {exact}/{len(pyin_vs_raw_diffs)} ({100*exact/len(pyin_vs_raw_diffs):.1f}%)")
+                print(f"  Within ±1: {within1}/{len(pyin_vs_raw_diffs)} ({100*within1/len(pyin_vs_raw_diffs):.1f}%)")
+                print(f"  Within ±2: {within2}/{len(pyin_vs_raw_diffs)} ({100*within2/len(pyin_vs_raw_diffs):.1f}%)")
+
+            if pyin_vs_smooth_diffs:
+                print(f"\npyin vs pitchy SMOOTHED (octave-normalized):")
+                print(f"  Avg diff: {sum(pyin_vs_smooth_diffs)/len(pyin_vs_smooth_diffs):.2f} semitones")
+                exact = sum(1 for d in pyin_vs_smooth_diffs if d == 0)
+                within1 = sum(1 for d in pyin_vs_smooth_diffs if d <= 1)
+                within2 = sum(1 for d in pyin_vs_smooth_diffs if d <= 2)
+                print(f"  Exact (mod octave): {exact}/{len(pyin_vs_smooth_diffs)} ({100*exact/len(pyin_vs_smooth_diffs):.1f}%)")
+                print(f"  Within ±1: {within1}/{len(pyin_vs_smooth_diffs)} ({100*within1/len(pyin_vs_smooth_diffs):.1f}%)")
+                print(f"  Within ±2: {within2}/{len(pyin_vs_smooth_diffs)} ({100*within2/len(pyin_vs_smooth_diffs):.1f}%)")
+
+            # Compare pyin vs song notes (ground truth accuracy)
+            song_notes = d.get("notes", [])
+            if song_notes:
+                print(f"\n=== PYIN vs SONG NOTES (your actual accuracy) ===")
+                bpm_val = d["song"]["bpm"]
+                gap_ms = d["song"]["gapMs"]
+                gap_sec = gap_ms / 1000
+
+                pyin_vs_note_diffs = []
+                for frame_idx in range(len(pyin_midi)):
+                    if np.isnan(pyin_midi[frame_idx]):
+                        continue
+                    t = pyin_times[frame_idx]
+                    beat = (t - gap_sec) * bpm_val / 15
+                    target = None
+                    for note in song_notes:
+                        if beat >= note["start"] and beat < note["start"] + note["dur"]:
+                            target = note["pitch"]
+                            break
+                    if target is not None:
+                        pyin_note = round(pyin_midi[frame_idx])
+                        while pyin_note - target > 6: pyin_note -= 12
+                        while pyin_note - target < -6: pyin_note += 12
+                        pyin_vs_note_diffs.append(abs(pyin_note - target))
+
+                if pyin_vs_note_diffs:
+                    print(f"Matched frames: {len(pyin_vs_note_diffs)}")
+                    print(f"Avg diff: {sum(pyin_vs_note_diffs)/len(pyin_vs_note_diffs):.2f} semitones")
+                    exact = sum(1 for dd in pyin_vs_note_diffs if dd == 0)
+                    within1 = sum(1 for dd in pyin_vs_note_diffs if dd <= 1)
+                    within2 = sum(1 for dd in pyin_vs_note_diffs if dd <= 2)
+                    print(f"Exact match: {exact}/{len(pyin_vs_note_diffs)} ({100*exact/len(pyin_vs_note_diffs):.1f}%)")
+                    print(f"Within ±1: {within1}/{len(pyin_vs_note_diffs)} ({100*within1/len(pyin_vs_note_diffs):.1f}%)")
+                    print(f"Within ±2: {within2}/{len(pyin_vs_note_diffs)} ({100*within2/len(pyin_vs_note_diffs):.1f}%)")
+
+            # Cleanup temp wav
+            os.remove(wav_path)
+        else:
+            print("Failed to convert audio to WAV (ffmpeg required)")
+
+    except ImportError as e:
+        print(f"Audio analysis requires librosa: {e}")
+    except Exception as e:
+        print(f"Audio analysis error: {e}")
+        import traceback
+        traceback.print_exc()
+else:
+    print(f"\n(No matching audio file found for comparison)")
+    print("Enable mic recording and export again to get audio analysis.")
