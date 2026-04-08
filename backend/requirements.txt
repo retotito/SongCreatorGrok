@@ -10,14 +10,18 @@ numpy>=1.24.0
 #   pip install essentia
 # Falls back to librosa-only BPM detection if not installed.
 
-# Vocal separation
-demucs==4.0.1
+# Vocal separation (optional — requires torch)
+# demucs provides AI vocal isolation. Falls back to using original audio if not installed.
+#   pip install demucs
+# demucs==4.0.1
 
-# Speech recognition (ASR) + forced alignment
+# Speech recognition (ASR) + forced alignment (optional — requires torch)
 # WhisperX = Whisper + wav2vec2 forced alignment for ~50ms word accuracy
 # Falls back to vanilla Whisper if WhisperX unavailable
-whisperx>=3.8.0
-openai-whisper  # fallback
+# Falls back to user-provided lyrics if neither is installed
+#   pip install whisperx openai-whisper
+# whisperx>=3.8.0
+# openai-whisper
 
 # MIDI
 mido==1.3.2

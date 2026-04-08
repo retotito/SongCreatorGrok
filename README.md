@@ -88,8 +88,11 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 | Model | Purpose | Status |
 |-------|---------|--------|
 | PYIN (librosa) | Pitch detection | Built-in |
-| WhisperX | Forced alignment (syllable timing) | Required |
+| WhisperX | Forced alignment (syllable timing) | Optional (falls back to vanilla Whisper, then user lyrics) |
+| openai-whisper | Transcription fallback | Optional (if WhisperX unavailable) |
 | Demucs v4 | Vocal separation | Optional (can upload vocals directly) |
+
+> **Torch dependency:** WhisperX, openai-whisper, and Demucs all require PyTorch. If `torch` doesn't support your platform (e.g. older Intel Macs), the app still works — you just skip AI-powered transcription and vocal separation. Upload vocals directly and provide lyrics manually instead.
 
 ## Quick Start
 
@@ -117,8 +120,13 @@ cd UltrastarCreatorTool
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install Python dependencies (includes PyTorch ~2GB)
+# Install core Python dependencies
 pip install -r backend/requirements.txt
+
+# Install AI dependencies (optional — requires PyTorch ~2GB, Python 3.10-3.12)
+# Skip these if torch doesn't support your platform
+pip install demucs==4.0.1        # vocal separation
+pip install whisperx openai-whisper  # transcription + forced alignment
 
 # Optional: Pre-download AI models (~3GB, avoids delay on first use)
 python backend/download_models.py
