@@ -2699,7 +2699,7 @@
     // Apply offset to shift the click grid
     const offsetBeat = currentBeat - metronomeOffset;
     const quarterBeat = Math.floor(offsetBeat / BEATS_PER_QUARTER);
-    if (quarterBeat !== lastMetronomeBeat && currentBeat >= 0) {
+    if (quarterBeat !== lastMetronomeBeat) {
       lastMetronomeBeat = quarterBeat;
       // Downbeat = first beat of measure (assuming 4/4 time, every 4 quarter notes)
       const isDownbeat = quarterBeat % 4 === 0;
