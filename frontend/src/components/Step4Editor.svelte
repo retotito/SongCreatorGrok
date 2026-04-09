@@ -549,22 +549,25 @@
   }
 
   function confirmGridAlign() {
-    // Apply full offset to get the new grid origin
-    const rawNewGapMs = gridAlignOriginalGapMs + gridAlignOffsetMs;
-    const rawNewGapSec = rawNewGapMs / 1000;
-    // Snap original GAP to nearest beat of the new grid (same logic as notes in requantizeFromMs)
-    const originalGapSec = gridAlignOriginalGapMs / 1000;
-    const nearestBeat = Math.round(((originalGapSec - rawNewGapSec) * bpm) / 15);
-    // Final GAP = the new grid line closest to the original GAP position
-    const finalGapMs = Math.round((rawNewGapSec + nearestBeat * 15 / bpm) * 1000);
-    console.log(`[GridAlign] Confirm: offset=${gridAlignOffsetMs.toFixed(1)}ms, rawNewGap=${rawNewGapMs}ms, snappedGap=${finalGapMs}ms (beat ${nearestBeat})`);
+    // Snap the drag offset to the nearest 1/8-note beat boundary
+    const shiftBeats = Math.round((gridAlignOffsetMs * bpm) / 15000);
+    const shiftMs = Math.round(shiftBeats * 15000 / bpm);
+    console.log(`%c🎵 [GridAlign] Confirm: offset=${gridAlignOffsetMs.toFixed(1)}ms, shiftBeats=${shiftBeats}, shiftMs=${shiftMs}ms`, 'color: #ff69b4; font-weight: bold');
     pushUndo();
-    gapMs = finalGapMs;
+
+    // Only shift the downbeat offset — GAP and notes stay unchanged
+    downbeatOffsetMs += shiftMs;
+    downbeatFromHeader = true;
+    window._downbeatLogged = false;
+    console.log(`%c🎵 [Downbeat] Grid align → shifted by ${shiftMs}ms, new downbeatOffsetMs=${downbeatOffsetMs.toFixed(1)}ms`, 'color: #ff69b4; font-weight: bold');
+
+    // Restore original GAP (drag preview may have changed it)
+    gapMs = gridAlignOriginalGapMs;
     gridAlignMode = false;
     gridAlignOffsetMs = 0;
     gridAlignDragging = false;
     if (canvasEl) canvasEl.style.cursor = '';
-    handleBpmGapChange();
+    draw();
     markUnsaved();
   }
 
@@ -715,7 +718,7 @@
       const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
       downbeatBeat = Math.round(exactBeat);
       if (!window._downbeatLogged) {
-        console.log(`%c🎵 [Downbeat] testMs=${testMs}, gapMs=${gapMs}, bpm=${bpm}, exactBeat=${exactBeat.toFixed(3)}, snapped=${downbeatBeat}`, 'color: #3399ff; font-weight: bold');
+        console.log(`%c🎵 [Downbeat] downbeatOffsetMs=${downbeatOffsetMs}, gapMs=${gapMs}, bpm=${bpm}, exactBeat=${exactBeat.toFixed(3)}, snapped=${downbeatBeat}`, 'color: #3399ff; font-weight: bold');
         window._downbeatLogged = true;
       }
     }
