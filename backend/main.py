@@ -1507,6 +1507,43 @@ async def export_with_corrections(
     }
 
 
+@app.patch("/api/session/{session_id}/metadata")
+async def update_metadata(session_id: str, artist: str = Form(...), title: str = Form(...)):
+    """Update artist/title in session and rewrite the .txt file headers."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session["artist"] = artist
+    session["title"] = title
+    save_session(session_id)
+
+    # Rewrite headers in the .txt file on disk
+    result = session.get("result")
+    if result:
+        for key in ["corrected_txt_file", "txt_file"]:
+            fname = result.get(key)
+            if not fname:
+                continue
+            path = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                import re
+                content = re.sub(r"^#TITLE:.*$", f"#TITLE:{title}", content, count=1, flags=re.MULTILINE)
+                content = re.sub(r"^#ARTIST:.*$", f"#ARTIST:{artist}", content, count=1, flags=re.MULTILINE)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                log_step("METADATA", f"Updated headers in {fname}")
+            except Exception as e:
+                log_step("METADATA", f"Failed to update {fname}: {e}")
+
+    log_step("METADATA", f"Session {session_id}: artist='{artist}', title='{title}'")
+    return {"status": "ok", "artist": artist, "title": title}
+
+
 @app.get("/api/download/{session_id}/{file_type}")
 async def download_file(session_id: str, file_type: str):
     """Download a generated file."""
