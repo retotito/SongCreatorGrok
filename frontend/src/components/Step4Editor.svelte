@@ -551,17 +551,29 @@
   function confirmGridAlign() {
     pushUndo();
 
-    // Shift downbeat by the exact drag amount — no snapping, grid stays where user placed it
+    // Shift downbeat by the exact drag amount — grid stays where user placed it
     downbeatOffsetMs += gridAlignOffsetMs;
     downbeatFromHeader = true;
 
-    // Restore original GAP (drag preview may have changed it)
-    gapMs = gridAlignOriginalGapMs;
+    // Snap GAP to the closest grid line (before or after current GAP)
+    const beatDuration = 15000 / bpm; // ms per 1/8-note beat
+    const gapRelToDownbeat = gridAlignOriginalGapMs - downbeatOffsetMs; // ms from downbeat to GAP
+    const beatsFromDownbeat = gapRelToDownbeat / beatDuration;
+    const beatBefore = Math.floor(beatsFromDownbeat);
+    const beatAfter = Math.ceil(beatsFromDownbeat);
+    const msBefore = downbeatOffsetMs + beatBefore * beatDuration;
+    const msAfter = downbeatOffsetMs + beatAfter * beatDuration;
+    // Pick whichever grid line is closer to the original GAP
+    gapMs = Math.round(
+      Math.abs(gridAlignOriginalGapMs - msBefore) <= Math.abs(gridAlignOriginalGapMs - msAfter)
+        ? msBefore : msAfter
+    );
+
     gridAlignMode = false;
     gridAlignOffsetMs = 0;
     gridAlignDragging = false;
     if (canvasEl) canvasEl.style.cursor = '';
-    draw();
+    handleBpmGapChange();
     markUnsaved();
   }
 
