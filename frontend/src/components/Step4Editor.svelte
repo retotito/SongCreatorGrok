@@ -2902,7 +2902,17 @@
     if (!micNoteHits.has(targetNote.id)) {
       micNoteHits.set(targetNote.id, []);
     }
-    micNoteHits.get(targetNote.id).push({ beat: currentBeat, sungPitch: midiPitch, isHit });
+    // Clear-ahead: remove any old hits at or beyond current beat (handles rewind/re-record)
+    const hits = micNoteHits.get(targetNote.id);
+    if (hits.length > 0 && hits[hits.length - 1].beat >= currentBeat) {
+      // Find first hit at or beyond currentBeat and truncate
+      let cutIdx = hits.length;
+      for (let j = 0; j < hits.length; j++) {
+        if (hits[j].beat >= currentBeat - 0.01) { cutIdx = j; break; }
+      }
+      hits.length = cutIdx;
+    }
+    hits.push({ beat: currentBeat, sungPitch: midiPitch, isHit });
 
     // Optional: raw trail for debugging
     if (micShowRawTrail) {
