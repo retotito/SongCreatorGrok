@@ -159,6 +159,13 @@ export function getDownloadUrl(sessionId, fileType) {
   return `${BASE}/download/${sessionId}/${fileType}`;
 }
 
+export async function updateMetadata(sessionId, artist, title) {
+  const form = new FormData();
+  form.append('artist', artist);
+  form.append('title', title);
+  return request('PATCH', `/session/${sessionId}/metadata`, form, true);
+}
+
 export async function saveMicTrail(sessionId, trailData) {
   return request('POST', `/save-mic-trail/${sessionId}`, trailData);
 }
