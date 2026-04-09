@@ -706,15 +706,17 @@
     const beatsPerMeasure = BEATS_PER_QUARTER * 4; // 4/4 time = 4 quarter notes per measure
     const beatsPerEighth = BEATS_PER_QUARTER / 2;  // half a quarter note
 
-    // Find the downbeat gridline beat (nearest 1/8-note grid)
+    // Find the downbeat gridline beat — use fractional offset for sub-beat precision
     let downbeatBeat = -99999;
+    let downbeatFracPx = 0; // sub-beat pixel offset for smooth grid positioning
     if (downbeatOffsetMs !== 0) {
       const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
       downbeatBeat = Math.round(exactBeat);
+      downbeatFracPx = (exactBeat - downbeatBeat) * zoom;
     }
 
     for (let b = startBeat; b <= endBeat; b++) {
-      const x = beatToX(b) + gridOffsetPx;
+      const x = beatToX(b) + gridOffsetPx + (downbeatFromHeader ? downbeatFracPx : 0);
       // When we have a downbeat reference, all grid subdivisions align to it
       const rel = downbeatFromHeader ? b - downbeatBeat : b;
       const isMeasure = ((rel % beatsPerMeasure) + beatsPerMeasure) % beatsPerMeasure === 0;
