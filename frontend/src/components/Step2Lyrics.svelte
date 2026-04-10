@@ -1,122 +1,5 @@
 <script>
-  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
-
-  // If coming from test session, lyrics may already be loaded
-  let lyricsText = '';
-  let artist = '';
-  let title = '';
-  let language = 'en';
-  let hyphenationResult = null;
-  let isTranscribing = false;
-  let transcribeInfo = null;
-
-  // Audio player
-  let audioEl;
-  let audioSrc = '';
-  let isAudioPlaying = false;
-  let audioCurrentTime = 0;
-  let audioDuration = 0;
-
-  // Build audio URL when session is available
-  $: if ($sessionId) {
-    audioSrc = getAudioUrl($sessionId, $uploadData.hasVocals ? 'vocals' : 'original');
-  }
-
-  // Sync from store ONCE on mount (e.g. when navigating back to Step 2)
-  let initializedFromStore = false;
-  $: if ($lyricsData.text && !initializedFromStore) {
-    initializedFromStore = true;
-    lyricsText = $lyricsData.text;
-    artist = $lyricsData.artist || artist;
-    title = $lyricsData.title || title;
-    language = $lyricsData.language || language;
-  }
-
-  async function handleLoadTestLyrics() {
-    try {
-      const result = await getTestLyrics();
-      lyricsText = result.lyrics;
-      artist = 'U2';
-      title = 'Beautiful Day';
-    } catch (err) {
-      errorMessage.set(err.message);
-    }
-  }
-
-  async function handleFileUpload(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    
-    const text = await file.text();
-    lyricsText = text;
-  }
-
-  async function handleAutoHyphenate() {
-    console.log('[Step2] handleAutoHyphenate, language:', language, 'lyrics length:', lyricsText.length);
-    if (!lyricsText.trim()) {
-      errorMessage.set('Enter lyrics first');
-      return;
-    }
-
-    errorMessage.set('');
-    isProcessing.set(true);
-    processingStatus.set('Auto-hyphenating lyrics...');
-
-    try {
-      const result = await hyphenateLyrics(lyricsText, language);
-      console.log('[Step2] Hyphenation result:', result);
-      hyphenationResult = result;
-      lyricsText = result.hyphenated;
-      processingStatus.set(`✅ Auto-hyphenated: ${result.total_syllables} syllables (${result.method})`);
-    } catch (err) {
-      console.error('[Step2] Hyphenation error:', err);
-      errorMessage.set(err.message);
-    } finally {
-      isProcessing.set(false);
-    }
-  }
-
-  async function handleSubmit() {
-    console.log('[Step2] handleSubmit, session:', $sessionId, 'artist:', artist, 'title:', title, 'language:', language);
-    console.log('[Step2] Lyrics preview:', lyricsText.substring(0, 200));
-    if (!lyricsText.trim()) {
-      errorMessage.set('Please enter lyrics');
-      return;
-    }
-    if (!$sessionId) {
-      errorMessage.set('No session. Please upload audio first.');
-      return;
-    }
-
-    errorMessage.set('');
-    isProcessing.set(true);
-    processingStatus.set('Validating lyrics...');
-
-    try {
-      const result = await submitLyrics($sessionId, lyricsText, artist, title, language);
-      console.log('[Step2] Submit lyrics result:', result);
-      
-      lyricsData.set({
-        text: lyricsText,
-        artist,
-        title,
-        language,
-        syllableCount: result.syllable_count,
-        lineCount: result.line_count,
-        preview: result.preview,
-      });
-
-      processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
-    } catch (err) {
-      console.error('[Step2] Submit lyrics error:', err);
-      errorMessage.set(err.message);
-    } finally {
-      isProcessing.set(false);
-    }
-  }
-
-  // Check if we came from a test session with lyrics pre-loaded
+  // Restore checkTestSession function
   async function checkTestSession() {
     if ($sessionId && $sessionId.startsWith('test-')) {
       try {
@@ -124,55 +7,40 @@
         lyricsText = result.lyrics;
         artist = 'U2';
         title = 'Beautiful Day';
-        // Auto-submit
-        await handleSubmit();
+        // Optionally auto-submit or set more fields here
       } catch (e) {
         // Test lyrics not available, user can enter manually
       }
     }
   }
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
+  import { SUPPORTED_LANGUAGES } from '../lib/languages';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
+
+  // If coming from test session, lyrics may already be loaded
+  let lyricsText = '';
+  let artist = '';
+  let title = '';
+  let language = '';
+  let hyphenationResult = null;
+  let isTranscribing = false;
+  let transcribeInfo = null;
+
+  // Audio
+  $: hasVocals = $uploadData.hasVocals;
+  $: audioSrc = $sessionId && hasVocals ? getAudioUrl($sessionId, 'vocals') : '';
+
+  // Sync from store ONCE on mount (e.g. when navigating back to Step 2)
+  let initializedFromStore = false;
+  $: if ($lyricsData.text && !initializedFromStore) {
+    initializedFromStore = true;
+    lyricsText = $lyricsData.text;
+    artist = $lyricsData.artist || artist;
+    // Removed invalid async/await/try/catch from reactive statement
+  }
 
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
-  }
-
-  // ── Audio player functions ──
-  function toggleAudio() {
-    if (!audioEl) return;
-    if (isAudioPlaying) {
-      audioEl.pause();
-    } else {
-      audioEl.play();
-    }
-    isAudioPlaying = !isAudioPlaying;
-  }
-
-  function onAudioTimeUpdate() {
-    if (audioEl) audioCurrentTime = audioEl.currentTime;
-  }
-
-  function onAudioLoaded() {
-    if (audioEl) audioDuration = audioEl.duration;
-  }
-
-  function onAudioEnded() {
-    isAudioPlaying = false;
-  }
-
-  function seekAudio(e) {
-    if (!audioEl || !audioDuration) return;
-    const bar = e.currentTarget;
-    const rect = bar.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    audioEl.currentTime = pct * audioDuration;
-    audioCurrentTime = audioEl.currentTime;
-  }
-
-  function formatTime(sec) {
-    if (!sec || isNaN(sec)) return '0:00';
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
   // ── Whisper transcription ──
@@ -204,90 +72,98 @@
 <div class="step-content">
   <h2>Step 2: Lyrics</h2>
 
-  <!-- Audio Player -->
-  {#if audioSrc}
-    <div class="audio-player">
-      <audio
-        bind:this={audioEl}
-        src={audioSrc}
-        on:timeupdate={onAudioTimeUpdate}
-        on:loadedmetadata={onAudioLoaded}
-        on:ended={onAudioEnded}
-        preload="metadata"
-      ></audio>
-      <button class="btn btn-audio" on:click={toggleAudio} title={isAudioPlaying ? 'Pause' : 'Play'}>
-        {isAudioPlaying ? '⏸' : '▶'}
-      </button>
-      <div class="audio-bar" on:click={seekAudio} on:keydown={() => {}} role="slider" aria-valuenow={audioCurrentTime} aria-valuemin={0} aria-valuemax={audioDuration} tabindex="0">
-        <div class="audio-progress" style="width: {audioDuration ? (audioCurrentTime / audioDuration * 100) : 0}%"></div>
+  <div class="form-group" style="margin-bottom:2rem;">
+    <label for="language"><strong>Language (required)</strong></label>
+    <select id="language" bind:value={language}>
+      <option value="" disabled selected>Select language…</option>
+      {#each SUPPORTED_LANGUAGES as lang}
+        <option value={lang.code}>{lang.label}</option>
+      {/each}
+    </select>
+    {#if !language}
+      <div class="lang-warning">language of the song</div>
+    {/if}
+  </div>
+
+  {#if language}
+    {#if !hasVocals}
+      <div class="no-vocals-warning">
+        <p>⚠️ No vocal track found.</p>
+        <p class="hint">Please go back to <button class="link-btn" on:click={() => currentStep.set(1)}>Step 1</button> to extract or upload vocals before generating lyrics.</p>
       </div>
-      <span class="audio-time">{formatTime(audioCurrentTime)} / {formatTime(audioDuration)}</span>
-      <button
-        class="btn btn-transcribe"
-        on:click={handleTranscribe}
-        disabled={isTranscribing || $isProcessing}
-        title="Transcribe audio with Whisper AI"
-      >
-        {isTranscribing ? '⏳ Transcribing...' : '🎙️ Transcribe'}
-      </button>
-    </div>
-    {#if transcribeInfo}
-      <div class="transcribe-info">
-        Whisper ({transcribeInfo.model}): {transcribeInfo.words} words, {transcribeInfo.lines} lines — review and correct below
+      <div class="back-btn-row">
+        <button class="btn btn-secondary" on:click={() => currentStep.set(1)}>← Back to Step 1</button>
+      </div>
+    {:else}
+      <div class="audio-section">
+        <audio controls src={audioSrc}>
+          Your browser does not support the audio element.
+        </audio>
+        <div class="transcribe-area">
+          <button
+            class="btn btn-transcribe"
+            on:click={handleTranscribe}
+            disabled={isTranscribing || $isProcessing}
+          >
+            {isTranscribing ? '⏳ Generating Lyrics...' : '🎙️ Generate Lyrics from Vocals'}
+          </button>
+          <p class="transcribe-hint">This will use AI to listen to your vocal track and automatically generate lyrics. You can review and edit the result below.</p>
+        </div>
+        {#if transcribeInfo}
+          <div class="transcribe-info">
+            Whisper ({transcribeInfo.model}): {transcribeInfo.words} words, {transcribeInfo.lines} lines — review and correct below
+          </div>
+        {/if}
       </div>
     {/if}
+
+    <div class="form-row">
+      <div class="form-group half">
+        <label for="artist">Artist</label>
+        <input id="artist" type="text" bind:value={artist} placeholder="Artist name" />
+      </div>
+      <div class="form-group half">
+        <label for="title">Title</label>
+        <input id="title" type="text" bind:value={title} placeholder="Song title" />
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="lyrics">
+        Lyrics
+        <span class="hint">(one line per phrase, use - for syllable splits: beau-ti-ful)</span>
+      </label>
+      <textarea
+        id="lyrics"
+        bind:value={lyricsText}
+        rows="15"
+        placeholder="The heart is a bloom&#10;Shoots up through the sto-ny ground&#10;There's no room&#10;..."
+      ></textarea>
+    </div>
+
+    <div class="action-row">
+      <label class="btn btn-secondary small">
+        📂 Upload .txt
+        <input type="file" accept=".txt" on:change={handleFileUpload} hidden />
+      </label>
+      <button class="btn btn-hyphen small" on:click={handleAutoHyphenate} disabled={$isProcessing || !lyricsText.trim()}>
+        ✂️ Auto-Hyphenate
+      </button>
+      <button class="btn btn-test small" on:click={handleLoadTestLyrics}>
+        🧪 Load Test Lyrics
+      </button>
+      <button class="btn btn-primary" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim()}>
+        Validate & Continue
+      </button>
+    </div>
   {/if}
-
-  <div class="form-row">
-    <div class="form-group half">
-      <label for="artist">Artist</label>
-      <input id="artist" type="text" bind:value={artist} placeholder="Artist name" />
-    </div>
-    <div class="form-group half">
-      <label for="title">Title</label>
-      <input id="title" type="text" bind:value={title} placeholder="Song title" />
-    </div>
-  </div>
-
-  <div class="form-group">
-    <label for="language">Language</label>
-    <select id="language" bind:value={language}>
-      <option value="en">English</option>
-      <option value="de">German</option>
-      <option value="fr">French</option>
-      <option value="es">Spanish</option>
-      <option value="it">Italian</option>
-    </select>
-  </div>
-
-  <div class="form-group">
-    <label for="lyrics">
-      Lyrics
-      <span class="hint">(one line per phrase, use - for syllable splits: beau-ti-ful)</span>
-    </label>
-    <textarea
-      id="lyrics"
-      bind:value={lyricsText}
-      rows="15"
-      placeholder="The heart is a bloom&#10;Shoots up through the sto-ny ground&#10;There's no room&#10;..."
-    ></textarea>
-  </div>
-
-  <div class="action-row">
-    <label class="btn btn-secondary small">
-      📂 Upload .txt
-      <input type="file" accept=".txt" on:change={handleFileUpload} hidden />
-    </label>
-    <button class="btn btn-hyphen small" on:click={handleAutoHyphenate} disabled={$isProcessing || !lyricsText.trim()}>
-      ✂️ Auto-Hyphenate
-    </button>
-    <button class="btn btn-test small" on:click={handleLoadTestLyrics}>
-      🧪 Load Test Lyrics
-    </button>
-    <button class="btn btn-primary" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim()}>
-      Validate & Continue
-    </button>
-  </div>
+  <style>
+    .lang-warning {
+      color: #b00;
+      font-weight: bold;
+      margin-top: 0.5rem;
+    }
+  </style>
 
   {#if hyphenationResult}
     <div class="hyphenation-info">
@@ -295,7 +171,6 @@
       <p class="hint">Review and correct the hyphens above, then click "Validate & Continue".</p>
     </div>
   {/if}
-
   {#if $lyricsData.preview.length > 0}
     <div class="preview-section">
       <h3>Syllable Preview ({$lyricsData.syllableCount} syllables, {$lyricsData.lineCount} lines)</h3>
@@ -317,7 +192,6 @@
   {#if $processingStatus}
     <div class="status-bar">{$processingStatus}</div>
   {/if}
-
   {#if $errorMessage}
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
@@ -380,61 +254,65 @@
     border-color: #4fc3f7;
   }
 
-  .btn-transcribe { background: #6a1b9a; color: white; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  .btn-transcribe { background: #6a1b9a; color: white; font-size: 0.85rem; padding: 0.5rem 1rem; }
   .btn-transcribe:hover:not(:disabled) { background: #8e24aa; }
   .btn-transcribe:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .audio-player {
+  .audio-section {
+    margin-bottom: 1.25rem;
+  }
+
+  .audio-section audio {
+    width: 100%;
+    margin-bottom: 0.75rem;
+  }
+
+  .transcribe-area {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: #1a1a2e;
-    border: 1px solid #333;
-    border-radius: 8px;
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 1rem;
+    align-items: flex-start;
+    gap: 0.75rem;
   }
 
-  .btn-audio {
-    background: none;
-    border: 1px solid #4fc3f7;
-    color: #4fc3f7;
-    border-radius: 50%;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-size: 0.9rem;
-    padding: 0;
-    flex-shrink: 0;
-  }
-  .btn-audio:hover { background: #1a2e4a; }
-
-  .audio-bar {
-    flex: 1;
-    height: 6px;
-    background: #333;
-    border-radius: 3px;
-    cursor: pointer;
-    position: relative;
-  }
-
-  .audio-progress {
-    height: 100%;
-    background: #4fc3f7;
-    border-radius: 3px;
-    transition: width 0.1s linear;
-  }
-
-  .audio-time {
+  .transcribe-hint {
     color: #888;
-    font-size: 0.75rem;
-    min-width: 80px;
-    text-align: center;
-    flex-shrink: 0;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    margin: 0;
   }
+
+  .no-audio-warning, .no-vocals-warning {
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.85rem;
+  }
+
+  .no-audio-warning {
+    background: #3e1a1a;
+    border: 1px solid #c62828;
+    color: #ef9a9a;
+  }
+
+  .no-vocals-warning {
+    background: #3e2e1a;
+    border: 1px solid #e65100;
+    color: #ffcc80;
+  }
+
+  .no-audio-warning p, .no-vocals-warning p {
+    margin: 0;
+  }
+
+  .link-btn {
+    background: none;
+    border: none;
+    color: #4fc3f7;
+    cursor: pointer;
+    text-decoration: underline;
+    font-size: inherit;
+    padding: 0;
+  }
+  .link-btn:hover { color: #81d4fa; }
 
   .transcribe-info {
     background: #1a0e2e;
