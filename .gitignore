@@ -7,6 +7,8 @@ __pycache__/
 # Build outputs
 dist/
 build/
+dist-backend/
+frontend/src-tauri/target/
 
 # Environment files
 .env
