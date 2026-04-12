@@ -457,8 +457,13 @@ async def extract_vocals(session_id: str):
     try:
         session["status"] = "extracting_vocals"
         output_dir = os.path.join(UPLOAD_DIR, session_id)
-        vocal_path = separate_vocals(session["original_audio"], output_dir)
-        
+        audio_path = session["original_audio"]
+
+        # Run Demucs in a thread so the event loop (and other requests) stay responsive
+        import asyncio
+        loop = asyncio.get_event_loop()
+        vocal_path = await loop.run_in_executor(None, separate_vocals, audio_path, output_dir)
+
         if session.get("extract_cancelled"):
             raise HTTPException(status_code=499, detail="Extraction cancelled")
 
@@ -663,7 +668,7 @@ async def cancel_transcribe(session_id: str):
 
 
 @app.post("/api/transcribe/{session_id}")
-async def transcribe_audio(session_id: str, language: str = Form("en")):
+def transcribe_audio(session_id: str, language: str = Form("en")):
     """Transcribe vocal audio using WhisperX with phoneme-level forced alignment.
     
     WhisperX provides ~50ms word boundaries (vs ~200ms for vanilla Whisper)
@@ -1133,7 +1138,7 @@ async def cancel_generation(session_id: str):
 
 
 @app.post("/api/generate/{session_id}")
-async def generate_ultrastar_files(session_id: str):
+def generate_ultrastar_files(session_id: str):
     """Run the full processing pipeline: BPM → Pitch → Alignment → Ultrastar."""
     session = sessions.get(session_id)
     if not session:
