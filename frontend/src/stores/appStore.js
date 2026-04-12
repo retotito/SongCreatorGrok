@@ -105,8 +105,8 @@ export const generationModalOpen = writable(false);
 export const steps = [
   { num: 1, label: 'Upload', icon: '📁' },
   { num: 2, label: 'Lyrics', icon: '📝' },
-  { num: 4, label: 'Editor', icon: '🎹' },
-  { num: 5, label: 'Export', icon: '💾' },
+  { num: 4, display: 3, label: 'Editor', icon: '🎹' },
+  { num: 5, display: 4, label: 'Export', icon: '💾' },
 ];
 
 // Can navigate to a step?
