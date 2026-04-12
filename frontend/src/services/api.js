@@ -76,8 +76,8 @@ export async function uploadAudio(file) {
   return request('POST', '/upload', form, true);
 }
 
-export async function extractVocals(sessionId) {
-  return request('POST', `/extract-vocals/${sessionId}`);
+export async function extractVocals(sessionId, signal = null) {
+  return request('POST', `/extract-vocals/${sessionId}`, null, false, false, signal);
 }
 
 export async function uploadCorrectedVocals(sessionId, file) {
@@ -118,6 +118,10 @@ export async function transcribeAudio(sessionId, language = 'en', signal = null)
   const data = await response.json();
   console.log(`[API] ✅ POST ${url} →`, data);
   return data;
+}
+
+export async function cancelExtractVocals(sessionId) {
+  request('POST', `/cancel-extract/${sessionId}`).catch(() => {});
 }
 
 export async function cancelTranscribe(sessionId) {

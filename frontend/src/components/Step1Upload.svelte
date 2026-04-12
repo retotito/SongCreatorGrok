@@ -1,11 +1,17 @@
 <script>
   import { sessionId, uploadData, currentStep, isProcessing, processingStatus, errorMessage, lyricsData, generationResult, generationLog, generationShowPreview } from '../stores/appStore.js';
-  import { newSession, uploadAudio, extractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
+  import { newSession, uploadAudio, extractVocals, cancelExtractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
 
   let dragOverMix = false;
   let dragOverVocals = false;
   let audioPlayerMix;
   let audioPlayerVocals;
+
+  // ── Extract vocals modal ─────────────────────────────────
+  let extractModalOpen = false;
+  let extractDone = false;
+  let extractStatus = '';
+  let extractAbortController = null;
 
   $: mixUrl    = $sessionId && $uploadData.hasOriginal ? getAudioUrl($sessionId, 'original') : null;
   $: vocalsUrl = $sessionId && $uploadData.hasVocals   ? getAudioUrl($sessionId, 'vocals')   : null;
@@ -63,21 +69,33 @@
   // ── Vocal extraction ─────────────────────────────────────
   async function handleExtractVocals() {
     errorMessage.set('');
-    isProcessing.set(true);
-    processingStatus.set('Extracting vocals with Demucs (this may take a few minutes)…');
+    extractDone = false;
+    extractStatus = '⏳ Starting Demucs vocal separation…';
+    extractModalOpen = true;
+    extractAbortController = new AbortController();
     try {
-      await extractVocals($sessionId);
+      extractStatus = '⚡ Extracting vocals with Demucs (this may take a few minutes)…';
+      const result = await extractVocals($sessionId, extractAbortController.signal);
       uploadData.update(d => ({
         ...d,
         hasVocals: true,
         vocalUrl: getAudioUrl($sessionId, 'vocals'),
       }));
-      processingStatus.set('Vocals extracted!');
+      extractStatus = '✅ Vocals extracted successfully!';
+      extractDone = true;
+      extractModalOpen = false;
     } catch (err) {
-      errorMessage.set(err.message);
-    } finally {
-      isProcessing.set(false);
+      if (err.name === 'AbortError' || err.message?.includes('499')) return;
+      extractStatus = `❌ ${err.message}`;
+      extractDone = true;
     }
+  }
+
+  function cancelExtraction() {
+    extractModalOpen = false;
+    extractDone = false;
+    if (extractAbortController) extractAbortController.abort();
+    cancelExtractVocals($sessionId);
   }
 
   // ── Delete ───────────────────────────────────────────────
@@ -144,7 +162,7 @@
             }
           } catch {}
         }
-        currentStep.set(result.has_result && $generationResult ? 4 : 3);
+        currentStep.set(result.has_result && $generationResult ? 4 : 2);
       } else {
         currentStep.set(2);
       }
@@ -269,6 +287,27 @@
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
 </div>
+
+{#if extractModalOpen}
+  <div class="extract-modal-backdrop">
+    <div class="extract-modal-box">
+      <div class="extract-modal-header">
+        <div class="extract-modal-title">
+          {#if !extractDone}
+            <span class="e-spinner"></span>
+          {/if}
+          <h2>{extractDone ? (extractStatus.startsWith('✅') ? '✅ Done' : '❌ Error') : '⚡ Extracting Vocals…'}</h2>
+        </div>
+      </div>
+      <p class="extract-modal-status">{extractStatus}</p>
+      <div class="extract-modal-footer">
+        <button class="btn btn-cancel" on:click={cancelExtraction}>
+          {extractDone ? '← Close' : '✕ Cancel'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .step-content {
@@ -453,14 +492,80 @@
     text-align: center;
   }
 
-  .error-bar {
-    background: #3e1a1a;
+  /* Extract Vocals modal */
+  .extract-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .extract-modal-box {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 2rem;
+    width: 90%;
+    max-width: 440px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .extract-modal-header {
+    display: flex;
+    align-items: center;
+  }
+
+  .extract-modal-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .extract-modal-title h2 {
+    margin: 0;
+    color: #4fc3f7;
+  }
+
+  .e-spinner {
+    width: 20px;
+    height: 20px;
+    border: 3px solid #333;
+    border-top-color: #66bb6a;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .extract-modal-status {
+    color: #aaa;
+    font-size: 0.9rem;
+    margin: 0;
+  }
+
+  .extract-modal-footer {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+  }
+
+  .btn-cancel {
+    background: #2a1a1a;
+    color: #ef9a9a;
     border: 1px solid #c62828;
     border-radius: 8px;
-    padding: 0.75rem 1rem;
-    margin-top: 1rem;
-    color: #ef9a9a;
+    padding: 0.5rem 1.2rem;
     font-size: 0.88rem;
-    text-align: center;
+    cursor: pointer;
+    transition: background 0.15s;
   }
+  .btn-cancel:hover { background: #3e1a1a; }
 </style>
