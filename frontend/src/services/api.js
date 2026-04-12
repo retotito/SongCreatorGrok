@@ -5,7 +5,10 @@
  * which gets forwarded to http://localhost:8001/api/...
  */
 
-const BASE = '/api';
+// When running inside a Tauri bundle there is no Vite dev-server proxy,
+// so we call the FastAPI backend directly on its port.
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const BASE = isTauri ? 'http://localhost:8001/api' : '/api';
 
 async function request(method, path, body = null, isFormData = false, silent = false, signal = null) {
   const url = `${BASE}${path}`;
