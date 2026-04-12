@@ -58,35 +58,14 @@
   }
 </script>
 
-<div class="step-content">
-  <h2>Step 3: Generate Ultrastar Files</h2>
-
-  <div class="info-box">
-    <p>This will run the full processing pipeline:</p>
-    <ol>
-      <li>Detect BPM from audio</li>
-      <li>Detect pitches with PYIN</li>
-      <li>Align syllables to audio with WhisperX</li>
-      <li>Generate Ultrastar .txt + MIDI files</li>
-    </ol>
-  </div>
-
-  <button
-    class="btn btn-primary big"
-    on:click={handleGenerate}
-    disabled={$isProcessing || !$sessionId}
-  >
-    {$isProcessing ? '⏳ Processing...' : '🚀 Generate Ultrastar Files'}
-  </button>
-
-  {#if $generationResult && !$isProcessing}
-    <button
-      class="btn btn-secondary"
-      on:click={() => { console.log('[Step3] Jump to editor'); currentStep.set(4); }}
-    >
-      🎹 Open in Piano Roll Editor
-    </button>
-  {/if}
+<div class="modal-backdrop">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>⚙️ Generating Ultrastar Files</h2>
+      {#if !$isProcessing}
+        <button class="close-btn" on:click={cancel} title="Cancel">✕</button>
+      {/if}
+    </div>
 
   {#if logMessages.length > 0}
     <div class="log-panel">
@@ -186,13 +165,63 @@
   {#if $errorMessage}
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
+
+  {#if !$isProcessing}
+    <div class="modal-footer">
+      <button class="btn btn-cancel" on:click={cancel}>← Back to Lyrics</button>
+    </div>
+  {/if}
+  </div>
 </div>
 
 <style>
-  .step-content {
-    max-width: 700px;
-    margin: 0 auto;
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
   }
+
+  .modal-box {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 90%;
+    max-width: 680px;
+    max-height: 85vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 0.5rem;
+  }
+
+  .close-btn {
+    background: transparent;
+    border: 1px solid #555;
+    color: #aaa;
+    border-radius: 6px;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+  }
+  .close-btn:hover { border-color: #aaa; color: white; }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
   h3 { color: #aaa; margin: 1rem 0 0.5rem; font-size: 0.95rem; }
@@ -235,16 +264,16 @@
   .btn-primary:hover:not(:disabled) { background: #1565c0; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .btn-secondary {
-    background: #2e7d32;
-    color: white;
-    width: 100%;
-    padding: 0.75rem;
-    font-size: 1rem;
-    margin-top: 0.5rem;
+  .btn-cancel {
+    background: #2a2a2a;
+    color: #aaa;
+    border: 1px solid #555;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
   }
-
-  .btn-secondary:hover { background: #388e3c; }
+  .btn-cancel:hover { background: #333; color: white; }
 
   .log-panel {
     background: #0d1117;

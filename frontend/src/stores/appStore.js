@@ -3,9 +3,10 @@
  */
 import { writable, derived } from 'svelte/store';
 
-// Current step (0 = launcher, 1-5 = wizard)
+// Current step (0 = launcher, 1-5 = wizard; step 3 is now a modal, not a persisted step)
 const savedStepRaw = localStorage.getItem('currentStep');
-const savedStep = savedStepRaw !== null ? parseInt(savedStepRaw) : 0;
+let savedStep = savedStepRaw !== null ? parseInt(savedStepRaw) : 0;
+if (savedStep === 3) savedStep = 2; // step 3 is now a modal; recover to lyrics
 export const currentStep = writable(savedStep);
 currentStep.subscribe(v => {
   // Only persist if not on launcher (step 0)
@@ -97,11 +98,13 @@ export const isProcessing = writable(false);
 export const processingStatus = writable('');
 export const errorMessage = writable('');
 
-// Steps definition
+// Generation modal (Step 3 is a modal, not a navigation step)
+export const generationModalOpen = writable(false);
+
+// Steps definition (Step 3 is a modal overlay, not a tab)
 export const steps = [
   { num: 1, label: 'Upload', icon: '📁' },
   { num: 2, label: 'Lyrics', icon: '📝' },
-  { num: 3, label: 'Generate', icon: '⚙️' },
   { num: 4, label: 'Editor', icon: '🎹' },
   { num: 5, label: 'Export', icon: '💾' },
 ];
@@ -113,7 +116,6 @@ export const canGoToStep = derived(
     return (step) => {
       if (step === 1) return true;
       if (step === 2) return $uploadData.hasVocals || $uploadData.hasOriginal;
-      if (step === 3) return $lyricsData.syllableCount > 0;
       if (step === 4) return $generationResult !== null;
       if (step === 5) return $generationResult !== null;
       return false;
@@ -125,6 +127,7 @@ export const canGoToStep = derived(
 export function resetSession() {
   localStorage.removeItem('currentStep');
   localStorage.removeItem('sessionId');
+  generationModalOpen.set(false);
   currentStep.set(0);
   sessionId.set(null);
   uploadData.set({ filename: null, hasVocals: false, hasOriginal: false, vocalUrl: null });

@@ -46,7 +46,7 @@
       <span class="step-num">{step.num}</span>
       <span class="step-label">{step.label}</span>
     </button>
-    {#if step.num < steps.length}
+    {#if step.num < steps[steps.length - 1].num}
       <div class="step-line" class:active={$currentStep > step.num}></div>
     {/if}
   {/each}

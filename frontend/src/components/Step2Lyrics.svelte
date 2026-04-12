@@ -54,7 +54,7 @@
         preview: result.preview,
       });
       processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
-      currentStep.set(3);
+      generationModalOpen.set(true);
     } catch (err) {
       errorMessage.set(err.message);
     } finally {
@@ -76,7 +76,7 @@
     }
   }
   import { onDestroy } from 'svelte';
-  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
 
@@ -240,7 +240,7 @@
         ✂️ Auto-Hyphenate
       </button>
       <button class="btn btn-primary" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim() || !$sessionId}>
-        Continue →
+        🚀 Generate Ultrastar Files
       </button>
     </div>
   {/if}
