@@ -18,6 +18,12 @@ fn main() {
             // rely on the manually-started FastAPI backend instead.
             #[cfg(not(debug_assertions))]
             {
+                // Kill any stale process already holding port 8001
+                // (e.g. a leftover dev backend) so the sidecar can bind cleanly.
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", "lsof -ti:8001 | xargs kill -9 2>/dev/null || true"])
+                    .status();
+
                 let sidecar_command = app.shell().sidecar("backend")
                     .expect("backend sidecar not found");
                 let (mut rx, child) = sidecar_command
