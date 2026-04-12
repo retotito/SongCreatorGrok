@@ -3384,7 +3384,7 @@
 </script>
 
 <div class="step-content">
-  <h2>Step 4: Piano Roll Editor</h2>
+  <h2>Step 3: Piano Roll Editor</h2>
 
   <div class="toolbar">
     <div class="playback-controls">

@@ -108,7 +108,7 @@
 </script>
 
 <div class="step-content">
-  <h2>Step 5: Export & Download</h2>
+  <h2>Step 4: Export & Download</h2>
 
   {#if $generationResult}
     {#if missingInfo}

@@ -43,7 +43,7 @@
       disabled={!$canGoToStep(step.num)}
     >
       <span class="step-icon">{step.icon}</span>
-      <span class="step-num">{step.num}</span>
+      <span class="step-num">{step.display ?? step.num}</span>
       <span class="step-label">{step.label}</span>
     </button>
     {#if step.num < steps[steps.length - 1].num}
