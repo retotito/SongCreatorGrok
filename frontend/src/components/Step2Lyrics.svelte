@@ -1,4 +1,19 @@
 <script>
+        // Stub for submit button to prevent ReferenceError
+        function handleSubmit() {
+          // TODO: Implement submit/validate logic
+          alert('Submit/validate is not yet implemented.');
+        }
+      // Stub for test lyrics button to prevent ReferenceError
+      function handleLoadTestLyrics() {
+        // TODO: Implement test lyrics loading logic
+        alert('Load test lyrics is not yet implemented.');
+      }
+    // Stub for auto-hyphenate button to prevent ReferenceError
+    function handleAutoHyphenate() {
+      // TODO: Implement auto-hyphenation logic
+      alert('Auto-hyphenate is not yet implemented.');
+    }
   // Restore checkTestSession function
   async function checkTestSession() {
     if ($sessionId && $sessionId.startsWith('test-')) {
@@ -17,14 +32,37 @@
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
 
+
   // If coming from test session, lyrics may already be loaded
-  let lyricsText = '';
-  let artist = '';
-  let title = '';
-  let language = '';
+  let lyricsText = $lyricsData.text || '';
+  let artist = $lyricsData.artist || '';
+  let title = $lyricsData.title || '';
+  let language = $lyricsData.language || '';
   let hyphenationResult = null;
   let isTranscribing = false;
   let transcribeInfo = null;
+
+  // Keep lyricsData in sync with local fields
+  $: lyricsData.set({
+    text: lyricsText,
+    artist,
+    title,
+    language,
+    syllableCount: $lyricsData.syllableCount,
+    lineCount: $lyricsData.lineCount,
+    preview: $lyricsData.preview
+  });
+
+  // Handle file upload for .txt lyrics
+  function handleFileUpload(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      lyricsText = e.target.result;
+    };
+    reader.readAsText(file);
+  }
 
   // Audio
   $: hasVocals = $uploadData.hasVocals;
