@@ -48,6 +48,12 @@ Open two terminal tabs and run:
 cd /Users/retokupfer/projects/SongCreatorGrok && .venv/bin/python backend/main.py
 ```
 
+To run in the background without it getting suspended (output goes to `/tmp/songcreator.log`):
+```bash
+cd /Users/retokupfer/projects/SongCreatorGrok && .venv/bin/python3 backend/main.py >> /tmp/songcreator.log 2>&1 &
+tail -f /tmp/songcreator.log
+```
+
 **Tab 2 — Frontend:**
 ```bash
 cd /Users/retokupfer/projects/SongCreatorGrok/frontend && npm run dev
