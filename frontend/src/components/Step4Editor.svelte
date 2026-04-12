@@ -753,16 +753,40 @@
       const sampleRate = waveformPeaks.length / (waveformDuration || audioDuration || 1);
       const midY = wt / 2;
 
-      ctx.fillStyle = '#4fc3f744';
+      // Build per-pixel amplitude: max of all peaks that fall in each pixel's time range.
+      // When zoomed in (pixel spans sub-sample), interpolate between neighbours.
+      const amps = new Float32Array(w);
       for (let px = 0; px < w; px++) {
-        const beat = xToBeat(px);  // pixel → beat in CURRENT beat-space
-        // Convert beat to absolute time using CURRENT BPM/GAP
-        const t = beatToTime(beat);
-        const idx = Math.floor(t * sampleRate);
-        if (idx < 0 || idx >= waveformPeaks.length) continue;
-        const amp = waveformPeaks[idx] * (wt / 2) * 0.9;
-        ctx.fillRect(px, midY - amp, 1, amp * 2);
+        const tL = beatToTime(xToBeat(px - 0.5));
+        const tR = beatToTime(xToBeat(px + 0.5));
+        const iL = Math.max(0, Math.floor(tL * sampleRate));
+        const iR = Math.min(waveformPeaks.length - 1, Math.floor(tR * sampleRate));
+        if (iR < 0 || iL >= waveformPeaks.length) { amps[px] = 0; continue; }
+        if (iL === iR) {
+          // zoomed in — interpolate
+          const frac = (tL + tR) * 0.5 * sampleRate - iL;
+          const next = Math.min(iR + 1, waveformPeaks.length - 1);
+          amps[px] = waveformPeaks[iL] * (1 - frac) + waveformPeaks[next] * frac;
+        } else {
+          // zoomed out — take max of range
+          let max = 0;
+          for (let i = iL; i <= iR; i++) if (waveformPeaks[i] > max) max = waveformPeaks[i];
+          amps[px] = max;
+        }
       }
+
+      // Draw as a single smooth filled path
+      const scale = (wt / 2) * 0.9;
+      ctx.fillStyle = '#4fc3f7';
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.moveTo(0, midY);
+      for (let px = 0; px < w; px++) ctx.lineTo(px, midY - amps[px] * scale);
+      ctx.lineTo(w - 1, midY);
+      for (let px = w - 1; px >= 0; px--) ctx.lineTo(px, midY + amps[px] * scale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
 
       // Separator line
       ctx.strokeStyle = '#333';
@@ -3440,10 +3464,10 @@
       // Store decoded buffer for grain scrubbing
       scrubAudioBuffer = decoded;
 
-      // Downsample to 200 peaks per second (plenty for visual)
+      // Downsample to 750 peaks per second for smooth waveform at all zoom levels.
       // Use floating-point sample boundaries to avoid accumulated rounding drift.
       const rawData = decoded.getChannelData(0);
-      const peaksPerSec = 200;
+      const peaksPerSec = 750;
       const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
       const totalSamples = rawData.length;
       const peaks = new Float32Array(totalPeaks);
