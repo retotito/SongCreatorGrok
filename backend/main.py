@@ -73,6 +73,11 @@ def save_session(session_id: str):
         log_step("PERSIST", f"Failed to save session {session_id}: {e}")
 
 
+def safe_json(data):
+    """Round-trip through JSON with default=str to sanitize numpy types etc."""
+    return json.loads(json.dumps(data, default=str))
+
+
 def load_sessions():
     """Load all sessions from disk on startup."""
     count = 0
@@ -194,7 +199,7 @@ async def resume_specific_session(session_id: str):
     display_file = vocal if has_vocals else original
     display_filename = os.path.basename(display_file)
 
-    return {
+    return JSONResponse(safe_json({
         "status": "ok",
         "session_id": session_id,
         "filename": display_filename,
@@ -209,7 +214,7 @@ async def resume_specific_session(session_id: str):
         "line_count": line_count,
         "has_result": session.get("result") is not None,
         "result": session.get("result"),
-    }
+    }))
 
 
 @app.post("/api/import")
@@ -610,6 +615,16 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
 # ────────────────────────────────────────────────────────────
 # Step 2a: WhisperX ASR Transcription + Forced Alignment
 # ────────────────────────────────────────────────────────────
+@app.post("/api/cancel-transcribe/{session_id}")
+async def cancel_transcribe(session_id: str):
+    """Signal the transcription to abort."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session["transcribe_cancelled"] = True
+    return {"status": "ok", "message": "Transcription cancellation requested"}
+
+
 @app.post("/api/transcribe/{session_id}")
 async def transcribe_audio(session_id: str, language: str = Form("en")):
     """Transcribe vocal audio using WhisperX with phoneme-level forced alignment.
