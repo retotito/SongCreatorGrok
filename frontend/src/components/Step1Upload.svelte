@@ -1,6 +1,6 @@
 <script>
   import { sessionId, uploadData, currentStep, isProcessing, processingStatus, errorMessage, lyricsData, generationResult, generationLog, generationShowPreview } from '../stores/appStore.js';
-  import { uploadAudio, extractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
+  import { newSession, uploadAudio, extractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
 
   let dragOverMix = false;
   let dragOverVocals = false;
@@ -41,7 +41,9 @@
       if ($sessionId) {
         await uploadCorrectedVocals($sessionId, file);
       } else {
-        const result = await uploadAudio(file);
+        // Create a blank session (no original_audio) so vocals-only doesn't
+        // falsely appear as having a full-mix track in Step 4.
+        const result = await newSession();
         sessionId.set(result.session_id);
         await uploadCorrectedVocals(result.session_id, file);
       }
@@ -118,8 +120,8 @@
       sessionId.set(result.session_id);
       uploadData.set({
         filename: result.filename,
-        hasVocals: true,
-        hasOriginal: true,
+        hasVocals: result.has_vocals !== false,
+        hasOriginal: result.has_original === true,
         vocalUrl: getAudioUrl(result.session_id, 'vocals'),
       });
       if (result.has_lyrics) {

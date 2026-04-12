@@ -66,6 +66,10 @@ export async function importUltrastar(txtFile, audioFile, vocalFile) {
   return request('POST', '/import', form, true);
 }
 // ─── Step 1: Upload ────────────────────────────
+export async function newSession() {
+  return request('POST', '/new-session');
+}
+
 export async function uploadAudio(file) {
   const form = new FormData();
   form.append('audio', file);
