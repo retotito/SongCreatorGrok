@@ -431,6 +431,16 @@ async def upload_audio(audio: UploadFile = File(...)):
     }
 
 
+@app.post("/api/cancel-extract/{session_id}")
+async def cancel_extract(session_id: str):
+    """Signal the vocal extraction to abort (HTTP-level; Demucs runs to completion internally)."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session["extract_cancelled"] = True
+    return {"status": "ok", "message": "Extraction cancellation requested"}
+
+
 @app.post("/api/extract-vocals/{session_id}")
 async def extract_vocals(session_id: str):
     """Run Demucs vocal separation on uploaded audio."""
@@ -443,11 +453,15 @@ async def extract_vocals(session_id: str):
     if not DEMUCS_AVAILABLE:
         raise ServiceError("Demucs not installed", "Install with: pip install demucs", 503)
     
+    session["extract_cancelled"] = False
     try:
         session["status"] = "extracting_vocals"
         output_dir = os.path.join(UPLOAD_DIR, session_id)
         vocal_path = separate_vocals(session["original_audio"], output_dir)
         
+        if session.get("extract_cancelled"):
+            raise HTTPException(status_code=499, detail="Extraction cancelled")
+
         session["vocal_audio"] = vocal_path
         session["status"] = "vocals_extracted"
         save_session(session_id)
@@ -457,6 +471,8 @@ async def extract_vocals(session_id: str):
             "session_id": session_id,
             "vocal_url": f"/api/preview-audio/{session_id}/vocals",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         session["status"] = "extraction_failed"
         save_session(session_id)
