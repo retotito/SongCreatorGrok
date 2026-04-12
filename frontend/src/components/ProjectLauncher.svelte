@@ -17,11 +17,16 @@
   let txtError = '';
 
   onMount(async () => {
-    try {
-      const health = await checkHealth();
-      backendOnline = health.status === 'ok';
-    } catch {
-      backendOnline = false;
+    // In Tauri the sidecar needs a few seconds to unpack and start —
+    // retry the health check up to 15 times (one per second) before giving up.
+    const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    const maxAttempts = isTauri ? 15 : 1;
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const health = await checkHealth();
+        if (health.status === 'ok') { backendOnline = true; break; }
+      } catch { /* not ready yet */ }
+      if (i < maxAttempts - 1) await new Promise(r => setTimeout(r, 1000));
     }
     await loadSessions();
     loading = false;
