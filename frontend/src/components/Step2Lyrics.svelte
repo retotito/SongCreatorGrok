@@ -1,19 +1,66 @@
 <script>
-        // Stub for submit button to prevent ReferenceError
-        function handleSubmit() {
-          // TODO: Implement submit/validate logic
-          alert('Submit/validate is not yet implemented.');
-        }
-      // Stub for test lyrics button to prevent ReferenceError
-      function handleLoadTestLyrics() {
-        // TODO: Implement test lyrics loading logic
-        alert('Load test lyrics is not yet implemented.');
-      }
-    // Stub for auto-hyphenate button to prevent ReferenceError
-    function handleAutoHyphenate() {
-      // TODO: Implement auto-hyphenation logic
-      alert('Auto-hyphenate is not yet implemented.');
+  async function handleLoadTestLyrics() {
+    try {
+      const result = await getTestLyrics();
+      lyricsText = result.lyrics;
+      artist = 'U2';
+      title = 'Beautiful Day';
+    } catch (err) {
+      errorMessage.set(err.message);
     }
+  }
+
+  async function handleAutoHyphenate() {
+    if (!lyricsText.trim()) {
+      errorMessage.set('Enter lyrics first');
+      return;
+    }
+    errorMessage.set('');
+    isProcessing.set(true);
+    processingStatus.set('Auto-hyphenating lyrics...');
+    try {
+      const result = await hyphenateLyrics(lyricsText, language);
+      hyphenationResult = result;
+      lyricsText = result.hyphenated;
+      processingStatus.set(`✅ Auto-hyphenated: ${result.total_syllables} syllables (${result.method})`);
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isProcessing.set(false);
+    }
+  }
+
+  async function handleSubmit() {
+    if (!lyricsText.trim()) {
+      errorMessage.set('Please enter lyrics');
+      return;
+    }
+    if (!$sessionId) {
+      errorMessage.set('No session. Please upload audio first.');
+      return;
+    }
+    errorMessage.set('');
+    isProcessing.set(true);
+    processingStatus.set('Validating lyrics...');
+    try {
+      const result = await submitLyrics($sessionId, lyricsText, artist, title, language);
+      lyricsData.set({
+        text: lyricsText,
+        artist,
+        title,
+        language,
+        syllableCount: result.syllable_count,
+        lineCount: result.line_count,
+        preview: result.preview,
+      });
+      processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
+      currentStep.set(3);
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isProcessing.set(false);
+    }
+  }
   // Restore checkTestSession function
   async function checkTestSession() {
     if ($sessionId && $sessionId.startsWith('test-')) {
@@ -28,6 +75,7 @@
       }
     }
   }
+  import { onDestroy } from 'svelte';
   import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
@@ -80,6 +128,12 @@
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
   }
+
+  onDestroy(() => {
+    if ($sessionId && lyricsText.trim()) {
+      submitLyrics($sessionId, lyricsText, artist, title, language).catch(() => {});
+    }
+  });
 
   // ── Whisper transcription ──
   async function handleTranscribe() {
@@ -182,18 +236,11 @@
     </div>
 
     <div class="action-row">
-      <label class="btn btn-secondary small">
-        📂 Upload .txt
-        <input type="file" accept=".txt" on:change={handleFileUpload} hidden />
-      </label>
       <button class="btn btn-hyphen small" on:click={handleAutoHyphenate} disabled={$isProcessing || !lyricsText.trim()}>
         ✂️ Auto-Hyphenate
       </button>
-      <button class="btn btn-test small" on:click={handleLoadTestLyrics}>
-        🧪 Load Test Lyrics
-      </button>
-      <button class="btn btn-primary" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim()}>
-        Validate & Continue
+      <button class="btn btn-primary" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim() || !$sessionId}>
+        Continue →
       </button>
     </div>
   {/if}
@@ -385,8 +432,6 @@
   .btn-primary:hover:not(:disabled) { background: #1565c0; }
   .btn-secondary { background: #333; color: #ccc; border: 1px solid #555; }
   .btn-secondary:hover:not(:disabled) { background: #444; }
-  .btn-test { background: #2e7d32; color: white; }
-  .btn-test:hover { background: #388e3c; }
   .btn-hyphen { background: #e65100; color: white; }
   .btn-hyphen:hover:not(:disabled) { background: #f57c00; }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
