@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { currentStep, sessionId, uploadData, lyricsData, generationResult, resetSession } from './stores/appStore.js';
+  import { currentStep, sessionId, uploadData, lyricsData, generationResult, generationModalOpen, resetSession } from './stores/appStore.js';
   import { checkHealth, resumeSession, getAudioUrl } from './services/api.js';
   import StepNavigation from './components/StepNavigation.svelte';
   import ProjectLauncher from './components/ProjectLauncher.svelte';
@@ -89,12 +89,14 @@
         <Step1Upload />
       {:else if $currentStep === 2}
         <Step2Lyrics />
-      {:else if $currentStep === 3}
-        <Step3Generate />
       {:else if $currentStep === 4}
         <Step4Editor />
       {:else if $currentStep === 5}
         <Step5Export />
+      {/if}
+
+      {#if $generationModalOpen}
+        <Step3Generate />
       {/if}
     </main>
   {/if}
