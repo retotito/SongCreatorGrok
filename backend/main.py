@@ -377,6 +377,25 @@ async def import_ultrastar(
 # ────────────────────────────────────────────────────────────
 # Step 1: Upload & Vocal Extraction
 # ────────────────────────────────────────────────────────────
+@app.post("/api/new-session")
+async def new_session():
+    """Create a blank session (no audio). Used when uploading vocals without a mix."""
+    session_id = str(uuid.uuid4())[:8]
+    session_dir = os.path.join(UPLOAD_DIR, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    sessions[session_id] = {
+        "id": session_id,
+        "original_audio": None,
+        "vocal_audio": None,
+        "lyrics": None,
+        "status": "new",
+        "created_at": time.time(),
+    }
+    save_session(session_id)
+    log_step("UPLOAD", f"Session {session_id}: created blank session")
+    return {"status": "ok", "session_id": session_id}
+
+
 @app.post("/api/upload")
 async def upload_audio(audio: UploadFile = File(...)):
     """Upload an audio file (MP3/WAV). Returns a session ID."""
@@ -1033,6 +1052,8 @@ async def resume_last_session():
         "whisper_words": len(new_session.get("whisper_words", [])),
         "reference": reference_info,
         "has_result": last.get("result") is not None,
+        "has_vocals": vocal is not None and os.path.exists(vocal),
+        "has_original": original is not None and os.path.exists(original),
     }
 
 
