@@ -4,9 +4,17 @@
 import { writable, derived } from 'svelte/store';
 
 // Current step (0 = launcher, 1-5 = wizard)
-const savedStep = parseInt(localStorage.getItem('currentStep')) || 0;
+const savedStepRaw = localStorage.getItem('currentStep');
+const savedStep = savedStepRaw !== null ? parseInt(savedStepRaw) : 0;
 export const currentStep = writable(savedStep);
-currentStep.subscribe(v => localStorage.setItem('currentStep', String(v)));
+currentStep.subscribe(v => {
+  // Only persist if not on launcher (step 0)
+  if (v > 0) {
+    localStorage.setItem('currentStep', String(v));
+  } else {
+    localStorage.removeItem('currentStep');
+  }
+});
 
 // Session ID from backend
 const savedSession = localStorage.getItem('sessionId') || null;
@@ -17,15 +25,34 @@ sessionId.subscribe(v => {
 });
 
 // Step 1: Upload data
-export const uploadData = writable({
+const savedUploadRaw = localStorage.getItem('uploadData');
+let initialUpload = {
   filename: null,
   hasVocals: false,
   hasOriginal: false,
   vocalUrl: null,
+};
+if (savedUploadRaw) {
+  try {
+    initialUpload = { ...initialUpload, ...JSON.parse(savedUploadRaw) };
+  } catch (e) {
+    // ignore parse error, use defaults
+  }
+}
+export const uploadData = writable(initialUpload);
+uploadData.subscribe(v => {
+  // Only persist if any field is non-empty
+  const hasData = v.filename || v.hasVocals || v.hasOriginal || v.vocalUrl;
+  if (hasData) {
+    localStorage.setItem('uploadData', JSON.stringify(v));
+  } else {
+    localStorage.removeItem('uploadData');
+  }
 });
 
 // Step 2: Lyrics data
-export const lyricsData = writable({
+const savedLyricsRaw = localStorage.getItem('lyricsData');
+let initialLyrics = {
   text: '',
   artist: '',
   title: '',
@@ -33,6 +60,23 @@ export const lyricsData = writable({
   syllableCount: 0,
   lineCount: 0,
   preview: [],
+};
+if (savedLyricsRaw) {
+  try {
+    initialLyrics = { ...initialLyrics, ...JSON.parse(savedLyricsRaw) };
+  } catch (e) {
+    // ignore parse error, use defaults
+  }
+}
+export const lyricsData = writable(initialLyrics);
+lyricsData.subscribe(v => {
+  // Only persist if any field is non-empty
+  const hasData = v.text || v.artist || v.title || v.language !== 'en';
+  if (hasData) {
+    localStorage.setItem('lyricsData', JSON.stringify(v));
+  } else {
+    localStorage.removeItem('lyricsData');
+  }
 });
 
 // Step 3: Generation result
@@ -84,7 +128,9 @@ export function resetSession() {
   currentStep.set(0);
   sessionId.set(null);
   uploadData.set({ filename: null, hasVocals: false, hasOriginal: false, vocalUrl: null });
+  localStorage.removeItem('uploadData');
   lyricsData.set({ text: '', artist: '', title: '', language: 'en', syllableCount: 0, lineCount: 0, preview: [] });
+  localStorage.removeItem('lyricsData');
   generationResult.set(null);
   generationLog.set([]);
   generationShowPreview.set(false);
