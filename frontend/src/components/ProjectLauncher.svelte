@@ -22,7 +22,7 @@
     // In Tauri the sidecar needs a few seconds to unpack and start —
     // retry the health check up to 15 times (one per second) before giving up.
     const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-    const maxAttempts = isTauri ? 30 : 1;
+    const maxAttempts = isTauri ? 120 : 1;  // up to 2 min for first-launch PyInstaller extraction
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const health = await checkHealth();
