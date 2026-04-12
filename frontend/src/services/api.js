@@ -99,10 +99,25 @@ export function getAudioUrl(sessionId, type) {
 }
 
 // ─── Step 2: Lyrics ────────────────────────────
-export async function transcribeAudio(sessionId, language = 'en') {
+export async function transcribeAudio(sessionId, language = 'en', signal = null) {
   const form = new FormData();
   form.append('language', language);
-  return request('POST', `/transcribe/${sessionId}`, form, true);
+  const url = `${BASE}/transcribe/${sessionId}`;
+  const options = { method: 'POST', body: form };
+  if (signal) options.signal = signal;
+  console.log(`[API] POST ${url}`);
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(`API error ${response.status}: ${errData.detail || response.statusText}`);
+  }
+  const data = await response.json();
+  console.log(`[API] ✅ POST ${url} →`, data);
+  return data;
+}
+
+export async function cancelTranscribe(sessionId) {
+  return request('POST', `/cancel-transcribe/${sessionId}`, null, false, false, null).catch(() => {});
 }
 
 export async function submitLyrics(sessionId, lyrics, artist, title, language) {

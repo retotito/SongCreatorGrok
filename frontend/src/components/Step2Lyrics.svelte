@@ -78,7 +78,7 @@
   import { onDestroy } from 'svelte';
   import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, getAudioUrl } from '../services/api.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl } from '../services/api.js';
 
 
   // If coming from test session, lyrics may already be loaded
@@ -89,6 +89,9 @@
   let hyphenationResult = null;
   let isTranscribing = false;
   let transcribeInfo = null;
+  let transcribeStatus = '';
+  let transcribeModalOpen = false;
+  let transcribeAbortController = null;
 
   // Keep lyricsData in sync with local fields
   $: lyricsData.set({
@@ -141,23 +144,36 @@
       errorMessage.set('No session. Upload audio first.');
       return;
     }
-
     errorMessage.set('');
     isTranscribing = true;
-    processingStatus.set('🎙️ Transcribing with Whisper (this may take a minute)...');
+    transcribeModalOpen = true;
+    transcribeStatus = '⏳ Loading Whisper model…';
+    transcribeAbortController = new AbortController();
 
     try {
-      const result = await transcribeAudio($sessionId, language);
+      transcribeStatus = '🎙️ Transcribing with Whisper (this may take a minute)…';
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal);
       console.log('[Step2] Whisper result:', result);
       lyricsText = result.text;
       transcribeInfo = result;
-      processingStatus.set(`✅ Transcribed: ${result.lines} lines, ${result.words} words (${result.language_name}, model: ${result.model})`);
+      transcribeStatus = `✅ Done: ${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
+      processingStatus.set(transcribeStatus);
+      transcribeModalOpen = false;
     } catch (err) {
+      if (err.name === 'AbortError') return; // cancelled silently
       console.error('[Step2] Transcription error:', err);
+      transcribeStatus = `❌ ${err.message}`;
       errorMessage.set(err.message);
     } finally {
       isTranscribing = false;
     }
+  }
+
+  function cancelTranscription() {
+    isTranscribing = false;
+    transcribeModalOpen = false;
+    if (transcribeAbortController) transcribeAbortController.abort();
+    cancelTranscribe($sessionId);
   }
 </script>
 
@@ -199,7 +215,7 @@
             on:click={handleTranscribe}
             disabled={isTranscribing || $isProcessing}
           >
-            {isTranscribing ? '⏳ Generating Lyrics...' : '🎙️ Generate Lyrics from Vocals'}
+            🎙️ Generate Lyrics from Vocals
           </button>
           <p class="transcribe-hint">This will use AI to listen to your vocal track and automatically generate lyrics. You can review and edit the result below.</p>
         </div>
@@ -261,7 +277,7 @@
   </style>
 
   {#if $lyricsData.preview.length > 0 && !$generationModalOpen}
-    <div class="preview-section">
+    <!-- <div class="preview-section">
       <h3>Syllable Preview ({$lyricsData.syllableCount} syllables, {$lyricsData.lineCount} lines)</h3>
       <div class="preview-lines">
         {#each $lyricsData.preview as line}
@@ -275,7 +291,7 @@
           </div>
         {/each}
       </div>
-    </div>
+    </div> -->
   {/if}
 
   {#if $processingStatus}
@@ -285,6 +301,27 @@
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
 </div>
+
+{#if transcribeModalOpen}
+  <div class="transcribe-modal-backdrop">
+    <div class="transcribe-modal-box">
+      <div class="transcribe-modal-header">
+        <div class="transcribe-modal-title">
+          {#if isTranscribing}
+            <span class="t-spinner"></span>
+          {/if}
+          <h2>{isTranscribing ? '🎙️ Generating Lyrics…' : '✅ Transcription Complete'}</h2>
+        </div>
+      </div>
+      <p class="transcribe-modal-status">{transcribeStatus}</p>
+      <div class="transcribe-modal-footer">
+        <button class="btn btn-cancel" on:click={cancelTranscription}>
+          {isTranscribing ? '✕ Cancel' : '← Close'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .step-content {
@@ -539,5 +576,70 @@
     margin-top: 1rem;
     color: #ef9a9a;
     text-align: center;
+  }
+
+  /* Transcription modal */
+  .transcribe-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .transcribe-modal-box {
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 2rem;
+    width: 90%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .transcribe-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .transcribe-modal-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .transcribe-modal-title h2 {
+    margin: 0;
+  }
+
+  .t-spinner {
+    width: 20px;
+    height: 20px;
+    border: 3px solid #333;
+    border-top-color: #4fc3f7;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .transcribe-modal-status {
+    color: #aaa;
+    font-size: 0.9rem;
+    margin: 0;
+  }
+
+  .transcribe-modal-footer {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: 0.5rem;
   }
 </style>
