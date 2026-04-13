@@ -184,6 +184,20 @@
   let micNoteHits = new Map();
   let micShowRawTrail = false; // optional raw pitch trail for debugging
 
+  // Vocal trace (simulated mic from vocal audio file)
+  let vocalTraceEnabled = false;
+  let vocalTraceLoading = false;
+  let vocalTraceVisible = true;         // show/hide toggle (data kept when false)
+  let vocalTraceDecodedBuffer = null;   // decoded AudioBuffer of the vocal file
+  let vocalTraceSampleBuf = null;       // reused Float32Array(2048) for pitch detection
+  let vocalTraceDetector = null;        // PitchDetector instance
+  let vocalTraceNoteHits = new Map();   // same structure as micNoteHits (in-note)
+  let vocalTraceBetweenHits = [];       // [{beat, pitch}] for between-note frames
+  // Smoothing state (parallel to mic)
+  let vocalTraceLastPitch = -1;
+  let vocalTracePitchConfidence = 0;
+  let vocalTraceRecentPitches = [];
+
   // Text editor modal
   let showTextEditor = false;
   let textEditorContent = '';
@@ -1103,8 +1117,8 @@
       // Cut notes are semi-transparent
       const cutAlpha = isCut ? '44' : '';
 
-      // When mic is enabled, notes become hollow (faint fill + clear border) — USDX style
-      const micHollow = micEnabled && micShowTrail;
+      // When mic or vocal trace is enabled, notes become hollow (faint fill + clear border) — USDX style
+      const micHollow = (micEnabled && micShowTrail) || vocalTraceEnabled;
 
       if (note.isGolden) {
         ctx.fillStyle = micHollow ? (isSelected ? '#ffd70033' : '#ffd70012') : (isSelected ? '#ffd70088' : (isCut ? '#ffd70022' : '#ffd70044'));
@@ -1150,6 +1164,79 @@
           ctx.beginPath();
           ctx.arc(x + width - dotR - 1, y - noteHeight / 2 + dotR + 1, dotR, 0, Math.PI * 2);
           ctx.fill();
+        }
+      }
+    }
+
+    // ── Vocal trace: between-note blocks (drawn first, behind everything) ──
+    if (vocalTraceVisible && vocalTraceBetweenHits.length > 0) {
+      const visibleStartBeat = xToBeat(0);
+      const visibleEndBeat = xToBeat(w);
+      const betweenColor = 'rgba(80, 200, 240, 0.5)';
+      let i = 0;
+      while (i < vocalTraceBetweenHits.length) {
+        const sample = vocalTraceBetweenHits[i];
+        if (sample.beat < visibleStartBeat - 1 || sample.beat > visibleEndBeat + 1) { i++; continue; }
+        const pitch = sample.pitch;
+        let endBeat = sample.beat;
+        while (i + 1 < vocalTraceBetweenHits.length && vocalTraceBetweenHits[i + 1].pitch === pitch) {
+          i++;
+          endBeat = vocalTraceBetweenHits[i].beat;
+        }
+        const beatGap = 0.3;
+        const y = pitchToY(pitch);
+        const xStart = beatToX(sample.beat);
+        const xEnd = beatToX(endBeat + beatGap);
+        ctx.fillStyle = betweenColor;
+        ctx.fillRect(xStart, y - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
+        i++;
+      }
+    }
+
+    // ── Vocal trace: in-note blocks (same rendering as mic trail but cyan for misses) ──
+    if (vocalTraceVisible && vocalTraceNoteHits.size > 0) {
+      const visibleStartBeat = xToBeat(0);
+      const visibleEndBeat = xToBeat(w);
+
+      for (const note of notes) {
+        if (note.type === 'break') continue;
+        const hits = vocalTraceNoteHits.get(note.id);
+        if (!hits || hits.length === 0) continue;
+
+        const noteEndBeat = note.startBeat + note.duration;
+        if (noteEndBeat < visibleStartBeat - 1 || note.startBeat > visibleEndBeat + 1) continue;
+
+        const noteY = pitchToY(note.pitch);
+        const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
+                       : note.isRap ? 'rgba(255, 152, 0, 0.65)'
+                       : 'rgba(102, 187, 106, 0.7)';
+        const missColor = 'rgba(80, 200, 240, 0.5)';
+        const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) * 1.5 : 0.3;
+
+        let i = 0;
+        while (i < hits.length) {
+          const sample = hits[i];
+          if (sample.isHit) {
+            let endBeat = sample.beat;
+            while (i + 1 < hits.length && hits[i + 1].isHit) { i++; endBeat = hits[i].beat; }
+            const xStart = beatToX(Math.max(sample.beat, note.startBeat));
+            const xEnd = beatToX(Math.min(endBeat + beatGap, noteEndBeat));
+            ctx.fillStyle = hitColor;
+            ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
+          } else {
+            const missPitch = sample.sungPitch;
+            let endBeat = sample.beat;
+            while (i + 1 < hits.length && !hits[i + 1].isHit && hits[i + 1].sungPitch === missPitch) {
+              i++;
+              endBeat = hits[i].beat;
+            }
+            const missY = pitchToY(missPitch);
+            const xStart = beatToX(sample.beat);
+            const xEnd = beatToX(endBeat + beatGap);
+            ctx.fillStyle = missColor;
+            ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
+          }
+          i++;
         }
       }
     }
@@ -2937,6 +3024,7 @@
     if (midiPlayback) updateMidiPlayback(playbackBeat);
     if (metronomeEnabled) updateMetronome(playbackBeat);
     if (micEnabled && micAnalyser) sampleMicPitch(currentTimeSec);
+    if (vocalTraceEnabled && vocalTraceDecodedBuffer) sampleVocalTrace(currentTimeSec);
     animFrame = requestAnimationFrame(updatePlayback);
   }
 
@@ -3306,6 +3394,146 @@
     micPitchConfidence = 0;
     micRecentPitches = [];
     draw();
+  }
+
+  // ── Vocal trace (simulated mic from vocal audio) ──
+
+  async function startVocalTrace() {
+    vocalTraceLoading = true;
+    try {
+      const response = await fetch(vocalUrl);
+      const arrayBuffer = await response.arrayBuffer();
+      const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+      vocalTraceDecodedBuffer = await tmpCtx.decodeAudioData(arrayBuffer);
+      tmpCtx.close();
+      vocalTraceSampleBuf = new Float32Array(2048);
+      vocalTraceDetector = PitchDetector.forFloat32Array(2048);
+      vocalTraceNoteHits = new Map();
+      vocalTraceBetweenHits = [];
+      vocalTraceLastPitch = -1;
+      vocalTracePitchConfidence = 0;
+      vocalTraceRecentPitches = [];
+      console.log('[VocalTrace] Loaded, duration:', vocalTraceDecodedBuffer.duration);
+    } catch (err) {
+      console.error('[VocalTrace] Failed to load:', err);
+      vocalTraceEnabled = false;
+    }
+    vocalTraceLoading = false;
+  }
+
+  function stopVocalTrace() {
+    // Keep note/between data so it stays visible after unchecking
+    vocalTraceDecodedBuffer = null;
+    vocalTraceSampleBuf = null;
+    vocalTraceDetector = null;
+    vocalTraceLastPitch = -1;
+    vocalTracePitchConfidence = 0;
+    vocalTraceRecentPitches = [];
+  }
+
+  function clearVocalTrace() {
+    vocalTraceNoteHits = new Map();
+    vocalTraceBetweenHits = [];
+    draw();
+  }
+
+  async function toggleVocalTrace() {
+    draw();
+    if (vocalTraceEnabled) {
+      // Mutual exclusion: disable mic if active
+      if (micEnabled) { micEnabled = false; stopMic(); }
+      await startVocalTrace();
+    } else {
+      stopVocalTrace();
+    }
+  }
+
+  function sampleVocalTrace(timeSec) {
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) return;
+
+    const sampleRate = vocalTraceDecodedBuffer.sampleRate;
+    const channelData = vocalTraceDecodedBuffer.getChannelData(0);
+    const startSample = Math.floor(timeSec * sampleRate);
+    const fftSize = 2048;
+
+    if (startSample + fftSize > channelData.length) return;
+    for (let i = 0; i < fftSize; i++) vocalTraceSampleBuf[i] = channelData[startSample + i];
+
+    const [frequency, clarity] = vocalTraceDetector.findPitch(vocalTraceSampleBuf, sampleRate);
+
+    if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) {
+      if (vocalTracePitchConfidence > 0) vocalTracePitchConfidence--;
+      if (vocalTracePitchConfidence === 0) { vocalTraceLastPitch = -1; vocalTraceRecentPitches = []; }
+      return;
+    }
+
+    let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+
+    const currentBeat = timeToBeat(timeSec);
+    let targetNote = null;
+    for (const note of notes) {
+      if (note.type === 'break') continue;
+      if (currentBeat >= note.startBeat && currentBeat < note.startBeat + note.duration) {
+        targetNote = note;
+        break;
+      }
+    }
+
+    // Rolling median smoothing
+    vocalTraceRecentPitches.push(midiPitch);
+    if (vocalTraceRecentPitches.length > 5) vocalTraceRecentPitches.shift();
+    const sorted = [...vocalTraceRecentPitches].sort((a, b) => a - b);
+    midiPitch = sorted[Math.floor(sorted.length / 2)];
+
+    // Sticky prediction
+    if (vocalTraceLastPitch > 0) {
+      const drift = Math.abs(midiPitch - vocalTraceLastPitch);
+      if (drift === 0) {
+        vocalTracePitchConfidence = Math.min(8, vocalTracePitchConfidence + 1);
+      } else if (drift <= 2 && vocalTracePitchConfidence >= 4) {
+        midiPitch = vocalTraceLastPitch;
+        vocalTracePitchConfidence--;
+      } else {
+        vocalTracePitchConfidence = 1;
+      }
+    } else {
+      vocalTracePitchConfidence = 1;
+    }
+    vocalTraceLastPitch = midiPitch;
+
+    if (targetNote) {
+      // Octave correction toward target note (same as mic)
+      while (midiPitch - targetNote.pitch > 6) midiPitch -= 12;
+      while (midiPitch - targetNote.pitch < -6) midiPitch += 12;
+      if (midiPitch < 36) midiPitch += 12;
+      if (midiPitch > 84) midiPitch -= 12;
+
+      const isHit = Math.abs(midiPitch - targetNote.pitch) <= 2;
+      if (!vocalTraceNoteHits.has(targetNote.id)) vocalTraceNoteHits.set(targetNote.id, []);
+      const hits = vocalTraceNoteHits.get(targetNote.id);
+      // Clear-ahead on rewind
+      if (hits.length > 0 && hits[hits.length - 1].beat >= currentBeat) {
+        let cutIdx = hits.length;
+        for (let j = 0; j < hits.length; j++) {
+          if (hits[j].beat >= currentBeat - 0.01) { cutIdx = j; break; }
+        }
+        hits.length = cutIdx;
+      }
+      hits.push({ beat: currentBeat, sungPitch: midiPitch, isHit });
+    } else {
+      // Between notes: clamp to vocal range, no octave correction
+      if (midiPitch < 36) midiPitch += 12;
+      if (midiPitch > 84) midiPitch -= 12;
+      // Clear-ahead on rewind
+      if (vocalTraceBetweenHits.length > 0 && vocalTraceBetweenHits[vocalTraceBetweenHits.length - 1].beat >= currentBeat) {
+        let cutIdx = vocalTraceBetweenHits.length;
+        for (let j = 0; j < vocalTraceBetweenHits.length; j++) {
+          if (vocalTraceBetweenHits[j].beat >= currentBeat - 0.01) { cutIdx = j; break; }
+        }
+        vocalTraceBetweenHits.length = cutIdx;
+      }
+      vocalTraceBetweenHits.push({ beat: currentBeat, pitch: midiPitch });
+    }
   }
 
   async function exportMicTrail() {
@@ -3703,7 +3931,10 @@
       </label>
 
       <label title="Microphone sing-along (M)">
-        <input type="checkbox" bind:checked={micEnabled} on:change={toggleMic} />
+        <input type="checkbox" bind:checked={micEnabled} on:change={() => {
+          if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
+          toggleMic();
+        }} />
         🎙️ Mic
       </label>
       {#if micEnabled}
@@ -3738,6 +3969,25 @@
             {/each}
           </select>
         {/if}
+      {/if}
+
+      <label title="Vocal trace — plays the vocal audio through pitch detection, same as mic sing-along (cyan = off-pitch, green = on-pitch)" class:disabled-label={!hasVocalsAudio}>
+        <input type="checkbox" bind:checked={vocalTraceEnabled} disabled={!hasVocalsAudio} on:change={() => {
+          if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+          toggleVocalTrace();
+        }} />
+        🎤 Vocal trace
+      </label>
+      {#if vocalTraceLoading}
+        <span class="mic-starting">⏳ Loading…</span>
+      {/if}
+      {#if vocalTraceNoteHits.size > 0 || vocalTraceBetweenHits.length > 0}
+        {#if vocalTraceVisible}
+          <button class="tool-btn sm active" on:click={() => { vocalTraceVisible = false; draw(); }} title="Hide vocal trace">👁 Vocal</button>
+        {:else}
+          <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace">👁 Vocal</button>
+        {/if}
+        <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
       {/if}
     </div>
 
@@ -5043,6 +5293,11 @@
   .tool-btn.disabled-audio:hover {
     opacity: 0.5;
     background: #3e2723;
+  }
+
+  label.disabled-label {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   /* Text editor modal */
