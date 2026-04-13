@@ -75,6 +75,7 @@
   let dragGain = null;
   let dragAudioCtx = null;
   let dragLastPitch = null;
+  let dragOscStopTimer = null;
 
   // Context menu
   let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, beat: 0, pitch: 0, traceFrame: null };
@@ -1655,7 +1656,7 @@
           }
         }
         if (closest) {
-          playMidiPitch(closest.pitch, 0.5);
+          startDragOsc(closest.pitch);
           draw();
           return;
         }
@@ -1975,8 +1976,8 @@
 
     if (isDragging) {
       console.log('[Mouse] mouseUp, drag ended');
-      stopDragOsc();
     }
+    stopDragOsc();
     isDragging = false;
     dragMode = null;
   }
@@ -2802,7 +2803,8 @@
       if (e.code === 'ArrowLeft') { e.preventDefault(); seekPlayback(e.shiftKey ? -1 : -5); return; }
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.code === 'KeyL' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
-      if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); micEnabled = !micEnabled; toggleMic(); return; }
+      if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); return; }
+      if (e.code === 'KeyV' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); return; }
       if (e.code === 'Escape') {
         e.preventDefault();
         if (loopStartBeat !== null) clearLoop();
@@ -2869,6 +2871,25 @@
     const hasSelection = selectedNotes.size > 0 || selectedNote !== null;
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
       e.preventDefault();
+
+      // Ctrl+Left/Right (single note only): resize duration from right edge
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
+          selectedNotes.size === 0 && selectedNote !== null) {
+        const snap = snapBeatValue(1); // one grid unit
+        const delta = e.code === 'ArrowRight' ? snap : -snap;
+        const note = notes.find(n => n.id === selectedNote);
+        if (note && note.type !== 'break') {
+          const newDur = Math.max(snap, note.duration + delta);
+          if (newDur !== note.duration) {
+            pushUndo();
+            notes = notes.map(n => n.id === selectedNote ? { ...n, duration: newDur } : n);
+            markUnsaved();
+            draw();
+          }
+        }
+        return;
+      }
+
       if (hasSelection) {
         const ids = selectedNotes.size > 0 ? selectedNotes : new Set([selectedNote]);
         pushUndo();
@@ -2880,6 +2901,16 @@
           if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - (e.shiftKey ? 12 : 1) };
           return n;
         });
+        // Play pitch preview on up/down
+        if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+          const previewId = selectedNotes.size === 0 ? selectedNote : [...selectedNotes][0];
+          const movedNote = notes.find(n => n.id === previewId);
+          if (movedNote) {
+            if (dragOscStopTimer) { clearTimeout(dragOscStopTimer); dragOscStopTimer = null; }
+            startDragOsc(movedNote.pitch);
+            dragOscStopTimer = setTimeout(() => { stopDragOsc(); dragOscStopTimer = null; }, 400);
+          }
+        }
         markUnsaved();
         draw();
       } else {
@@ -2899,7 +2930,16 @@
     if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote === null) {
       e.preventDefault();
       micEnabled = !micEnabled;
+      if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
       toggleMic();
+    }
+
+    // V: toggle vocal trace
+    if (e.code === 'KeyV' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote === null && hasVocalsAudio) {
+      e.preventDefault();
+      vocalTraceEnabled = !vocalTraceEnabled;
+      if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+      toggleVocalTrace();
     }
     // Ctrl/Cmd+G: enter Grid Align mode
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyG') {
