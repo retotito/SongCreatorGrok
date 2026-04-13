@@ -1107,20 +1107,20 @@
       const micHollow = micEnabled && micShowTrail;
 
       if (note.isGolden) {
-        ctx.fillStyle = micHollow ? '#ffd70012' : (isSelected ? '#ffd70088' : (isCut ? '#ffd70022' : '#ffd70044'));
+        ctx.fillStyle = micHollow ? (isSelected ? '#ffd70033' : '#ffd70012') : (isSelected ? '#ffd70088' : (isCut ? '#ffd70022' : '#ffd70044'));
         ctx.strokeStyle = isCut ? '#ffd70066' : '#ffd700';
       } else if (note.isRap) {
-        ctx.fillStyle = micHollow ? '#ff980012' : (isSelected ? '#ff980088' : (isCut ? '#ff980022' : '#ff980044'));
+        ctx.fillStyle = micHollow ? (isSelected ? '#ff980033' : '#ff980012') : (isSelected ? '#ff980088' : (isCut ? '#ff980022' : '#ff980044'));
         ctx.strokeStyle = isCut ? '#ff980066' : '#ff9800';
       } else if (hasChanged) {
-        ctx.fillStyle = micHollow ? '#fdd83512' : (isSelected ? '#fdd83588' : (isCut ? '#fdd83522' : '#fdd83544'));
+        ctx.fillStyle = micHollow ? (isSelected ? '#fdd83533' : '#fdd83512') : (isSelected ? '#fdd83588' : (isCut ? '#fdd83522' : '#fdd83544'));
         ctx.strokeStyle = isCut ? '#fdd83566' : '#fdd835';
       } else {
-        ctx.fillStyle = micHollow ? '#4fc3f712' : (isSelected ? '#4fc3f788' : (isCut ? '#4fc3f722' : '#4fc3f744'));
+        ctx.fillStyle = micHollow ? (isSelected ? '#4fc3f733' : '#4fc3f712') : (isSelected ? '#4fc3f788' : (isCut ? '#4fc3f722' : '#4fc3f744'));
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
       }
 
-      ctx.lineWidth = micHollow ? 2 : (isSelected ? 2 : 1);
+      ctx.lineWidth = isSelected ? 2 : 1;
       ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
       ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
 
@@ -2776,15 +2776,29 @@
       e.preventDefault();
       if (!setGapMode) togglePlayback();
     }
-    // Left arrow: move cursor (seek) — 5s or 1s with Shift
-    if (e.code === 'ArrowLeft') {
+
+    // Arrow keys: move selected notes, or seek if nothing selected
+    const hasSelection = selectedNotes.size > 0 || selectedNote !== null;
+    if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
       e.preventDefault();
-      seekPlayback(e.shiftKey ? -1 : -5);
-    }
-    // Right arrow: move cursor (seek) — 5s or 1s with Shift
-    if (e.code === 'ArrowRight') {
-      e.preventDefault();
-      seekPlayback(e.shiftKey ? 1 : 5);
+      if (hasSelection) {
+        const ids = selectedNotes.size > 0 ? selectedNotes : new Set([selectedNote]);
+        pushUndo();
+        notes = notes.map(n => {
+          if (!ids.has(n.id) || n.type === 'break') return n;
+          if (e.code === 'ArrowLeft')  return { ...n, startBeat: n.startBeat - (e.shiftKey ? 4 : 1) };
+          if (e.code === 'ArrowRight') return { ...n, startBeat: n.startBeat + (e.shiftKey ? 4 : 1) };
+          if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + (e.shiftKey ? 12 : 1) };
+          if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - (e.shiftKey ? 12 : 1) };
+          return n;
+        });
+        markUnsaved();
+        draw();
+      } else {
+        if (e.code === 'ArrowLeft')  seekPlayback(e.shiftKey ? -1 : -5);
+        if (e.code === 'ArrowRight') seekPlayback(e.shiftKey ? 1 : 5);
+      }
+      return;
     }
 
     // L: toggle loop on/off

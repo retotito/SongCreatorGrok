@@ -70,7 +70,11 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 - **Loop regions** — Shift+drag on the time ruler to set a loop, with draggable handles
 - **Playhead scrub** — drag the playhead handle with audio + MIDI preview
 - **Smart cursors** — move/resize indicators when hovering over notes
-- **Keyboard shortcuts** — Space (play), L (loop), Escape (clear loop), arrow keys (seek)
+- **Keyboard shortcuts** — Space (play/pause), L (loop), Escape (clear loop/deselect)
+  - **←/→** — seek −5s/+5s (no selection), or move selected note(s) ±1 beat
+  - **Shift+←/→** — seek −1s/+1s (no selection), or move selected note(s) ±4 beats
+  - **↑/↓** — shift selected note(s) pitch ±1 semitone
+  - **Shift+↑/↓** — shift selected note(s) pitch ±1 octave
 
 ### Project Management
 - **Project launcher** — create, open, rename, and delete song projects
