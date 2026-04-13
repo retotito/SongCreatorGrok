@@ -2703,8 +2703,9 @@
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
-      // Auto-show vocal trace when recording starts
+      // Auto-show trails when recording starts
       if (vocalTraceEnabled) vocalTraceVisible = true;
+      if (micEnabled) micShowTrail = true;
       // Initialize metronome to current beat so it doesn't click immediately
       if (metronomeEnabled) {
         const offsetBeat = playbackBeat - metronomeOffset;
@@ -3317,14 +3318,15 @@
   }
 
   async function toggleMic() {
-    // Redraw immediately so trail visibility responds instantly
-    draw();
     if (micEnabled) {
+      micShowTrail = true; // always show when activating
+      draw();
       micStarting = true;
       await startMic();
       micStarting = false;
     } else {
       stopMic();
+      draw();
     }
   }
 
