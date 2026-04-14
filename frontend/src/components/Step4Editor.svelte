@@ -3915,11 +3915,11 @@
   <div class="toolbar">
     
 
-    <div class="zoom-controls">
+    <!-- <div class="zoom-controls">
       <button class="tool-btn" on:click={() => { zoom = Math.max(0.5, zoom - 1); console.log('[UI] zoom-', zoom); draw(); }}>−</button>
       <span class="zoom-label">Zoom: {zoom.toFixed(1)}x</span>
       <button class="tool-btn" on:click={() => { zoom = Math.min(100, zoom + 1); console.log('[UI] zoom+', zoom); draw(); }}>+</button>
-    </div>
+    </div> -->
 
     <div class="mode-controls">
       <label>
@@ -3931,10 +3931,6 @@
         Wave
       </label>
       {#if showWaveform}
-        <input type="range" class="wave-height-slider" min="40" max="240" step="10"
-               bind:value={waveformHeight}
-               on:input={() => { resizeCanvas(); draw(); }}
-               title="Waveform height: {waveformHeight}px" />
         <button class="tool-btn sm" class:active={beatMarkerMode}
                 on:click={() => beatMarkerMode ? (exitBeatMarkerMode(), draw()) : enterBeatMarkerMode()}
                 title="Calibrate BPM by clicking downbeats on the waveform">
@@ -4122,6 +4118,16 @@
         {micEnabled ? 'MIC' : 'VOCAL'}
       </div>
     {/if}
+    {#if showWaveform}
+      <input type="range" class="wave-height-slider wave-height-overlay" min="40" max="240" step="10"
+             bind:value={waveformHeight}
+             on:input={() => { resizeCanvas(); draw(); }}
+             title="Waveform height: {waveformHeight}px" />
+    {/if}
+    <input type="range" class="zoom-overlay-slider" min="5" max="60" step="0.5"
+           bind:value={zoom}
+           on:input={() => draw()}
+           title="Zoom: {zoom.toFixed(1)}x" />
     {#if micStarting}
       <div class="mic-starting-overlay">
         <div class="mic-starting-box">
@@ -4337,16 +4343,19 @@
 
   <!-- Scrollbar -->
   <div class="scrollbar-container">
-    <input
-      type="range"
-      class="scroll-range"
-      bind:this={scrollBarEl}
-      min={getMinBeat()}
-      max={totalBeats}
-      step="1"
-      value={scrollX / zoom}
-      on:input={handleScrollbar}
-    />
+    <div class="scrollbar-inner" style="--playhead-pct: {((playbackBeat - getMinBeat()) / Math.max(1, totalBeats - getMinBeat()) * 100).toFixed(2)}%">
+      <input
+        type="range"
+        class="scroll-range"
+        bind:this={scrollBarEl}
+        min={getMinBeat()}
+        max={totalBeats}
+        step="1"
+        value={scrollX / zoom}
+        on:input={handleScrollbar}
+      />
+      {#if !isPlaying}<div class="scrollbar-playhead"></div>{/if}
+    </div>
   </div>
 
   <div class="legend">
@@ -4697,11 +4706,11 @@
     margin-top: 0.5rem;
   }
 
-  .playback-controls, .zoom-controls {
+  /* .playback-controls, .zoom-controls {
     display: flex;
     align-items: center;
     gap: 0.25rem;
-  }
+  } */
 
   .time-display {
     color: #4ade80;
@@ -4752,7 +4761,7 @@
   .active-mode-badge {
     position: absolute;
     top: 8px;
-    right: 10px;
+    left: 10px;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -4827,6 +4836,22 @@
     border-top: none;
   }
 
+  .scrollbar-inner {
+    position: relative;
+  }
+
+  .scrollbar-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--playhead-pct);
+    width: 2px;
+    background: #ff4444;
+    pointer-events: none;
+    transform: translateX(calc(-50% - 12px));
+    opacity: 0.85;
+  }
+
   .scroll-range {
     width: 100%;
     height: 18px;
@@ -4836,6 +4861,7 @@
     cursor: pointer;
     margin: 0;
     display: block;
+    outline: none;
   }
 
   .scroll-range::-webkit-slider-runnable-track {
@@ -4847,12 +4873,13 @@
   .scroll-range::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 40px;
+    width: 14px;
     height: 14px;
     background: #4fc3f7;
-    border-radius: 4px;
+    border-radius: 50%;
     margin-top: -4px;
     cursor: grab;
+    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
   }
 
   .scroll-range::-moz-range-track {
@@ -4862,12 +4889,13 @@
   }
 
   .scroll-range::-moz-range-thumb {
-    width: 40px;
+    width: 14px;
     height: 14px;
     background: #4fc3f7;
-    border-radius: 4px;
+    border-radius: 50%;
     border: none;
     cursor: grab;
+    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
   }
 
   .legend {
@@ -5032,6 +5060,56 @@
     cursor: pointer;
     accent-color: #4fc3f7;
     vertical-align: middle;
+  }
+
+  .wave-height-overlay {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    pointer-events: all;
+    cursor: pointer;
+  }
+
+  .zoom-overlay-slider {
+    position: absolute;
+    bottom: 34px;
+    right: 10px;
+    width: 160px;
+    height: 4px;
+    cursor: pointer;
+    accent-color: #4fc3f7;
+    pointer-events: all;
+    opacity: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(79, 195, 247, 0.25);
+    border-radius: 2px;
+    outline: none;
+  }
+  .zoom-overlay-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
+  }
+  .zoom-overlay-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
+  }
+
+  .wave-height-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 2px 4px 0;
   }
 
   .shortcut-bar {
