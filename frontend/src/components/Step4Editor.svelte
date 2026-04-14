@@ -29,6 +29,8 @@
   let editCount = 0;
   let hasUnsavedChanges = false;
   let autosaveInterval = null;
+  let toastMsg = '';        // brief status message shown as a toast
+  let toastTimer = null;
 
   // View state
   let scrollX = 0;
@@ -2263,9 +2265,13 @@
     const id = noteId ?? selectedNote;
     if (id === null) return;
     pushUndo();
-    notes = notes.filter(n => n.id !== id);
-    if (selectedNote === id) selectedNote = null;
-    selectedNotes.delete(id);
+    // Delete all selected notes if this note is part of a multi-selection
+    const idsToDelete = (selectedNotes.size > 1 && selectedNotes.has(id))
+      ? new Set(selectedNotes)
+      : new Set([id]);
+    notes = notes.filter(n => !idsToDelete.has(n.id));
+    if (idsToDelete.has(selectedNote)) selectedNote = null;
+    for (const did of idsToDelete) selectedNotes.delete(did);
     selectedNotes = new Set(selectedNotes);
     markUnsaved();
     closeContextMenu();
@@ -2309,21 +2315,26 @@
   }
 
   function setNoteType(noteId, type) {
-    const id = noteId ?? selectedNote;
-    if (id === null) return;
-    const note = notes.find(n => n.id === id);
-    if (!note || note.type === 'break') return;
+    // Apply to all selected notes if multi-select, otherwise just the one
+    const ids = (selectedNotes.size > 1 && selectedNotes.has(noteId ?? selectedNote))
+      ? [...selectedNotes]
+      : [noteId ?? selectedNote];
+    if (!ids.length || ids[0] === null) return;
 
     pushUndo();
-    if (type === 'golden') {
-      note.isRap = false;
-      note.isGolden = true;
-    } else if (type === 'rap') {
-      note.isRap = true;
-      note.isGolden = false;
-    } else {
-      note.isRap = false;
-      note.isGolden = false;
+    for (const id of ids) {
+      const note = notes.find(n => n.id === id);
+      if (!note || note.type === 'break') continue;
+      if (type === 'golden') {
+        note.isRap = false;
+        note.isGolden = true;
+      } else if (type === 'rap') {
+        note.isRap = true;
+        note.isGolden = false;
+      } else {
+        note.isRap = false;
+        note.isGolden = false;
+      }
     }
 
     notes = [...notes];
@@ -2441,6 +2452,12 @@
     draw();
   }
 
+  function showToast(msg, durationMs = 3000) {
+    toastMsg = msg;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastMsg = ''; }, durationMs);
+  }
+
   function autoFixWordSpaces() {
     // Auto-detect word boundaries and add leading spaces.
     // Rules:
@@ -2482,6 +2499,7 @@
     notes = [...notes];
     markUnsaved();
     draw();
+    showToast(changed > 0 ? `✔ ${changed} space${changed === 1 ? '' : 's'} fixed` : 'No spaces needed fixing');
     console.log(`[AutoFix] Fixed word spaces on ${changed} notes`);
   }
 
@@ -4234,6 +4252,10 @@
   {/if}
 
   <!-- Set GAP mode overlay bar -->
+  {#if toastMsg}
+    <div class="toast-bar">{toastMsg}</div>
+  {/if}
+
   {#if setGapMode}
     <div class="setgap-mode-bar">
       <span class="setgap-mode-text">
@@ -4264,6 +4286,7 @@
   <!-- Context Menu -->
   {#if contextMenu.visible}
     {@const ctxNote = notes.find(n => n.id === contextMenu.noteId)}
+    {@const isMultiCtx = selectedNotes.size > 1 && selectedNotes.has(contextMenu.noteId)}
     {#if ctxNote}
       <div
         class="context-menu"
@@ -4289,6 +4312,9 @@
         {:else}
           <!-- Note context menu -->
           <div class="ctx-header">
+            {#if isMultiCtx}
+              <span class="ctx-multi-label">{selectedNotes.size} notes selected</span>
+            {:else}
             <input
               class="ctx-syllable-input"
               type="text"
@@ -4298,7 +4324,9 @@
               placeholder="syllable"
             />
             <span class="ctx-pitch">{noteName(ctxNote.pitch)}</span>
+            {/if}
           </div>
+          {#if !isMultiCtx}
           <label class="ctx-checkbox" class:space-on={ctxNote.syllable.startsWith(' ')} class:space-off={!ctxNote.syllable.startsWith(' ')}>
             <input type="checkbox"
               checked={ctxNote.syllable.startsWith(' ')}
@@ -4306,7 +4334,9 @@
             />
             Word space
           </label>
+          {/if}
           <div class="ctx-divider"></div>
+          {#if !isMultiCtx}
           <button class="ctx-item" on:click={() => playNotePitch(ctxNote.id)}>
             🔊 Play Pitch <span class="ctx-shortcut">P</span>
           </button>
@@ -4317,6 +4347,7 @@
             🔗 Merge with Next <span class="ctx-shortcut">M</span>
           </button>
           <div class="ctx-divider"></div>
+          {/if}
           <div class="ctx-type-group">
             <span class="ctx-type-label">Type:</span>
             <button
@@ -4341,7 +4372,7 @@
           </button>
           <div class="ctx-divider"></div>
           <button class="ctx-item danger" on:click={() => deleteNote(ctxNote.id)}>
-            🗑 Delete Note <span class="ctx-shortcut">Del</span>
+            🗑 Delete {isMultiCtx ? `(${selectedNotes.size} notes)` : 'Note'} <span class="ctx-shortcut">Del</span>
           </button>
         {/if}
       </div>
@@ -4520,6 +4551,21 @@
   .paste-cancel-btn:hover { background: #e53935; }
 
   /* ── Set GAP mode bar ── */
+  .toast-bar {
+    align-self: center;
+    background: #1a2e1a;
+    border: 1px solid #4caf50;
+    border-radius: 6px;
+    padding: 6px 16px;
+    color: #a5d6a7;
+    font-size: 0.85rem;
+    animation: toast-fadein 0.15s ease;
+  }
+  @keyframes toast-fadein {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
   .setgap-mode-bar {
     display: flex;
     align-items: center;
@@ -5310,6 +5356,13 @@
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
     padding: 4px 0;
     font-size: 0.85rem;
+  }
+
+  .ctx-multi-label {
+    color: #4fc3f7;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 2px 0;
   }
 
   .ctx-header {
