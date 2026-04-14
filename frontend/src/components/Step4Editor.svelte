@@ -3457,8 +3457,10 @@
 
   async function startVocalTrace() {
     vocalTraceLoading = true;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
     try {
-      const response = await fetch(vocalUrl);
+      const response = await fetch(vocalUrl, { signal: controller.signal });
       const arrayBuffer = await response.arrayBuffer();
       const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
       vocalTraceDecodedBuffer = await tmpCtx.decodeAudioData(arrayBuffer);
@@ -3475,8 +3477,10 @@
     } catch (err) {
       console.error('[VocalTrace] Failed to load:', err);
       vocalTraceEnabled = false;
+    } finally {
+      clearTimeout(timeoutId);
+      vocalTraceLoading = false;
     }
-    vocalTraceLoading = false;
   }
 
   function stopVocalTrace() {
@@ -3943,71 +3947,14 @@
           ♪ Cal
         </button>
       
-      {#if metronomeEnabled}
+      <!-- {#if metronomeEnabled}
         <button class="tool-btn sm" class:active={metronomeOffset === 0} on:click={() => { metronomeOffset = 0; lastMetronomeBeat = -1; }} title="On beat">♩</button>
         <button class="tool-btn sm" class:active={metronomeOffset === 4} on:click={() => { metronomeOffset = 4; lastMetronomeBeat = -1; }} title="Half beat offset (8th note)">♩½</button>
-      {/if}
+      {/if} -->
       
 
-      <label title="Microphone sing-along (M)">
-        <input type="checkbox" bind:checked={micEnabled} on:change={() => {
-          if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
-          toggleMic();
-        }} />
-        🎙️ Mic
-      </label>
-      {#if micEnabled}
-        <div class="mic-level" title="Mic input level — tap the mic to check">
-          <div class="mic-level-bar" style="height:{Math.round(micLevel * 100)}%"
-               class:mic-level-hot={micLevel > 0.8}
-               class:mic-level-warm={micLevel > 0.3 && micLevel <= 0.8}></div>
-        </div>
-        <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
-               value={Math.round(micGain * 100)}
-               on:input={(e) => { micGain = parseInt(e.target.value) / 100; if (micGainNode) micGainNode.gain.value = micGain; }}
-               title="Mic volume: {Math.round(micGain * 100)}%" />
-        <label class="mic-opt" title="Debug: show raw pitch dots + enable export">
-          <input type="checkbox" bind:checked={micShowRawTrail} on:change={() => draw()} />
-          Raw
-        </label>
-        {#if micShowRawTrail && micPitchTrail.length > 0}
-          <button class="tool-btn sm" on:click={exportMicTrail} title="Export mic trail as JSON">📋 Export</button>
-        {/if}
-        {#if micDevices.length > 1}
-          <select class="mic-select" value={micDeviceId} on:change={changeMicDevice} title="Select microphone">
-            {#each micDevices as device}
-              <option value={device.deviceId}>{device.label || `Mic ${micDevices.indexOf(device) + 1}`}</option>
-            {/each}
-          </select>
-        {/if}
-      {/if}
-      {#if micNoteHits.size > 0 || micPitchTrail.length > 0}
-        {#if micShowTrail}
-          <button class="tool-btn sm active" on:click={() => { micShowTrail = false; draw(); }} title="Hide sung blocks">👁 Sing</button>
-        {:else}
-          <button class="tool-btn sm" on:click={() => { micShowTrail = true; draw(); }} title="Show sung blocks">👁 Sing</button>
-        {/if}
-        <button class="tool-btn sm" on:click={clearMicTrail} title="Clear sung blocks">🗑</button>
-      {/if}
-
-      <label title="Vocal trace — plays the vocal audio through pitch detection, same as mic sing-along (cyan = off-pitch, green = on-pitch)" class:disabled-label={!hasVocalsAudio}>
-        <input type="checkbox" bind:checked={vocalTraceEnabled} disabled={!hasVocalsAudio} on:change={() => {
-          if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
-          toggleVocalTrace();
-        }} />
-        🎤 Vocal trace
-      </label>
-      {#if vocalTraceLoading}
-        <span class="mic-starting">⏳ Loading…</span>
-      {/if}
-      {#if vocalTraceFrames.length > 0}
-        {#if vocalTraceVisible}
-          <button class="tool-btn sm active" on:click={() => { vocalTraceVisible = false; draw(); }} title="Hide vocal trace">👁 Vocal</button>
-        {:else}
-          <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace">👁 Vocal</button>
-        {/if}
-        <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
-      {/if}
+      
+      
     </div>
 
     
@@ -4050,17 +3997,81 @@
       {/if} -->
     </div>
 
-    <div class="info">
+    <!-- <div class="info">
       {#if selectedNote !== null}
         {@const note = notes.find(n => n.id === selectedNote)}
         {#if note && note.type !== 'break'}
-          <!-- <span class="note-info">
+          <span class="note-info">
             {note.syllable.trim()} | Beat {note.startBeat} | Dur {note.duration} | {noteName(note.pitch)}
-          </span> -->
+          </span>
         {/if}
       {/if}
+    </div> -->
+    <div class="toolbar-toolset-wrapper">
+      <div id="mic-controls-wrapper">
+        <button class="tool-btn" class:active={micEnabled} on:click={() => {
+          micEnabled = !micEnabled;
+          if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
+          toggleMic();
+        }} title="Microphone sing-along (M)">
+          Mic <span class="mic-icon-wrap" class:mic-off={!micEnabled}>🎙️</span>
+        </button>
+      {#if micEnabled}
+        <div class="mic-level" title="Mic input level — tap the mic to check">
+          <div class="mic-level-bar" style="height:{Math.round(micLevel * 100)}%"
+               class:mic-level-hot={micLevel > 0.8}
+               class:mic-level-warm={micLevel > 0.3 && micLevel <= 0.8}></div>
+        </div>
+        <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
+               value={Math.round(micGain * 100)}
+               on:input={(e) => { micGain = parseInt(e.target.value) / 100; if (micGainNode) micGainNode.gain.value = micGain; }}
+               title="Mic volume: {Math.round(micGain * 100)}%" />
+        {#if micShowRawTrail && micPitchTrail.length > 0}
+          <button class="tool-btn sm" on:click={exportMicTrail} title="Export mic trail as JSON">📋 Export</button>
+        {/if}
+        {#if micDevices.length > 1}
+          <select class="mic-select" value={micDeviceId} on:change={changeMicDevice} title="Select microphone">
+            {#each micDevices as device}
+              <option value={device.deviceId}>{device.label || `Mic ${micDevices.indexOf(device) + 1}`}</option>
+            {/each}
+          </select>
+        {/if}
+      {/if}
+      {#if micNoteHits.size > 0 || micPitchTrail.length > 0}
+        {#if micShowTrail}
+          <button class="tool-btn sm" on:click={() => { micShowTrail = false; draw(); }} title="Hide sung blocks"><span class="mic-icon-wrap">👁</span></button>
+        {:else}
+          <button class="tool-btn sm" on:click={() => { micShowTrail = true; draw(); }} title="Show sung blocks"><span class="mic-icon-wrap mic-off">👁</span></button>
+        {/if}
+        <button class="tool-btn sm" on:click={clearMicTrail} title="Clear sung blocks">🗑</button>
+      {/if}
+
+      </div>
+      <div id="vocal_trace_outer_wrapper">
+        <div id="vocal_trace-controls-wrapper">
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio} on:click={() => {
+            if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
+            vocalTraceEnabled = !vocalTraceEnabled;
+            if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+            toggleVocalTrace();
+          }} title={hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
+            Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
+          </button>
+          {#if vocalTraceLoading}
+            <span class="mic-starting">⏳ Loading</span>
+          {/if}
+          {#if vocalTraceFrames.length > 0}
+            {#if vocalTraceVisible}
+              <button class="tool-btn sm" on:click={() => { vocalTraceVisible = false; draw(); }} title="Hide vocal trace"><span class="mic-icon-wrap">👁</span></button>
+            {:else}
+              <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace"><span class="mic-icon-wrap mic-off">👁</span></button>
+            {/if}
+            <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
+          {/if}
+        </div>
+      </div>
     </div>
-    <div id="toolbar-playback-wrapper">
+    <div class="toolbar-toolset-wrapper">
       <div class="playback-controls">
         <button class="tool-btn" on:click={() => { console.log('[UI] jump to 0s'); seekToTime(0); }} title="Jump to 0s">⏮⏮</button>
         <button class="tool-btn" on:click={() => { console.log('[UI] jump to GAP'); seekToTime(gapMs / 1000); }} title="Jump to GAP (beat 0)">GAP⏮</button>
@@ -4102,14 +4113,14 @@
         </div>
       </div>
       <div id="midi-wrapper">
-        <label title="Play MIDI pitch tones during playback" on:click={toggleMidiPlayback} style="cursor:pointer">
-          {midiPlayback ? '🔈':'🔇'} MIDI
-        </label>
+        <button class="tool-btn" on:click={() => { console.log('[UI] toggleMidi'); toggleMidiPlayback(); }} title="Toggle MIDI pitch tones during playback">
+          <span>MIDI</span><span style="padding-left: 4px">{midiPlayback ? ' 🔈' : ' 🔇'}</span>
+        </button>
       </div>
       <div id="metronome-wrapper">
-        <label title="Metronome click on each beat" on:click={toggleMetronome} style="cursor:pointer">
-          {metronomeEnabled ? '🔈':'🔇'} Metronome
-        </label>
+        <button class="tool-btn" on:click={() => { console.log('[UI] toggleMetronome'); toggleMetronome(); }} title="Toggle Metronome click on each beat">
+          <span>Metronome</span><span style="padding-left: 4px">{metronomeEnabled ? ' 🔈' : ' 🔇'}</span>
+        </button>
       </div>
     </div>
   </div>
@@ -4463,7 +4474,6 @@
   .paste-mode-bar {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 1rem;
     background: linear-gradient(90deg, #1a3a2a, #2a5a3a);
     border: 1px solid #4caf50;
@@ -4497,7 +4507,6 @@
   .setgap-mode-bar {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 1rem;
     background: linear-gradient(90deg, #3a3a1a, #5a5a2a);
     border: 1px solid #ffd700;
@@ -4520,7 +4529,7 @@
     color: white;
     border: none;
     border-radius: 4px;
-    padding: 3px 10px;
+    padding: 3px 8px;
     font-size: 0.8rem;
     cursor: pointer;
     transition: background 0.2s;
@@ -4632,7 +4641,6 @@
   .gridalign-mode-bar {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 1rem;
     background: linear-gradient(90deg, #2a1a3a, #3a2a5a);
     border: 1px solid #9c27b0;
@@ -4685,7 +4693,6 @@
   .selection-info-bar {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 1.5rem;
     background: rgba(33, 150, 243, 0.1);
     border: 1px solid rgba(33, 150, 243, 0.3);
@@ -4712,11 +4719,19 @@
     /* flex-wrap: wrap; */
   }
 
-  #toolbar-playback-wrapper {
+  .toolbar-toolset-wrapper {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     margin-top: 0.5rem;
+  }
+
+  .toolbar-toolset-wrapper > * {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 0.25rem;
   }
 
   /* .playback-controls, .zoom-controls {
@@ -4735,6 +4750,46 @@
     font-family: monospace;
     min-width: 8s0px;
     margin-left: 0.25rem;
+  }
+
+  #mic-controls-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 360px;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
+
+  #vocal_trace_outer_wrapper {
+    border-left: 1px solid #8c8c8c;
+    padding-left: 10px;
+  }
+
+  #vocal_trace-controls-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 165px;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
+
+  .mic-icon-wrap {
+    position: relative;
+    display: inline-block;
+  }
+  .mic-icon-wrap.mic-off::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 130%;
+    height: 2px;
+    background: #f44;
+    transform: translate(-50%, -50%) rotate(-45deg);
+    border-radius: 1px;
+    pointer-events: none;
   }
 
   .tool-btn {
@@ -4909,8 +4964,8 @@
   .scroll-range::-moz-range-thumb {
     width: 14px;
     height: 14px;
-    background: #4fc3f7;
     border-radius: 50%;
+    background: #4fc3f7;
     border: none;
     cursor: grab;
     box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
@@ -5402,14 +5457,43 @@
 
   #midi-wrapper {
     display: block;
-    padding: 1px 1px 1px 8px;
+    padding: 1px 1px 1px 10px;
     border-left: 1px solid #8c8c8c;
+  }
+  #midi-wrapper>button {
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #ccc;
+    cursor: pointer;
+    outline: none;
+  }
+
+  #midi-wrapper>button:hover {
+    background: #333;
   }
 
   #metronome-wrapper {
     display: block;
-    padding: 1px 1px 1px 8px;
+    padding: 1px 1px 1px 10px;
     border-left: 1px solid #8c8c8c;
+  }
+
+  #metronome-wrapper>button {
+    padding: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #ccc;
+    cursor: pointer;
+    outline: none;
+  }
+
+  #metronome-wrapper>button:hover {
+    background: #333;
   }
 
   .volume-control {
@@ -5515,10 +5599,11 @@
     font-size: 0.7rem;
     max-width: 120px;
     cursor: pointer;
+    outline: none;
   }
 
   .mic-select:focus {
-    outline: 1px solid #4fc3f7;
+    /* outline: 1px solid #4fc3f7; */
   }
 
   .mic-opt {
