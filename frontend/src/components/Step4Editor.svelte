@@ -28,6 +28,7 @@
   let lastSaveTime = null;
   let editCount = 0;
   let hasUnsavedChanges = false;
+  let autosaveInterval = null;
 
   // View state
   let scrollX = 0;
@@ -542,21 +543,12 @@
     editorState.update(s => ({ ...s, hasChanges: false }));
   }
 
-  // Keyboard shortcut: Ctrl/Cmd+S to enter Set GAP mode (or save if already in setGapMode)
+  // Keyboard shortcut: Ctrl/Cmd+S to force save
   function handleKeydownSave(e) {
     if (showTextEditor) return; // skip when text editor is open
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      if (setGapMode) {
-        // Already in set-gap mode — exit
-        cancelSetGapMode();
-      } else if (!isPlaying) {
-        // Enter set-gap mode (not while playing)
-        setGapMode = true;
-        setGapHoverBeat = null;
-        if (canvasEl) canvasEl.style.cursor = 'crosshair';
-        draw();
-      }
+      handleSave();
     }
   }
 
@@ -2792,7 +2784,7 @@
     if (gridAlignMode) {
       if (e.code === 'Enter') { e.preventDefault(); confirmGridAlign(); return; }
       if (e.code === 'Escape') { e.preventDefault(); cancelGridAlign(); return; }
-      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyG') { e.preventDefault(); cancelGridAlign(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyB') { e.preventDefault(); cancelGridAlign(); return; }
       e.preventDefault();
       return;
     }
@@ -2944,10 +2936,26 @@
       if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
       toggleVocalTrace();
     }
-    // Ctrl/Cmd+G: enter Grid Align mode
+    // Ctrl/Cmd+B: enter Grid Align mode (B = Beat) — blocked if Set GAP is active
+    if ((e.metaKey || e.ctrlKey) && e.code === 'KeyB') {
+      e.preventDefault();
+      if (!setGapMode) enterGridAlignMode();
+      return;
+    }
+
+    // Ctrl/Cmd+G: Set GAP mode — blocked if Grid Align is active
     if ((e.metaKey || e.ctrlKey) && e.code === 'KeyG') {
       e.preventDefault();
-      enterGridAlignMode();
+      if (!gridAlignMode) {
+        if (setGapMode) {
+          cancelSetGapMode();
+        } else if (!isPlaying) {
+          setGapMode = true;
+          setGapHoverBeat = null;
+          if (canvasEl) canvasEl.style.cursor = 'crosshair';
+          draw();
+        }
+      }
       return;
     }
 
@@ -3883,10 +3891,12 @@
     window.addEventListener('keydown', handleKeydownSave);
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('click', handleGlobalClick);
+    autosaveInterval = setInterval(() => { if (hasUnsavedChanges) handleSave(); }, 10000);
   });
 
   onDestroy(() => {
     if (hasUnsavedChanges) handleSave(); // autosave on navigate away
+    if (autosaveInterval) clearInterval(autosaveInterval);
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
     window.removeEventListener('keydown', handleKeydownSave);
@@ -3902,8 +3912,6 @@
 </script>
 
 <div class="step-content">
-  <h2>Step 3: Piano Roll Editor</h2>
-
   <div class="toolbar">
     <div class="playback-controls">
       <button class="tool-btn" on:click={() => { console.log('[UI] jump to 0s'); seekToTime(0); }} title="Jump to 0s">⏮⏮</button>
@@ -4051,12 +4059,12 @@
     </div>
 
     <div class="save-controls">
-      <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save">
+      <!-- <button class="tool-btn save-btn" on:click={handleSave} disabled={isSaving} title="Save">
         {isSaving ? '⏳' : '💾'} Save
       </button>
       <button class="tool-btn" on:click={handleReload} title="Reload from last save">
         🔄 Reload
-      </button>
+      </button> -->
       <button class="tool-btn" on:click={autoFixWordSpaces} title="Auto-add leading spaces for word boundaries">
         🔤 Fix Spaces
       </button>
@@ -4071,11 +4079,11 @@
         <span class="volume-icon">{muteVocal ? '🔇' : audioVolume < 0.3 ? '🔈' : audioVolume < 0.7 ? '🔉' : '🔊'}</span>
         <input type="range" min="0" max="1" step="0.05" value={audioVolume} on:input={handleVolumeChange} class="volume-slider" />
       </div>
-      {#if hasUnsavedChanges}
+      <!-- {#if hasUnsavedChanges}
         <span class="unsaved-indicator">● unsaved</span>
       {:else if lastSaveTime}
         <span class="saved-indicator">✓ saved {lastSaveTime.toLocaleTimeString()}</span>
-      {/if}
+      {/if} -->
     </div>
 
     <div class="info">
@@ -4885,7 +4893,7 @@
     padding-left: 0.5rem;
   }
 
-  .save-btn {
+  /* .save-btn {
     background: #2e7d32 !important;
   }
   .save-btn:hover:not(:disabled) {
@@ -4901,7 +4909,7 @@
   .saved-indicator {
     color: #66bb6a;
     font-size: 0.7rem;
-  }
+  } */
 
   .mode-controls {
     font-size: 0.8rem;
