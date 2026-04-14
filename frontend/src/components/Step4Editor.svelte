@@ -2811,7 +2811,7 @@
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') return;
     }
 
-    console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
+    console.log(`[Key] code=${e.code} key=${e.key} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
 
     // ── Grid Align mode: only allow Enter (confirm), Escape (cancel), Ctrl+G (cancel) ──
     if (gridAlignMode) {
