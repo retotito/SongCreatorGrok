@@ -33,7 +33,8 @@
   // View state
   let scrollX = 0;
   let zoom = 20;          // pixels per beat (default zoomed in)
-  let viewHeight = 460;
+  // viewHeight grows with waveformHeight so the note grid stays a fixed size
+  $: viewHeight = 400 + (showWaveform ? waveformHeight : 0);
   let noteHeight = 8;
 
   // Pitch range (MIDI)
@@ -792,7 +793,7 @@
       }
 
       // Draw as a single smooth filled path
-      const scale = (wt / 2) * 0.9;
+      const scale = wt / 2;
       ctx.fillStyle = '#4fc3f7';
       ctx.globalAlpha = 0.35;
       ctx.beginPath();
@@ -1615,7 +1616,7 @@
           }
         } else {
           // Clear multi-select, single select
-          selectedNotes = new Set();
+          selectedNotes = new Set([found.id]);
           selectedNote = found.id;
         }
         isDragging = true;
@@ -2775,8 +2776,11 @@
     // Skip all shortcuts when text editor modal is open
     if (showTextEditor) return;
     // Skip shortcuts when typing in a text/number input field (BPM, GAP, context menu, etc.)
-    // Allow Space through on range inputs (volume slider) so play/pause still works
-    if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox' && !(e.target.type === 'range' && e.key === ' ')) return;
+    // For range inputs: only block arrow keys (which move the slider); let all other shortcuts through
+    if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
+      if (e.target.type !== 'range') return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') return;
+    }
 
     console.log(`[Key] ${e.code} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
 
@@ -3909,6 +3913,9 @@
   $: if ($generationResult && canvasEl && $sessionId && dataLoadedSession !== $sessionId) {
     loadData();
   }
+
+  // Resize canvas whenever viewHeight changes (e.g. waveform height slider)
+  $: if (canvasEl && viewHeight) { resizeCanvas(); draw(); }
 </script>
 
 <div class="step-content">
@@ -3926,26 +3933,21 @@
         <input type="checkbox" bind:checked={scrollMode} on:change={() => console.log('[UI] scrollMode', scrollMode)} />
         Scroll
       </label> -->
-      <label>
+      <!-- <label>
         <input type="checkbox" bind:checked={showWaveform} on:change={() => { console.log('[UI] waveform', showWaveform); draw(); }} />
         Wave
-      </label>
-      {#if showWaveform}
+      </label> -->
         <button class="tool-btn sm" class:active={beatMarkerMode}
                 on:click={() => beatMarkerMode ? (exitBeatMarkerMode(), draw()) : enterBeatMarkerMode()}
                 title="Calibrate BPM by clicking downbeats on the waveform">
           ♪ Cal
         </button>
-      {/if}
       
       {#if metronomeEnabled}
         <button class="tool-btn sm" class:active={metronomeOffset === 0} on:click={() => { metronomeOffset = 0; lastMetronomeBeat = -1; }} title="On beat">♩</button>
         <button class="tool-btn sm" class:active={metronomeOffset === 4} on:click={() => { metronomeOffset = 4; lastMetronomeBeat = -1; }} title="Half beat offset (8th note)">♩½</button>
       {/if}
-      <label title="Loop region (Shift+drag on time ruler to set, L to toggle, Esc to clear)">
-        <input type="checkbox" checked={loopEnabled} on:change={toggleLoop} />
-        🔁 Loop
-      </label>
+      
 
       <label title="Microphone sing-along (M)">
         <input type="checkbox" bind:checked={micEnabled} on:change={() => {
@@ -4062,14 +4064,19 @@
       <div class="playback-controls">
         <button class="tool-btn" on:click={() => { console.log('[UI] jump to 0s'); seekToTime(0); }} title="Jump to 0s">⏮⏮</button>
         <button class="tool-btn" on:click={() => { console.log('[UI] jump to GAP'); seekToTime(gapMs / 1000); }} title="Jump to GAP (beat 0)">GAP⏮</button>
-        <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
+        <button class="tool-btn" id="toggle-playback-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
           {isPlaying ? '⏸ Pause' : '▶ Play'}
+        </button>
+        <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); toggleLoop(); }} title="Space">
+          {loopEnabled ? 'Loop on' : 'Loop off'}
         </button>
         <button class="tool-btn" class:active={!scrollMode}
           on:click={() => { scrollMode = !scrollMode; }}
           title={scrollMode ? 'Following playhead — click to pin' : 'View pinned — click to follow'}>
           {scrollMode ? 'Scroll' : 'Page'}
         </button>
+      </div>
+      <div id="time-display-wrapper">
         <span class="time-display">{formatTime(currentTimeSec)}</span>
       </div>
       <div class="speed-controls">
@@ -4087,19 +4094,19 @@
           <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Vocals' : 'No vocals — go to Step 1 to extract or upload'}>🎤</button>
           <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>🎵</button>
         </div>
-        <!-- <label title="Mute vocal track">
-          <input type="checkbox" checked={muteVocal} on:change={toggleMuteVocal} />
-          🔇 Mute
-        </label> -->
         <div class="volume-control" title="Audio volume">
           <span class="volume-icon" on:click={toggleMuteVocal}>
             {muteVocal ? '🔇' : audioVolume < 0.3 ? '🔈' : audioVolume < 0.7 ? '🔉' : '🔊'}
           </span>
           <input type="range" min="0" max="1" step="0.05" value={audioVolume} on:input={handleVolumeChange} class="volume-slider" />
         </div>
+      </div>
+      <div id="midi-wrapper">
         <label title="Play MIDI pitch tones during playback" on:click={toggleMidiPlayback} style="cursor:pointer">
           {midiPlayback ? '🔈':'🔇'} MIDI
         </label>
+      </div>
+      <div id="metronome-wrapper">
         <label title="Metronome click on each beat" on:click={toggleMetronome} style="cursor:pointer">
           {metronomeEnabled ? '🔈':'🔇'} Metronome
         </label>
@@ -4708,7 +4715,7 @@
   #toolbar-playback-wrapper {
     display: flex;
     align-items: center;
-    gap: 2rem;
+    gap: 10px;
     margin-top: 0.5rem;
   }
 
@@ -4718,11 +4725,15 @@
     gap: 0.25rem;
   } */
 
+  #toggle-playback-btn {
+    width: 82px;
+  }
+
   .time-display {
     color: #4ade80;
     font-size: 0.8rem;
     font-family: monospace;
-    min-width: 40px;
+    min-width: 8s0px;
     margin-left: 0.25rem;
   }
 
@@ -4976,8 +4987,16 @@
     gap: 0.3rem;
   }
 
+  #time-display-wrapper {
+    height: 28px;
+    border-left: 1px solid #8c8c8c;
+    padding-left: 0.5rem;
+    padding-top: 5px;
+  }
+
   .speed-controls {
     display: flex;
+    height: 28px;
     align-items: center;
     gap: 0.2rem;
     border-left: 1px solid #8c8c8c;
@@ -4985,15 +5004,15 @@
   }
 
   .speed-label {
-    color: #aaa;
-    font-size: 0.75rem;
-    font-weight: 600;
+    color: #e0e0e0;
+    font-size: 14px;
+    font-weight: 400;
     letter-spacing: 0.5px;
   }
 
   .tool-btn.sm.active {
-    background: #4fc3f7;
-    color: #0d1117;
+    /* background: #4fc3f7;
+    color: #0d1117; */
     border-color: #4fc3f7;
   }
 
@@ -5071,10 +5090,11 @@
 
   .wave-height-overlay {
     position: absolute;
-    top: 10px;
+    top: 15px;
     right: 10px;
     pointer-events: all;
     cursor: pointer;
+    outline: none;
   }
 
   .zoom-overlay-slider {
@@ -5367,20 +5387,29 @@
 
   #audio-source-wrapper {
     display: block;
-    padding: 1px 1px 1px 10px;
+    padding: 1px 1px 1px 8px;
     border-left: 1px solid #8c8c8c;
   }
 
   /* Audio source toggle */
   .audio-source-toggle {
     display: inline-flex;
-    gap: 2px;
-    margin-left: 4px;
+    gap: 4px;
     padding-left: 10px;
-    border-left: 1px solid #8c8c8c;
-    background: #111;
     border-radius: 6px;
     padding: 1px;
+  }
+
+  #midi-wrapper {
+    display: block;
+    padding: 1px 1px 1px 8px;
+    border-left: 1px solid #8c8c8c;
+  }
+
+  #metronome-wrapper {
+    display: block;
+    padding: 1px 1px 1px 8px;
+    border-left: 1px solid #8c8c8c;
   }
 
   .volume-control {
