@@ -49,7 +49,19 @@
   let dragMode = null;     // 'move' | 'resize-left' | 'resize-right'
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
-  let scrollBarEl;
+  // Custom scrollbar state (replaces native <input type="range">)
+  let scrollTrackEl;           // ref to the track div
+  let scrollHandleDragging = false;
+  let scrollDragStartX = 0;    // clientX at drag start
+  let scrollDragStartBeat = 0; // center beat at drag start
+  let canvasW = 800;           // px width of canvas, updated in resizeCanvas()
+
+  // Computed: fraction 0–1 for both handle and playhead tick.
+  // Handle tracks CENTER beat so it stays fixed when zooming.
+  $: scrollBeatRange = Math.max(1, totalBeats - getMinBeat());
+  $: centerBeat      = scrollX / zoom + canvasW / (2 * zoom);
+  $: scrollHandlePct = ((centerBeat   - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
+  $: playheadPct     = ((playbackBeat - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
 
   // Rubber-band (box) selection
   let isBoxSelecting = false;
@@ -81,8 +93,45 @@
   let dragLastPitch = null;
   let dragOscStopTimer = null;
 
+  // Flags — green marker lines persisted per session
+  let flags = [];
+  let flagIdCounter = 1;
+  let selectedFlag = null;
+
+  function loadFlags() {
+    if (!$sessionId) return;
+    try {
+      const raw = localStorage.getItem(`editor_flags_${$sessionId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        flags = parsed.flags || [];
+        flagIdCounter = (parsed.counter || 0) + 1;
+      }
+    } catch { /* ignore */ }
+  }
+
+  function saveFlags() {
+    if (!$sessionId) return;
+    localStorage.setItem(`editor_flags_${$sessionId}`, JSON.stringify({ flags, counter: flagIdCounter }));
+  }
+
+  function addFlagAt(beat) {
+    flags = [...flags, { id: flagIdCounter++, beat: Math.round(beat) }];
+    saveFlags();
+    closeContextMenu();
+    draw();
+  }
+
+  function deleteFlag(id) {
+    flags = flags.filter(f => f.id !== id);
+    if (selectedFlag === id) selectedFlag = null;
+    saveFlags();
+    closeContextMenu();
+    draw();
+  }
+
   // Context menu
-  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, beat: 0, pitch: 0, traceFrame: null };
+  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
   let editingSyllable = '';
   let contextMenuEl;
 
@@ -379,9 +428,7 @@
 
   // Update scrollbar from scrollX
   function syncScrollbar() {
-    if (scrollBarEl) {
-      scrollBarEl.value = scrollX / zoom;
-    }
+    // nothing to imperitively set — handle position is driven by reactive scrollHandlePct
   }
 
   // ──── BPM Re-quantization ────────────────────
@@ -1439,6 +1486,39 @@
       ctx.setLineDash([]);
     }
 
+    // ── Draw flags ──────────────────────────────────────────────────────
+    for (const flag of flags) {
+      const fx = beatToX(flag.beat);
+      if (fx < -10 || fx > w + 10) continue;
+      const isFlagSelected = selectedFlag === flag.id;
+      ctx.strokeStyle = isFlagSelected ? '#4ade80' : '#4ade8066';
+      ctx.lineWidth = isFlagSelected ? 2 : 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(fx, wt);
+      ctx.lineTo(fx, pianoH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Diamond handle at vertical center
+      const ths = isFlagSelected ? 7 : 5;
+      const thy = (wt + pianoH) / 2;
+      ctx.fillStyle = isFlagSelected ? '#4ade80' : '#4ade80aa';
+      ctx.beginPath();
+      ctx.moveTo(fx, thy - ths);
+      ctx.lineTo(fx + ths, thy);
+      ctx.lineTo(fx, thy + ths);
+      ctx.lineTo(fx - ths, thy);
+      ctx.closePath();
+      ctx.fill();
+      if (isFlagSelected) {
+        ctx.fillStyle = '#4ade80';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`flag @${flag.beat}`, fx, thy - ths - 4);
+        ctx.textAlign = 'left';
+      }
+    }
+
     syncScrollbar();
   }
 
@@ -1619,6 +1699,22 @@
       }
     }
 
+    // Check flag hit (8px zone, before note handling)
+    if (!found) {
+      for (const flag of flags) {
+        const fx = beatToX(flag.beat);
+        if (Math.abs(mx - fx) <= 8) {
+          selectedFlag = flag.id;
+          selectedNote = null;
+          selectedNotes = new Set();
+          isDragging = true;
+          dragStart = { x: mx, y: my, beat: flag.beat };
+          draw();
+          return;
+        }
+      }
+    }
+
     if (found) {
       if (isMultiKey && found.type !== 'break') {
         // Ctrl/Cmd click: toggle note in multi-selection
@@ -1706,6 +1802,17 @@
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
+
+    // Flag drag
+    if (isDragging && selectedFlag !== null) {
+      const flag = flags.find(f => f.id === selectedFlag);
+      if (flag) {
+        flag.beat = Math.round(xToBeat(mx));
+        flags = [...flags];
+        draw();
+      }
+      return;
+    }
 
     // Playhead drag (scrub)
     if (playheadDrag) {
@@ -1801,6 +1908,17 @@
       }
 
       // Check note hover (if no loop handle matched)
+      if (!cursor) {
+        // Check flag hover
+        for (const flag of flags) {
+          if (Math.abs(beatToX(flag.beat) - mx) <= 8) {
+            cursor = 'col-resize';
+            break;
+          }
+        }
+      }
+
+      // Check note hover (if no flag matched)
       if (!cursor) {
         for (const note of notes) {
           if (note.type === 'break') {
@@ -1915,6 +2033,14 @@
   }
 
   function handleMouseUp() {
+    // Finish flag drag
+    if (isDragging && selectedFlag !== null) {
+      isDragging = false;
+      saveFlags();
+      draw();
+      return;
+    }
+
     // Finish grid align drag
     if (gridAlignDragging) {
       gridAlignDragging = false;
@@ -2225,7 +2351,7 @@
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, beat: clickBeat, pitch: 0 };
+      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, isFlag: false, flagId: null, beat: clickBeat, pitch: 0, traceFrame: null };
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -2262,12 +2388,22 @@
           traceFrame = { beat: segStartBeat, pitch: segPitch, duration: Math.max(1, segEndBeat - segStartBeat) };
         }
       }
-      contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, beat, pitch, traceFrame };
+      // Check flag right-click
+      let flagHit = null;
+      for (const flag of flags) {
+        const fx = beatToX(xToBeat(mx));
+        if (Math.abs(beatToX(flag.beat) - mx) <= 8) { flagHit = flag; break; }
+      }
+      if (flagHit) {
+        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: true, flagId: flagHit.id, beat: flagHit.beat, pitch: 0, traceFrame: null };
+      } else {
+        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, isFlag: false, flagId: null, beat, pitch, traceFrame };
+      }
     }
   }
 
   function closeContextMenu() {
-    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, beat: 0, pitch: 0, traceFrame: null };
+    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
   }
 
   function handleGlobalClick(e) {
@@ -2687,10 +2823,13 @@
     }
     
     if (event.ctrlKey || event.metaKey) {
-      // Zoom
+      // Zoom — keep the point under the cursor fixed
       const oldZoom = zoom;
       zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
       console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
+      const mouseX = event.clientX - canvasEl.getBoundingClientRect().left;
+      const anchorBeat = (scrollX + mouseX) / oldZoom;
+      scrollX = Math.max(getMinBeat() * zoom, anchorBeat * zoom - mouseX);
     } else {
       // Horizontal scroll only
       if (Math.abs(event.deltaX) > 1) {
@@ -2703,9 +2842,40 @@
 
   // Scrollbar input handler
   function handleScrollbar(event) {
-    const beat = parseFloat(event.target.value);
-    scrollX = beat * zoom;
+    // legacy — no longer used
+  }
+
+  function onScrollTrackPointerDown(e) {
+    if (!scrollTrackEl) return;
+    e.preventDefault();
+    const rect = scrollTrackEl.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    // Click sets center beat; back-calculate left-edge scrollX
+    const clickedCenterBeat = getMinBeat() + frac * scrollBeatRange;
+    scrollX = (clickedCenterBeat - canvasW / (2 * zoom)) * zoom;
     draw();
+    // Begin drag — store center beat at drag start
+    scrollHandleDragging = true;
+    scrollDragStartX = e.clientX;
+    scrollDragStartBeat = scrollX / zoom + canvasW / (2 * zoom);
+    window.addEventListener('pointermove', onScrollHandlePointerMove);
+    window.addEventListener('pointerup',   onScrollHandlePointerUp);
+  }
+
+  function onScrollHandlePointerMove(e) {
+    if (!scrollHandleDragging || !scrollTrackEl) return;
+    const rect = scrollTrackEl.getBoundingClientRect();
+    const deltaPx        = e.clientX - scrollDragStartX;
+    const deltaBeat      = (deltaPx / rect.width) * scrollBeatRange;
+    const newCenterBeat  = Math.min(totalBeats, Math.max(getMinBeat(), scrollDragStartBeat + deltaBeat));
+    scrollX = (newCenterBeat - canvasW / (2 * zoom)) * zoom;
+    draw();
+  }
+
+  function onScrollHandlePointerUp() {
+    scrollHandleDragging = false;
+    window.removeEventListener('pointermove', onScrollHandlePointerMove);
+    window.removeEventListener('pointerup',   onScrollHandlePointerUp);
   }
 
   // ──── Playback ───────────────────────────────
@@ -3063,6 +3233,13 @@
         e.preventDefault();
         playNotePitch(selectedNote);
       }
+      // Delete selected flag
+      if ((e.code === 'Delete' || e.code === 'Backspace') && selectedFlag !== null) {
+        e.preventDefault();
+        deleteFlag(selectedFlag);
+        return;
+      }
+
       if (e.code === 'Delete' || e.code === 'Backspace') {
         e.preventDefault();
         if (selectedNotes.size > 1) {
@@ -3814,6 +3991,7 @@
   function resizeCanvas() {
     if (!canvasEl) return;
     canvasEl.width = canvasEl.parentElement.clientWidth;
+    canvasW = canvasEl.width;
     canvasEl.height = viewHeight;
     console.log(`[Resize] Canvas ${canvasEl.width}x${canvasEl.height}`);
     draw();
@@ -3961,8 +4139,9 @@
         scrollX = Math.max(getMinBeat() * zoom, (playbackBeat * zoom) - canvasWidth * 0.1);
       }
 
-      // Restore session notes
+      // Restore session notes and flags
       loadSessionNotes();
+      loadFlags();
 
       // Load waveform
       if (vocalUrl) {
@@ -3999,6 +4178,7 @@
       localStorage.setItem(`editor_scroll_${$sessionId}`, JSON.stringify({ sx: scrollX, z: zoom }));
     }
     saveSessionNotes();
+    saveFlags();
     if (autosaveInterval) clearInterval(autosaveInterval);
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
@@ -4264,8 +4444,15 @@
     {/if}
     
     <input type="range" class="zoom-overlay-slider" min="5" max="60" step="0.5"
-           bind:value={zoom}
-           on:input={() => draw()}
+           value={zoom}
+           on:input={(e) => {
+             const oldZoom = zoom;
+             const cw = canvasEl?.width || 800;
+             const anchorBeat = (scrollX + cw / 2) / oldZoom;
+             zoom = parseFloat(e.target.value);
+             scrollX = Math.max(getMinBeat() * zoom, anchorBeat * zoom - cw / 2);
+             draw();
+           }}
            title="Zoom: {zoom.toFixed(1)}x" />
     {#if micStarting}
       <div class="mic-starting-overlay">
@@ -4457,6 +4644,28 @@
           </button>
         {/if}
       </div>
+    {:else if contextMenu.isFlag}
+      <!-- Flag context menu -->
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        <div class="ctx-header">
+          <span class="ctx-location-label">🚩 Flag @ beat {contextMenu.beat}</span>
+        </div>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat - 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+          ← Nudge Left <span class="ctx-shortcut">-1</span>
+        </button>
+        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat + 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+          → Nudge Right <span class="ctx-shortcut">+1</span>
+        </button>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item danger" on:click={() => deleteFlag(contextMenu.flagId)}>
+          🗑 Delete Flag <span class="ctx-shortcut">Del</span>
+        </button>
+      </div>
     {:else if contextMenu.isEmpty}
       <!-- Empty space context menu -->
       <div
@@ -4479,6 +4688,9 @@
         <button class="ctx-item" on:click={() => addBreakAt(contextMenu.beat)}>
           ┃ Add Break
         </button>
+        <button class="ctx-item" on:click={() => addFlagAt(contextMenu.beat)}>
+          🚩 Add Flag
+        </button>
         {#if clipboard}
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={() => { finalizePaste(contextMenu.beat); closeContextMenu(); }}>
@@ -4493,20 +4705,21 @@
     {/if}
   {/if}
 
-  <!-- Scrollbar -->
+  <!-- Custom scrollbar -->
   <div class="scrollbar-container">
-    <div class="scrollbar-inner" style="--playhead-pct: {((playbackBeat - getMinBeat()) / Math.max(1, totalBeats - getMinBeat()) * 100).toFixed(2)}%">
-      <input
-        type="range"
-        class="scroll-range"
-        bind:this={scrollBarEl}
-        min={getMinBeat()}
-        max={totalBeats}
-        step="1"
-        value={scrollX / zoom}
-        on:input={handleScrollbar}
-      />
-      {#if !isPlaying}<div class="scrollbar-playhead"></div>{/if}
+    <div class="scrollbar-track"
+      bind:this={scrollTrackEl}
+      on:pointerdown={onScrollTrackPointerDown}
+    >
+      <!-- playhead tick -->
+      {#if !isPlaying}
+        <div class="scrollbar-playhead" style="left: {playheadPct}%"></div>
+      {/if}
+      {#each flags as flag}
+        <div class="scrollbar-flag" style="left: {((flag.beat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+      {/each}
+      <!-- draggable handle -->
+      <div class="scrollbar-handle" style="left: {scrollHandlePct}%"></div>
     </div>
   </div>
 
@@ -4516,6 +4729,7 @@
     <span class="legend-item"><span class="dot gold"></span> Golden note</span>
     <span class="legend-item"><span class="dot orange"></span> Rap note</span>
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
+    <span class="legend-item"><span class="dot green-flag"></span> Flag</span>
   </div>
 
   <!-- Stats bar for debugging timing -->
@@ -4891,7 +5105,7 @@
     align-items: center;
     gap: 1rem; */
     display: brock;
-    padding: 0.5rem;
+    padding: 1px;
     background: #1a1a2e;
     border: 1px solid #333;
     border-radius: 8px 8px 0 0;
@@ -4903,14 +5117,14 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 10px;
-    margin-top: 0.5rem;
+    margin: 8px 8px 8px 8px;
   }
 
   .toolbar-toolset-wrapper > * {
     display: flex;
     align-items: center;
     flex-wrap: nowrap;
-    gap: 0.25rem;
+    gap: 10px;
   }
 
   /* .playback-controls, .zoom-controls {
@@ -4925,17 +5139,16 @@
 
   .time-display {
     color: #4ade80;
-    font-size: 0.8rem;
+    font-size: 14px;
     font-family: monospace;
-    min-width: 8s0px;
-    margin-left: 0.25rem;
+    margin-left: 6px;
   }
 
   #mic-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    width: 310px;
+    gap: 10px;
+    width: 324px;
     border: 1px solid #333;
     border-radius: 4px;
   }
@@ -4948,7 +5161,7 @@
   #edit-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 10px;
     border-left: 1px solid #8c8c8c;
     padding-left: 10px;
   }
@@ -4956,8 +5169,8 @@
   #vocal_trace-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    width: 155px;
+    gap: 10px;
+    width: 156px;
     border: 1px solid #333;
     border-radius: 4px;
   }
@@ -4980,13 +5193,13 @@
   }
 
   .tool-btn {
-    padding: 0.4rem 0.8rem;
+    padding: 6px 8px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
     color: #ccc;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 14px;
     outline: none;
   }
 
@@ -5021,7 +5234,8 @@
   .active-mode-badge {
     position: absolute;
     top: 8px;
-    left: 10px;
+    left: 50%;
+    transform: translateX(-50%);
     display: flex;
     align-items: center;
     gap: 5px;
@@ -5096,66 +5310,53 @@
     border-top: none;
   }
 
-  .scrollbar-inner {
+  .scrollbar-track {
     position: relative;
+    height: 18px;
+    cursor: pointer;
+    /* visible rail in the vertical center */
+    background: linear-gradient(
+      to bottom,
+      transparent 5px,
+      #1a1a2e      5px,
+      #1a1a2e      11px,
+      transparent  11px
+    );
+  }
+
+  .scrollbar-handle {
+    position: absolute;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    background: #4fc3f7;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    cursor: grab;
+    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
+    pointer-events: none; /* track handles the pointer events */
   }
 
   .scrollbar-playhead {
     position: absolute;
     top: 0;
     bottom: 0;
-    left: var(--playhead-pct);
     width: 2px;
     background: #ff4444;
     pointer-events: none;
-    transform: translateX(calc(-50% - 12px));
+    transform: translateX(-50%);
     opacity: 0.85;
   }
 
-  .scroll-range {
-    width: 100%;
-    height: 18px;
-    -webkit-appearance: none;
-    appearance: none;
-    background: transparent;
-    cursor: pointer;
-    margin: 0;
-    display: block;
-    outline: none;
-  }
-
-  .scroll-range::-webkit-slider-runnable-track {
-    height: 6px;
-    background: #1a1a2e;
-    border-radius: 3px;
-  }
-
-  .scroll-range::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 14px;
-    height: 14px;
-    background: #4fc3f7;
-    border-radius: 50%;
-    margin-top: -4px;
-    cursor: grab;
-    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
-  }
-
-  .scroll-range::-moz-range-track {
-    height: 6px;
-    background: #1a1a2e;
-    border-radius: 3px;
-  }
-
-  .scroll-range::-moz-range-thumb {
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: #4fc3f7;
-    border: none;
-    cursor: grab;
-    box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
+  .scrollbar-flag {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #4ade80;
+    pointer-events: none;
+    transform: translateX(-50%);
+    opacity: 0.75;
   }
 
   .legend {
@@ -5188,6 +5389,7 @@
   .dot.gold { background: #ffd700; }
   .dot.orange { background: #ff9800; }
   .dot.red-line { background: #c62828; width: 2px; height: 12px; }
+  .dot.green-flag { background: #4ade80; width: 2px; height: 12px; }
 
   .save-controls {
     display: flex;
@@ -5216,23 +5418,23 @@
   } */
 
   .mode-controls {
-    font-size: 0.8rem;
+    font-size: 14px;
     color: #aaa;
     border-left: 1px solid #333;
-    padding-left: 0.5rem;
+    padding-left: 8px;
   }
 
   .mode-controls label {
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 10px;
   }
 
   #time-display-wrapper {
     height: 28px;
     border-left: 1px solid #8c8c8c;
-    padding-left: 0.5rem;
+    padding-left: 4px;
     padding-top: 5px;
   }
 
@@ -5240,9 +5442,9 @@
     display: flex;
     height: 28px;
     align-items: center;
-    gap: 0.2rem;
+    gap: 10px;
     border-left: 1px solid #8c8c8c;
-    padding-left: 0.5rem;
+    padding-left: 8px;
   }
 
   .speed-label {
@@ -5267,7 +5469,7 @@
   .bpm-controls {
     display: flex;
     align-items: center;
-    gap: 0.2rem;
+    gap: 8px;
     padding-left: 10px;
     padding-right: 6px;
     border-left: 1px solid #8c8c8c;
@@ -5283,24 +5485,24 @@
 
   .bpm-label {
     color: #aaa;
-    font-size: 0.75rem;
+    font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.5px;
   }
 
   .gap-label {
-    margin-left: 0.6rem;
+    margin-left: 10px;
   }
 
   .bpm-input, .gap-input {
     width: 72px;
-    padding: 0.25rem 0.3rem;
+    padding: 4px 6px;
     background: #1a1a2e;
     border: 1px solid #444;
     border-radius: 4px;
     color: #4fc3f7;
     font-family: monospace;
-    font-size: 0.8rem;
+    font-size: 12px;
     text-align: center;
     -moz-appearance: textfield;
     appearance: textfield;
@@ -5334,15 +5536,15 @@
   }
 
   .tool-btn.sm {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     min-width: 22px;
   }
 
   .tool-btn.sm.nudge {
     opacity: 0.75;
-    font-size: 0.68rem;
-    padding: 0.15rem 0.3rem;
+    font-size: 10px;
+    padding: 2px 4px;
     min-width: 28px;
   }
   .tool-btn.sm.nudge:hover { opacity: 1; }
@@ -5674,7 +5876,7 @@
   /* Audio source toggle */
   .audio-source-toggle {
     display: inline-flex;
-    gap: 4px;
+    gap: 10px;
     padding-left: 10px;
     border-radius: 6px;
     padding: 1px;
@@ -5686,8 +5888,8 @@
     border-left: 1px solid #8c8c8c;
   }
   #midi-wrapper>button {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
@@ -5711,8 +5913,8 @@
   }
 
   #metronome-wrapper>button {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
@@ -5737,7 +5939,7 @@
   }
 
   .volume-icon {
-    font-size: 0.85rem;
+    font-size: 14px;
     cursor: default;
     user-select: none;
   }
@@ -5829,7 +6031,7 @@
     border: 1px solid #444;
     border-radius: 4px;
     padding: 2px 4px;
-    font-size: 0.7rem;
+    font-size: 12px;
     max-width: 80px;
     cursor: pointer;
     outline: none;
@@ -5842,7 +6044,7 @@
   }
 
   .mic-opt {
-    font-size: 0.75rem;
+    font-size: 12px;
     color: #ccc;
     cursor: pointer;
     user-select: none;
@@ -5987,10 +6189,10 @@
   }
 
   .btn {
-    padding: 0.5rem 1.25rem;
+    padding: 4px 12px;
     border: none;
     border-radius: 8px;
-    font-size: 0.85rem;
+    font-size: 14px;
     cursor: pointer;
     transition: all 0.15s;
   }
