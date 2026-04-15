@@ -192,6 +192,7 @@
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
   let vocalTraceLoading = false;
+  let vocalTraceAbortController = null;
   let vocalTraceVisible = true;         // show/hide toggle (data kept when false)
   let vocalTraceDecodedBuffer = null;   // decoded AudioBuffer of the vocal file
   let vocalTraceSampleBuf = null;       // reused Float32Array(2048) for pitch detection
@@ -3498,7 +3499,8 @@
 
   async function startVocalTrace() {
     vocalTraceLoading = true;
-    const controller = new AbortController();
+    vocalTraceAbortController = new AbortController();
+    const controller = vocalTraceAbortController;
     const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
     try {
       const response = await fetch(vocalUrl, { signal: controller.signal });
@@ -3521,6 +3523,7 @@
     } finally {
       clearTimeout(timeoutId);
       vocalTraceLoading = false;
+      vocalTraceAbortController = null;
     }
   }
 
@@ -4072,7 +4075,17 @@
             Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
           </button>
           {#if vocalTraceLoading}
-            <span class="mic-starting">⏳ Loading</span>
+            <div class="loading-modal-overlay">
+              <div class="loading-modal">
+                <span class="loading-spinner"></span>
+                <span class="loading-label">Loading vocal trace…</span>
+                <button class="tool-btn sm" on:click={() => {
+                  if (vocalTraceAbortController) vocalTraceAbortController.abort();
+                  vocalTraceEnabled = false;
+                  vocalTraceLoading = false;
+                }} title="Cancel">Cancel</button>
+              </div>
+            </div>
           {/if}
           {#if vocalTraceFrames.length > 0}
             {#if vocalTraceVisible}
@@ -5772,6 +5785,46 @@
   }
 
   /* Text editor modal */
+  .loading-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .loading-modal {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    min-width: 220px;
+  }
+
+  .loading-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid #30363d;
+    border-top-color: #58a6ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .loading-label {
+    color: #c9d1d9;
+    font-size: 0.9rem;
+  }
+
   .modal-overlay {
     position: fixed;
     inset: 0;
