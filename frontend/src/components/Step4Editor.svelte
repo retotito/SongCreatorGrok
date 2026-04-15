@@ -1611,7 +1611,10 @@
         // Ctrl/Cmd click: toggle note in multi-selection
         if (selectedNotes.has(found.id)) {
           selectedNotes.delete(found.id);
-          if (selectedNote === found.id) selectedNote = null;
+          if (selectedNote === found.id) {
+            // keep selectedNote pointing at the remaining note if only one left
+            selectedNote = selectedNotes.size === 1 ? [...selectedNotes][0] : null;
+          }
         } else {
           selectedNotes.add(found.id);
           selectedNote = found.id;
@@ -2902,7 +2905,7 @@
 
       // Ctrl+Left/Right (single note only): resize duration from right edge
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
-          selectedNotes.size === 0 && selectedNote !== null) {
+          selectedNotes.size <= 1 && selectedNote !== null) {
         const snap = snapBeatValue(1); // one grid unit
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
