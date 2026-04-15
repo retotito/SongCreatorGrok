@@ -50,15 +50,18 @@
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
   // Custom scrollbar state (replaces native <input type="range">)
-  let scrollTrackEl;          // ref to the track div
+  let scrollTrackEl;           // ref to the track div
   let scrollHandleDragging = false;
-  let scrollDragStartX = 0;   // clientX at drag start
-  let scrollDragStartBeat = 0; // scrollX/zoom at drag start
+  let scrollDragStartX = 0;    // clientX at drag start
+  let scrollDragStartBeat = 0; // center beat at drag start
+  let canvasW = 800;           // px width of canvas, updated in resizeCanvas()
 
-  // Computed: fraction 0–1 for both handle and playhead tick
-  $: scrollBeatRange   = Math.max(1, totalBeats - getMinBeat());
-  $: scrollHandlePct   = ((scrollX / zoom - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
-  $: playheadPct       = ((playbackBeat  - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
+  // Computed: fraction 0–1 for both handle and playhead tick.
+  // Handle tracks CENTER beat so it stays fixed when zooming.
+  $: scrollBeatRange = Math.max(1, totalBeats - getMinBeat());
+  $: centerBeat      = scrollX / zoom + canvasW / (2 * zoom);
+  $: scrollHandlePct = ((centerBeat   - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
+  $: playheadPct     = ((playbackBeat - getMinBeat()) / scrollBeatRange * 100).toFixed(3);
 
   // Rubber-band (box) selection
   let isBoxSelecting = false;
@@ -2721,12 +2724,14 @@
     e.preventDefault();
     const rect = scrollTrackEl.getBoundingClientRect();
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    scrollX = Math.max(getMinBeat() * zoom, (getMinBeat() + frac * scrollBeatRange) * zoom);
+    // Click sets center beat; back-calculate left-edge scrollX
+    const clickedCenterBeat = getMinBeat() + frac * scrollBeatRange;
+    scrollX = (clickedCenterBeat - canvasW / (2 * zoom)) * zoom;
     draw();
-    // Begin drag
+    // Begin drag — store center beat at drag start
     scrollHandleDragging = true;
     scrollDragStartX = e.clientX;
-    scrollDragStartBeat = scrollX / zoom;
+    scrollDragStartBeat = scrollX / zoom + canvasW / (2 * zoom);
     window.addEventListener('pointermove', onScrollHandlePointerMove);
     window.addEventListener('pointerup',   onScrollHandlePointerUp);
   }
@@ -2734,10 +2739,10 @@
   function onScrollHandlePointerMove(e) {
     if (!scrollHandleDragging || !scrollTrackEl) return;
     const rect = scrollTrackEl.getBoundingClientRect();
-    const deltaPx   = e.clientX - scrollDragStartX;
-    const deltaBeat = (deltaPx / rect.width) * scrollBeatRange;
-    const newBeat   = Math.min(totalBeats, Math.max(getMinBeat(), scrollDragStartBeat + deltaBeat));
-    scrollX = newBeat * zoom;
+    const deltaPx        = e.clientX - scrollDragStartX;
+    const deltaBeat      = (deltaPx / rect.width) * scrollBeatRange;
+    const newCenterBeat  = Math.min(totalBeats, Math.max(getMinBeat(), scrollDragStartBeat + deltaBeat));
+    scrollX = (newCenterBeat - canvasW / (2 * zoom)) * zoom;
     draw();
   }
 
@@ -3853,6 +3858,7 @@
   function resizeCanvas() {
     if (!canvasEl) return;
     canvasEl.width = canvasEl.parentElement.clientWidth;
+    canvasW = canvasEl.width;
     canvasEl.height = viewHeight;
     console.log(`[Resize] Canvas ${canvasEl.width}x${canvasEl.height}`);
     draw();
