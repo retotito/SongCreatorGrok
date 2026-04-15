@@ -4901,7 +4901,7 @@
     align-items: center;
     gap: 1rem; */
     display: brock;
-    padding: 0.5rem;
+    padding: 1px;
     background: #1a1a2e;
     border: 1px solid #333;
     border-radius: 8px 8px 0 0;
@@ -4913,14 +4913,14 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 10px;
-    margin-top: 0.5rem;
+    margin: 8px 8px 8px 8px;
   }
 
   .toolbar-toolset-wrapper > * {
     display: flex;
     align-items: center;
     flex-wrap: nowrap;
-    gap: 0.25rem;
+    gap: 10px;
   }
 
   /* .playback-controls, .zoom-controls {
@@ -4935,17 +4935,16 @@
 
   .time-display {
     color: #4ade80;
-    font-size: 0.8rem;
+    font-size: 14px;
     font-family: monospace;
-    min-width: 8s0px;
-    margin-left: 0.25rem;
+    margin-left: 6px;
   }
 
   #mic-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    width: 310px;
+    gap: 10px;
+    width: 324px;
     border: 1px solid #333;
     border-radius: 4px;
   }
@@ -4958,7 +4957,7 @@
   #edit-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 10px;
     border-left: 1px solid #8c8c8c;
     padding-left: 10px;
   }
@@ -4966,8 +4965,8 @@
   #vocal_trace-controls-wrapper {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    width: 155px;
+    gap: 10px;
+    width: 156px;
     border: 1px solid #333;
     border-radius: 4px;
   }
@@ -4990,13 +4989,13 @@
   }
 
   .tool-btn {
-    padding: 0.4rem 0.8rem;
+    padding: 6px 8px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
     color: #ccc;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 14px;
     outline: none;
   }
 
@@ -5227,23 +5226,23 @@
   } */
 
   .mode-controls {
-    font-size: 0.8rem;
+    font-size: 14px;
     color: #aaa;
     border-left: 1px solid #333;
-    padding-left: 0.5rem;
+    padding-left: 8px;
   }
 
   .mode-controls label {
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 10px;
   }
 
   #time-display-wrapper {
     height: 28px;
     border-left: 1px solid #8c8c8c;
-    padding-left: 0.5rem;
+    padding-left: 4px;
     padding-top: 5px;
   }
 
@@ -5251,9 +5250,9 @@
     display: flex;
     height: 28px;
     align-items: center;
-    gap: 0.2rem;
+    gap: 10px;
     border-left: 1px solid #8c8c8c;
-    padding-left: 0.5rem;
+    padding-left: 8px;
   }
 
   .speed-label {
@@ -5278,7 +5277,7 @@
   .bpm-controls {
     display: flex;
     align-items: center;
-    gap: 0.2rem;
+    gap: 8px;
     padding-left: 10px;
     padding-right: 6px;
     border-left: 1px solid #8c8c8c;
@@ -5294,24 +5293,24 @@
 
   .bpm-label {
     color: #aaa;
-    font-size: 0.75rem;
+    font-size: 14px;
     font-weight: 600;
     letter-spacing: 0.5px;
   }
 
   .gap-label {
-    margin-left: 0.6rem;
+    margin-left: 10px;
   }
 
   .bpm-input, .gap-input {
     width: 72px;
-    padding: 0.25rem 0.3rem;
+    padding: 4px 6px;
     background: #1a1a2e;
     border: 1px solid #444;
     border-radius: 4px;
     color: #4fc3f7;
     font-family: monospace;
-    font-size: 0.8rem;
+    font-size: 12px;
     text-align: center;
     -moz-appearance: textfield;
     appearance: textfield;
@@ -5345,15 +5344,15 @@
   }
 
   .tool-btn.sm {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     min-width: 22px;
   }
 
   .tool-btn.sm.nudge {
     opacity: 0.75;
-    font-size: 0.68rem;
-    padding: 0.15rem 0.3rem;
+    font-size: 10px;
+    padding: 2px 4px;
     min-width: 28px;
   }
   .tool-btn.sm.nudge:hover { opacity: 1; }
@@ -5685,7 +5684,7 @@
   /* Audio source toggle */
   .audio-source-toggle {
     display: inline-flex;
-    gap: 4px;
+    gap: 10px;
     padding-left: 10px;
     border-radius: 6px;
     padding: 1px;
@@ -5697,8 +5696,8 @@
     border-left: 1px solid #8c8c8c;
   }
   #midi-wrapper>button {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
@@ -5722,8 +5721,8 @@
   }
 
   #metronome-wrapper>button {
-    padding: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    padding: 4px 6px;
+    font-size: 14px;
     border: 1px solid #444;
     border-radius: 4px;
     background: #222;
@@ -5748,7 +5747,7 @@
   }
 
   .volume-icon {
-    font-size: 0.85rem;
+    font-size: 14px;
     cursor: default;
     user-select: none;
   }
@@ -5840,7 +5839,7 @@
     border: 1px solid #444;
     border-radius: 4px;
     padding: 2px 4px;
-    font-size: 0.7rem;
+    font-size: 12px;
     max-width: 80px;
     cursor: pointer;
     outline: none;
@@ -5853,7 +5852,7 @@
   }
 
   .mic-opt {
-    font-size: 0.75rem;
+    font-size: 12px;
     color: #ccc;
     cursor: pointer;
     user-select: none;
@@ -5998,10 +5997,10 @@
   }
 
   .btn {
-    padding: 0.5rem 1.25rem;
+    padding: 4px 12px;
     border: none;
     border-radius: 8px;
-    font-size: 0.85rem;
+    font-size: 14px;
     cursor: pointer;
     transition: all 0.15s;
   }
