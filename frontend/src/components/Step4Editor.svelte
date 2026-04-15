@@ -2905,7 +2905,7 @@
       e.preventDefault();
 
       // Ctrl+Left/Right (single note only): resize duration from right edge
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
           selectedNotes.size <= 1 && selectedNote !== null) {
         const snap = snapBeatValue(1); // one grid unit
         const delta = e.code === 'ArrowRight' ? snap : -snap;
@@ -2915,6 +2915,25 @@
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, duration: newDur } : n);
+            markUnsaved();
+            draw();
+          }
+        }
+        return;
+      }
+
+      // Shift+Ctrl+Left/Right (single note only): resize from left edge (moves startBeat, keeps endBeat fixed)
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
+          selectedNotes.size <= 1 && selectedNote !== null) {
+        const snap = snapBeatValue(1);
+        const delta = e.code === 'ArrowRight' ? snap : -snap;
+        const note = notes.find(n => n.id === selectedNote);
+        if (note && note.type !== 'break') {
+          const newStart = note.startBeat + delta;
+          const newDur = Math.max(snap, note.duration - delta);
+          if (newDur !== note.duration) {
+            pushUndo();
+            notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
             markUnsaved();
             draw();
           }
@@ -4511,6 +4530,8 @@
       <span class="shortcut"><kbd>S</kbd> split</span>
       <span class="shortcut"><kbd>Del</kbd> delete</span>
       <span class="shortcut"><kbd>P</kbd> play pitch</span>
+      <span class="shortcut"><kbd>Ctrl+←→</kbd> resize right edge</span>
+      <span class="shortcut"><kbd>Shift+Ctrl+←→</kbd> resize left edge</span>
       <span class="shortcut"><kbd>Ctrl+X/C/V</kbd> cut/copy/paste</span>
     </div>
     <div class="shortcut-group">
