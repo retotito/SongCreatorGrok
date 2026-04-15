@@ -2687,10 +2687,13 @@
     }
     
     if (event.ctrlKey || event.metaKey) {
-      // Zoom
+      // Zoom — keep the point under the cursor fixed
       const oldZoom = zoom;
       zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
       console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
+      const mouseX = event.clientX - canvasEl.getBoundingClientRect().left;
+      const anchorBeat = (scrollX + mouseX) / oldZoom;
+      scrollX = Math.max(getMinBeat() * zoom, anchorBeat * zoom - mouseX);
     } else {
       // Horizontal scroll only
       if (Math.abs(event.deltaX) > 1) {
@@ -4264,8 +4267,15 @@
     {/if}
     
     <input type="range" class="zoom-overlay-slider" min="5" max="60" step="0.5"
-           bind:value={zoom}
-           on:input={() => draw()}
+           value={zoom}
+           on:input={(e) => {
+             const oldZoom = zoom;
+             const cw = canvasEl?.width || 800;
+             const anchorBeat = (scrollX + cw / 2) / oldZoom;
+             zoom = parseFloat(e.target.value);
+             scrollX = Math.max(getMinBeat() * zoom, anchorBeat * zoom - cw / 2);
+             draw();
+           }}
            title="Zoom: {zoom.toFixed(1)}x" />
     {#if micStarting}
       <div class="mic-starting-overlay">
@@ -5021,7 +5031,8 @@
   .active-mode-badge {
     position: absolute;
     top: 8px;
-    left: 10px;
+    left: 50%;
+    transform: translateX(-50%);
     display: flex;
     align-items: center;
     gap: 5px;
