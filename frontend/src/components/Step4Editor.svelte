@@ -126,6 +126,7 @@
     flags = flags.filter(f => f.id !== id);
     if (selectedFlag === id) selectedFlag = null;
     saveFlags();
+    closeContextMenu();
     draw();
   }
 
