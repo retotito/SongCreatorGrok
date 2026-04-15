@@ -4293,7 +4293,7 @@
   {#if selectedNotes.size > 1 && !pasteMode}
     <div class="selection-info-bar">
       <span>{selectedNotes.size} notes selected</span>
-      <span class="selection-hint">⌘X cut · ⌘C copy · Del delete · Esc deselect</span>
+      <span class="selection-hint">Ctrl+X cut · Ctrl+C copy · Del delete · Esc deselect</span>
     </div>
   {/if}
 
@@ -4379,10 +4379,10 @@
           </div>
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={clipboardCut}>
-            ✂️ Cut {selectedNotes.size > 1 ? `(${selectedNotes.size} notes)` : ''} <span class="ctx-shortcut">⌘X</span>
+            ✂️ Cut {selectedNotes.size > 1 ? `(${selectedNotes.size} notes)` : ''} <span class="ctx-shortcut">Ctrl+X</span>
           </button>
           <button class="ctx-item" on:click={clipboardCopy}>
-            📋 Copy {selectedNotes.size > 1 ? `(${selectedNotes.size} notes)` : ''} <span class="ctx-shortcut">⌘C</span>
+            📋 Copy {selectedNotes.size > 1 ? `(${selectedNotes.size} notes)` : ''} <span class="ctx-shortcut">Ctrl+C</span>
           </button>
           <div class="ctx-divider"></div>
           <button class="ctx-item danger" on:click={() => deleteNote(ctxNote.id)}>
@@ -4476,7 +4476,7 @@
       <span class="shortcut-label">Playback</span>
       <span class="shortcut"><kbd>Space</kbd> play/pause</span>
       <span class="shortcut"><kbd>←→</kbd> seek ±5s</span>
-      <span class="shortcut"><kbd>⇧←→</kbd> ±1s</span>
+      <span class="shortcut"><kbd>Shift+←→</kbd> ±1s</span>
       <span class="shortcut"><kbd>L</kbd> loop</span>
       <span class="shortcut"><kbd>M</kbd> mic</span>
       <span class="shortcut"><kbd>V</kbd> vocal trace</span>
@@ -4484,13 +4484,13 @@
     <div class="shortcut-group">
       <span class="shortcut-label">Navigate</span>
       <span class="shortcut"><kbd>Scroll</kbd> pan</span>
-      <span class="shortcut"><kbd>⌃Scroll</kbd> zoom</span>
+      <span class="shortcut"><kbd>Ctrl+Scroll</kbd> zoom</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Select</span>
       <span class="shortcut"><kbd>Click</kbd> select</span>
-      <span class="shortcut"><kbd>⌃Click</kbd> multi</span>
-      <span class="shortcut"><kbd>⌃Drag</kbd> box select</span>
+      <span class="shortcut"><kbd>Ctrl+Click</kbd> multi</span>
+      <span class="shortcut"><kbd>Ctrl+Drag</kbd> box select</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Edit</span>
@@ -4498,15 +4498,15 @@
       <span class="shortcut"><kbd>S</kbd> split</span>
       <span class="shortcut"><kbd>Del</kbd> delete</span>
       <span class="shortcut"><kbd>P</kbd> play pitch</span>
-      <span class="shortcut"><kbd>⌘X/C/V</kbd> cut/copy/paste</span>
+      <span class="shortcut"><kbd>Ctrl+X/C/V</kbd> cut/copy/paste</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Tools</span>
-      <span class="shortcut"><kbd>⌘Z</kbd> undo</span>
-      <span class="shortcut"><kbd>⇧⌘Z</kbd> redo</span>
-      <span class="shortcut"><kbd>⌘S</kbd> save</span>
-      <span class="shortcut"><kbd>⌘G</kbd> set GAP</span>
-      <span class="shortcut"><kbd>⌘B</kbd> grid align</span>
+      <span class="shortcut"><kbd>Ctrl+Z</kbd> undo</span>
+      <span class="shortcut"><kbd>Shift+Ctrl+Z</kbd> redo</span>
+      <span class="shortcut"><kbd>Ctrl+S</kbd> save</span>
+      <span class="shortcut"><kbd>Ctrl+G</kbd> set GAP</span>
+      <span class="shortcut"><kbd>Ctrl+B</kbd> grid align</span>
       <span class="shortcut"><kbd>9</kbd> MIDI · <kbd>0</kbd> metronome</span>
     </div>
   </div>

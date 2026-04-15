@@ -46,11 +46,11 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 ### Piano Roll Editor
 - **Full note editing** — move, resize, split, merge, delete notes
 - **Golden/Rap note types** — visual indicators (★ gold, orange rap)
-- **Grid alignment** (⌘G) — snap the entire beat grid to match the audio
-- **GAP adjustment** (⌘S) — click any grid line to set the GAP position
+- **Grid alignment** (Ctrl+B) — snap the entire beat grid to match the audio
+- **GAP adjustment** (Ctrl+G) — click any grid line to set the GAP position
 - **BPM calibration tool** — manually place beat markers on the waveform; linear regression over all markers calculates the exact BPM; persistent grey reference markers survive across calibration sessions
 - **Text editor** — edit raw Ultrastar content with live preview
-- **Select all** (⌘A) — select all notes for bulk move
+- **Select all** (Ctrl+A) — select all notes for bulk move
 - **Undo/Redo** — full snapshot history (notes, BPM, GAP, downbeat offset, headers)
 - **Waveform display** — smooth high-resolution waveform (750 peaks/sec) showing full-mix or vocal track alongside notes
 - **Downbeat alignment** — independent measure grid offset stored as `#DOWNBEATOFFSET` header
