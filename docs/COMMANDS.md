@@ -61,6 +61,38 @@ cd /Users/retokupfer/projects/SongCreatorGrok/frontend && npm run dev
 
 ---
 
+## Debugging the Tauri App
+
+**Run the built .app from Terminal** (shows all stdout/stderr live):
+```bash
+"/Applications/Ultrastar Creator.app/Contents/MacOS/Ultrastar Creator"
+```
+
+**Tail the backend sidecar log** (written by the app on each launch):
+```bash
+tail -f ~/Library/Logs/com.ultrastar.creator/backend.log
+```
+
+**Check if the backend sidecar is running:**
+```bash
+ps aux | grep backend | grep -v grep
+lsof -i :8001
+```
+
+**Check if port 8001 is bound after launch:**
+```bash
+lsof -i :8001
+```
+
+**Verify the sidecar binary is present and executable:**
+```bash
+ls -la "/Applications/Ultrastar Creator.app/Contents/MacOS/backend"
+```
+
+**Open macOS Console.app** and filter by process name `Ultrastar Creator` for system-level crash logs.
+
+---
+
 ## Kill Servers
 
 **Kill backend** (if port 8001 is already in use):
