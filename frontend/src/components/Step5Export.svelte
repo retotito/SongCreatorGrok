@@ -405,7 +405,7 @@
               <div class="asset-thumb-col"><img src={coverPreviewUrl} alt="Cover" class="asset-thumb" /></div>
               <div class="asset-preview-actions">
                 <button class="asset-action-btn" on:click={() => document.getElementById('cover-file-input').click()}>✏️ Change</button>
-                <a class="asset-action-btn" href={coverPreviewUrl} download="cover.jpg" title="Download">⬇</a>
+                <a class="asset-action-btn" href={coverPreviewUrl} download={getBaseFilename() + ' [CO].jpg'} title="Download">⬇</a>
                 <button class="asset-action-btn danger" on:click={removeCover}>✕</button>
               </div>
             </div>
@@ -431,7 +431,7 @@
               <div class="asset-thumb-col"><img src={bgPreviewUrl} alt="Background" class="asset-thumb asset-thumb-bg" /></div>
               <div class="asset-preview-actions">
                 <button class="asset-action-btn" on:click={() => document.getElementById('bg-file-input').click()}>✏️ Change</button>
-                <a class="asset-action-btn" href={bgPreviewUrl} download="background.jpg" title="Download">⬇</a>
+                <a class="asset-action-btn" href={bgPreviewUrl} download={getBaseFilename() + ' [BG].jpg'} title="Download">⬇</a>
                 <button class="asset-action-btn danger" on:click={removeBg}>✕</button>
               </div>
             </div>
