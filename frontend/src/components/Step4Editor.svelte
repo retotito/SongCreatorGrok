@@ -131,7 +131,7 @@
   }
 
   // Context menu
-  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
   let editingSyllable = '';
   let contextMenuEl;
 
@@ -1655,11 +1655,7 @@
       return;
     }
 
-    // ── Paste mode: click to place ──
-    if (pasteMode && clipboard) {
-      finalizePaste(Math.max(0, Math.round(beat)));
-      return;
-    }
+    // ── Paste mode: left click seeks normally (use Ctrl+V or right-click to paste) ──
 
     const isMultiKey = event.metaKey || event.ctrlKey;
 
@@ -2295,6 +2291,18 @@
     event.preventDefault();
     // No context menu during playback or grid align
     if (isPlaying || gridAlignMode) return;
+
+    // Paste mode: show minimal paste/cancel menu
+    if (pasteMode && clipboard) {
+      const rect = canvasEl.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      const beat = Math.round(xToBeat(mx));
+      const menuW = 220, menuH = 110;
+      const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
+      const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
+      contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: true, flagId: null, beat, pitch: 0, traceFrame: null };
+      return;
+    }
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
@@ -2353,7 +2361,7 @@
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, isFlag: false, flagId: null, beat: clickBeat, pitch: 0, traceFrame: null };
+      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: clickBeat, pitch: 0, traceFrame: null };
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -2397,15 +2405,15 @@
         if (Math.abs(beatToX(flag.beat) - mx) <= 8) { flagHit = flag; break; }
       }
       if (flagHit) {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: true, flagId: flagHit.id, beat: flagHit.beat, pitch: 0, traceFrame: null };
+        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: true, isPasteMenu: false, flagId: flagHit.id, beat: flagHit.beat, pitch: 0, traceFrame: null };
       } else {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, isFlag: false, flagId: null, beat, pitch, traceFrame };
+        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, isFlag: false, isPasteMenu: false, flagId: null, beat, pitch, traceFrame };
       }
     }
   }
 
   function closeContextMenu() {
-    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
   }
 
   function handleGlobalClick(e) {
@@ -4645,6 +4653,25 @@
             🗑 Delete {isMultiCtx ? `(${selectedNotes.size} notes)` : 'Note'} <span class="ctx-shortcut">Del</span>
           </button>
         {/if}
+      </div>
+    {:else if contextMenu.isPasteMenu}
+      <!-- Paste mode context menu -->
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        <div class="ctx-header">
+          <span class="ctx-location-label">{clipboard?.mode === 'cut' ? '✂️ CUT' : '📋 COPY'} — {clipboard?.notes.length || 0} note{clipboard?.notes.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => { finalizePaste(contextMenu.beat); closeContextMenu(); }}>
+          📌 Paste here <span class="ctx-shortcut">V</span>
+        </button>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => { cancelPaste(); closeContextMenu(); }}>
+          ✕ Cancel <span class="ctx-shortcut">Esc</span>
+        </button>
       </div>
     {:else if contextMenu.isFlag}
       <!-- Flag context menu -->
