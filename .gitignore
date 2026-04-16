@@ -10,6 +10,9 @@ build/
 dist-backend/
 frontend/src-tauri/target/
 
+# Tauri sidecar binaries (large build artifacts, built locally by build_local.sh)
+frontend/src-tauri/binaries/
+
 # Environment files
 .env
 .env.local
