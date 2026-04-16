@@ -236,8 +236,8 @@ export async function getAssetsMeta(sessionId) {
   return request('GET', `/assets/${sessionId}`, null, false, true);
 }
 
-export async function saveAssetsMeta(sessionId, videoFilename, videoGap) {
-  return request('POST', `/assets/${sessionId}`, { video_filename: videoFilename, video_gap: videoGap });
+export async function saveAssetsMeta(sessionId, videoFilename, videoGap, youtubeUrl) {
+  return request('POST', `/assets/${sessionId}`, { video_filename: videoFilename, video_gap: videoGap, youtube_url: youtubeUrl });
 }
 
 export async function saveMicTrail(sessionId, trailData) {

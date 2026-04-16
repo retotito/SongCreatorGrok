@@ -1753,8 +1753,14 @@ def _set_header(content: str, key: str, value: str) -> str:
     return "\n".join(lines)
 
 
+def _remove_header(content: str, key: str) -> str:
+    """Remove all #KEY:... lines from Ultrastar .txt content."""
+    lines = [ln for ln in content.split("\n") if not _re.match(rf"^#{key}:[^\n]*$", ln)]
+    return "\n".join(lines)
+
+
 def _update_txt_asset_headers(session: dict) -> None:
-    """Inject/update COVER, BACKGROUND, VIDEO, VIDEOGAP in the session's .txt file."""
+    """Inject/update or remove COVER, BACKGROUND, VIDEO, VIDEOGAP, YOUTUBE in the session's .txt file."""
     result = session.get("result")
     if not result:
         return
@@ -1793,6 +1799,17 @@ def _update_txt_asset_headers(session: dict) -> None:
         video_gap = session.get("video_gap")
         if video_gap is not None:
             content = _set_header(content, "VIDEOGAP", str(video_gap))
+        else:
+            content = _remove_header(content, "VIDEOGAP")
+    else:
+        content = _remove_header(content, "VIDEO")
+        content = _remove_header(content, "VIDEOGAP")
+
+    youtube_url = session.get("youtube_url")
+    if youtube_url:
+        content = _set_header(content, "YOUTUBE", youtube_url)
+    else:
+        content = _remove_header(content, "YOUTUBE")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -1871,13 +1888,14 @@ async def get_bgimage(session_id: str):
 
 @app.get("/api/assets/{session_id}")
 async def get_assets_meta(session_id: str):
-    """Return stored video filename and gap for the session."""
+    """Return stored video filename, gap and youtube url for the session."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
         "video_filename": session.get("video_filename", ""),
         "video_gap": session.get("video_gap", 0),
+        "youtube_url": session.get("youtube_url", ""),
     }
 
 
@@ -1890,6 +1908,7 @@ async def save_assets_meta(session_id: str, request: Request):
     body = await request.json()
     video_filename = (body.get("video_filename") or "").strip()
     video_gap = body.get("video_gap")
+    youtube_url = (body.get("youtube_url") or "").strip()
     if video_filename:
         session["video_filename"] = video_filename
     else:
@@ -1901,9 +1920,13 @@ async def save_assets_meta(session_id: str, request: Request):
             pass
     else:
         session.pop("video_gap", None)
+    if youtube_url:
+        session["youtube_url"] = youtube_url
+    else:
+        session.pop("youtube_url", None)
     save_session(session_id)
     _update_txt_asset_headers(session)
-    log_step("ASSETS", f"Video meta saved for session {session_id}: {video_filename!r}")
+    log_step("ASSETS", f"Video meta saved for session {session_id}: video={video_filename!r} youtube={youtube_url!r}")
     return {"status": "ok"}
 
 

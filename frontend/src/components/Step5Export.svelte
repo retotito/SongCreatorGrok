@@ -41,6 +41,7 @@
   // Video
   let videoFilename = '';
   let videoGap = 0;
+  let youtubeUrl = '';
   let videoSaved = false;
   let videoSaving = false;
 
@@ -63,6 +64,7 @@
       const meta = await getAssetsMeta($sessionId);
       if (meta?.video_filename) videoFilename = meta.video_filename;
       if (meta?.video_gap != null) videoGap = meta.video_gap;
+      if (meta?.youtube_url) youtubeUrl = meta.youtube_url;
     } catch (_) {}
   }
 
@@ -246,7 +248,7 @@
     videoSaving = true;
     videoSaved = false;
     try {
-      await saveAssetsMeta($sessionId, videoFilename.trim(), videoFilename.trim() ? videoGap : null);
+      await saveAssetsMeta($sessionId, videoFilename.trim(), videoGap, youtubeUrl.trim());
       videoSaved = true;
       setTimeout(() => { videoSaved = false; }, 2000);
     } finally {
@@ -447,31 +449,40 @@
           <input id="bg-file-input" type="file" accept="image/*" style="display:none" on:change={onBgFileChange} />
         </div>
 
-        <!-- Video filename -->
+        <!-- Video -->
         <div class="asset-row asset-row-video">
           <span class="asset-label">Video</span>
-          <div class="video-input-row">
-            <input
-              class="video-filename-input"
-              type="text"
-              placeholder="filename.mp4 (leave blank to skip)"
-              bind:value={videoFilename}
-            />
-            {#if videoFilename.trim()}
+          <div class="video-inputs">
+            <div class="video-input-row">
+              <input
+                class="video-filename-input"
+                type="text"
+                placeholder="filename.mp4 (leave blank to skip)"
+                bind:value={videoFilename}
+              />
+            </div>
+            <div class="video-input-row">
+              <input
+                class="video-filename-input"
+                type="url"
+                placeholder="Video URL (e.g. YouTube link, optional)"
+                bind:value={youtubeUrl}
+              />
+            </div>
+            <div class="video-gap-row">
+              <span class="video-gap-label">Gap (s)</span>
               <input
                 class="video-gap-input"
                 type="number"
                 step="0.1"
-                placeholder="Gap"
                 title="VIDEOGAP in seconds"
                 bind:value={videoGap}
               />
-            {/if}
-            <button class="asset-save-btn" on:click={saveVideoMeta} disabled={videoSaving}>
-              {videoSaved ? '✓' : 'Save'}
-            </button>
+              <button class="asset-save-btn" on:click={saveVideoMeta} disabled={videoSaving}>
+                {videoSaved ? '✓ Saved' : 'Save'}
+              </button>
+            </div>
           </div>
-          <span class="video-hint">File name only — place the video file in the song folder</span>
         </div>
       </div>
     </div>
@@ -913,8 +924,7 @@
   }
 
   .asset-row-video {
-    flex-direction: column;
-    gap: 0.35rem;
+    align-items: flex-start;
   }
 
   .asset-label {
@@ -994,11 +1004,28 @@
   .asset-action-btn.danger { color: #f44; border-color: #633; }
   .asset-action-btn.danger:hover { background: #3a1a1a; }
 
+  .video-inputs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    flex: 1;
+  }
+
   .video-input-row {
+    display: flex;
+    width: 100%;
+  }
+
+  .video-gap-row {
     display: flex;
     gap: 0.5rem;
     align-items: center;
-    width: 100%;
+  }
+
+  .video-gap-label {
+    font-size: 0.78rem;
+    color: #777;
+    white-space: nowrap;
   }
 
   .video-filename-input {
@@ -1009,6 +1036,7 @@
     background: #111;
     color: #eee;
     font-size: 0.88rem;
+    width: 100%;
   }
   .video-filename-input:focus { outline: none; border-color: #4fc3f7; }
 
@@ -1036,12 +1064,6 @@
   }
   .asset-save-btn:hover:not(:disabled) { background: #2ea043; }
   .asset-save-btn:disabled { opacity: 0.5; cursor: default; }
-
-  .video-hint {
-    font-size: 0.72rem;
-    color: #555;
-    margin-left: 82px;
-  }
 
   /* ── Crop modal ───────────────────────────── */
   .crop-modal {
