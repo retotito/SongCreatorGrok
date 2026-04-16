@@ -374,8 +374,8 @@
               <span class="dropzone-icon">{bgUploading ? '⏳' : '🌄'}</span>
               <span class="dropzone-hint">{bgUploading ? 'Uploading…' : 'Drop image or click'}</span>
             </div>
-            <input id="bg-file-input" type="file" accept="image/*" style="display:none" on:change={onBgFileChange} />
           {/if}
+          <input id="bg-file-input" type="file" accept="image/*" style="display:none" on:change={onBgFileChange} />
         </div>
 
         <!-- Video filename -->
