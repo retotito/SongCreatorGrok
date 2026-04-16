@@ -1745,6 +1745,7 @@
           selectedNotes = new Set([found.id]);
           selectedNote = found.id;
         }
+        selectedFlag = null;
         isDragging = true;
         dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration, endBeat: found.endBeat };
         if (found.type !== 'break') {
@@ -2036,6 +2037,7 @@
     // Finish flag drag
     if (isDragging && selectedFlag !== null) {
       isDragging = false;
+      selectedFlag = null;
       saveFlags();
       draw();
       return;
