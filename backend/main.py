@@ -193,8 +193,8 @@ def _check_model_status() -> dict:
     torch_hub = os.path.expanduser("~/.cache/torch/hub/checkpoints")
     if os.path.isdir(torch_hub):
         for f in os.listdir(torch_hub):
-            # htdemucs checkpoint has a known name prefix
-            if f.startswith("955717e8") or "htdemucs" in f.lower():
+            # htdemucs checkpoint has a known name prefix — only match actual .th files
+            if f.endswith(".th") and (f.startswith("955717e8") or "htdemucs" in f.lower()):
                 demucs_ok = True
                 break
 
@@ -2312,10 +2312,17 @@ async def download_zip(session_id: str):
     zip_name = f"{base}.zip"
     log_step("EXPORT", f"ZIP download: {zip_name}")
 
+    # Content-Disposition headers are latin-1 only; use RFC 5987 filename* for
+    # song titles that contain non-ASCII characters (curly quotes, accents, …).
+    from urllib.parse import quote as _urlquote
+    ascii_name = zip_name.encode("ascii", errors="replace").decode("ascii")
+    utf8_name = _urlquote(zip_name, safe="")
+    content_disposition = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
+
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+        headers={"Content-Disposition": content_disposition},
     )
 
 
@@ -2490,6 +2497,23 @@ async def save_mic_trail(session_id: str, trail: str = Form(...), audio: UploadF
 
 if __name__ == "__main__":
     import uvicorn
-    
+
+    # Pre-load essentia (and its bundled libSDL-1.2.0.dylib) on the main thread
+    # BEFORE uvicorn spawns worker threads.
+    #
+    # SDL 1.2's dylib constructor (dllinit) checks [NSThread isMainThread] and
+    # calls error_dialog → [NSAlert init] when loaded on a background thread.
+    # On macOS 26+, creating AppKit objects off the main thread raises an ObjC
+    # exception that propagates to the C++ runtime and calls abort() (SIGABRT).
+    #
+    # Python caches loaded modules in sys.modules, so once the dylib is loaded
+    # here on the main thread, subsequent imports by uvicorn worker threads are
+    # no-ops and dllinit is never called again.
+    try:
+        import services.bpm_detection  # noqa: F401 — triggers dllinit on main thread
+        log_step("PRELOAD", "essentia/SDL pre-loaded on main thread")
+    except Exception as _preload_err:
+        log_step("PRELOAD", f"bpm_detection preload skipped: {_preload_err}")
+
     log_step("SERVER", "Starting Ultrastar Song Generator v2.0")
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")

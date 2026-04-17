@@ -9,7 +9,13 @@ import numpy as np
 from utils.logger import log_step
 
 # Optional: essentia for more accurate BPM detection
+# libSDL-1.2.0.dylib (bundled with essentia) calls [NSAlert init] during dllinit
+# on a background thread, which crashes on macOS 26+. Set SDL env vars before
+# loading the library to suppress its display/audio initialization.
 try:
+    import os as _os
+    _os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    _os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     import essentia.standard as _es
     _HAS_ESSENTIA = True
 except ImportError:

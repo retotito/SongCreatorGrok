@@ -65,6 +65,27 @@ datas += _d; binaries += _b; hiddenimports += _h
 _d, _b, _h = collect_all('pydantic')
 datas += _d; binaries += _b; hiddenimports += _h
 
+# ── essentia (BPM detection) + its bundled SDL/ffmpeg dylibs ─────────────────
+# essentia ships its own .dylibs folder (SDL 1.2, SDL2, libavcodec, …).
+# PyInstaller only auto-discovers load-time dependencies, so libSDL2-2.0.0.dylib
+# (loaded at runtime by SDL 1.2's dllinit constructor) is not bundled unless we
+# explicitly add it.  We place all essentia dylibs in _MEIPASS root so the
+# DYLD_LIBRARY_PATH that PyInstaller's bootloader sets to _MEIPASS makes them
+# findable by dlopen() calls inside the native libraries.
+try:
+    import importlib.util as _ilu
+    _essentia_spec = _ilu.find_spec('essentia')
+    if _essentia_spec and _essentia_spec.origin:
+        _essentia_dylib_dir = os.path.join(os.path.dirname(_essentia_spec.origin), '.dylibs')
+        if os.path.isdir(_essentia_dylib_dir):
+            import glob as _glob
+            for _lib in _glob.glob(os.path.join(_essentia_dylib_dir, '*.dylib')):
+                binaries += [(_lib, '.')]
+    _d, _b, _h = collect_all('essentia')
+    datas += _d; binaries += _b; hiddenimports += _h
+except Exception as _e:
+    print(f"[spec] essentia collection skipped: {_e}")
+
 # ── Optional AI packages (only if installed) ──────────────────────────────────
 for optional_pkg in ('torch', 'torchaudio', 'demucs', 'whisperx', 'whisper'):
     try:
