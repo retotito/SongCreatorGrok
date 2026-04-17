@@ -29,6 +29,10 @@
     }
   }
 
+  // Show a startup overlay while the backend is warming up, but not once the
+  // SetupScreen has taken over (it has its own "waiting" UI).
+  $: showStartupOverlay = backendStatus !== 'ok' && !showSetup;
+
   async function waitForBackendAndResume() {
     // Wait until backend is healthy before attempting session resume
     const sid = $sessionId;
@@ -36,8 +40,11 @@
     // Read the original persisted step directly from localStorage (store caps it at 2 on init)
     const persistedStep = parseInt(localStorage.getItem('currentStep') || '0');
 
-    // Poll until healthy (max 120 attempts × 1s = 2 minutes)
+    // Poll until healthy (max 120 attempts × 1s = 2 minutes).
+    // Actively call pollHealth every second so we don't wait for the 15s interval.
     for (let i = 0; i < 120; i++) {
+      if (backendStatus === 'ok') break;
+      await pollHealth();
       if (backendStatus === 'ok') break;
       await new Promise(r => setTimeout(r, 1000));
     }
@@ -149,6 +156,17 @@
 
 <DialogModal />
 
+{#if showStartupOverlay}
+  <div class="startup-overlay">
+    <div class="startup-card">
+      <h1>Ultrastar Creator</h1>
+      <div class="startup-spinner"></div>
+      <p class="startup-msg">Backend is starting up…</p>
+      <p class="startup-hint">This can take 15–30 seconds on first launch.</p>
+    </div>
+  </div>
+{/if}
+
 {#if showSetup}
   <SetupScreen {setupStatus} on:done={onSetupDone} />
 {/if}
@@ -220,5 +238,56 @@
 
   main {
     margin-top: 0.5rem;
+  }
+
+  /* ── Startup overlay ── */
+  .startup-overlay {
+    position: fixed;
+    inset: 0;
+    background: #0d1117;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .startup-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.25rem;
+    text-align: center;
+  }
+
+  .startup-card h1 {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #e0e0e0;
+    margin: 0;
+  }
+
+  .startup-spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid #2d333b;
+    border-top-color: #4f8ef7;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .startup-msg {
+    color: #c0c8d8;
+    font-size: 1rem;
+    margin: 0;
+  }
+
+  .startup-hint {
+    color: #666e7a;
+    font-size: 0.82rem;
+    margin: 0;
   }
 </style>

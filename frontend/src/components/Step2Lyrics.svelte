@@ -90,8 +90,19 @@
   let isTranscribing = false;
   let transcribeInfo = null;
   let transcribeStatus = '';
+  let transcribePhase = '';  // 'loading' | 'transcribing' | 'done' | 'error'
+  let transcribeElapsed = 0;
   let transcribeModalOpen = false;
   let transcribeAbortController = null;
+  let transcribeTicker = null;
+
+  function startTranscribeTicker() {
+    transcribeElapsed = 0;
+    transcribeTicker = setInterval(() => { transcribeElapsed += 1; }, 1000);
+  }
+  function stopTranscribeTicker() {
+    if (transcribeTicker) { clearInterval(transcribeTicker); transcribeTicker = null; }
+  }
 
   // Keep lyricsData in sync with local fields
   $: lyricsData.set({
@@ -146,23 +157,31 @@
     }
     errorMessage.set('');
     isTranscribing = true;
+    transcribePhase = 'loading';
+    transcribeStatus = 'Loading Whisper model…';
+    transcribeElapsed = 0;
     transcribeModalOpen = true;
-    transcribeStatus = '⏳ Loading Whisper model…';
     transcribeAbortController = new AbortController();
 
     try {
-      transcribeStatus = '🎙️ Transcribing with Whisper (this may take a minute)…';
+      transcribePhase = 'transcribing';
+      transcribeStatus = 'Transcribing vocals with Whisper…';
+      startTranscribeTicker();
       const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal);
+      stopTranscribeTicker();
       console.log('[Step2] Whisper result:', result);
       lyricsText = result.text;
       transcribeInfo = result;
-      transcribeStatus = `✅ Done: ${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
-      processingStatus.set(transcribeStatus);
-      transcribeModalOpen = false;
+      transcribePhase = 'done';
+      transcribeStatus = `${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
+      processingStatus.set('✅ Transcription complete');
+      setTimeout(() => { transcribeModalOpen = false; }, 1800);
     } catch (err) {
+      stopTranscribeTicker();
       if (err.name === 'AbortError') return; // cancelled silently
       console.error('[Step2] Transcription error:', err);
-      transcribeStatus = `❌ ${err.message}`;
+      transcribePhase = 'error';
+      transcribeStatus = err.message;
       errorMessage.set(err.message);
     } finally {
       isTranscribing = false;
@@ -170,8 +189,10 @@
   }
 
   function cancelTranscription() {
+    stopTranscribeTicker();
     isTranscribing = false;
     transcribeModalOpen = false;
+    transcribePhase = '';
     if (transcribeAbortController) transcribeAbortController.abort();
     cancelTranscribe($sessionId);
   }
@@ -306,14 +327,25 @@
   <div class="transcribe-modal-backdrop">
     <div class="transcribe-modal-box">
       <div class="transcribe-modal-header">
-        <div class="transcribe-modal-title">
-          {#if isTranscribing}
-            <span class="t-spinner"></span>
-          {/if}
-          <h2>{isTranscribing ? '🎙️ Generating Lyrics…' : '✅ Transcription Complete'}</h2>
-        </div>
+        {#if transcribePhase === 'done'}
+          <span class="phase-icon">✅</span>
+          <h2>Transcription Complete</h2>
+        {:else if transcribePhase === 'error'}
+          <span class="phase-icon">❌</span>
+          <h2>Transcription Failed</h2>
+        {:else}
+          <span class="t-spinner"></span>
+          <h2>Generating Lyrics…</h2>
+        {/if}
       </div>
       <p class="transcribe-modal-status">{transcribeStatus}</p>
+      {#if transcribePhase === 'transcribing'}
+        <div class="transcribe-elapsed">⏱ {transcribeElapsed}s elapsed</div>
+        <div class="transcribe-hint">
+          Whisper listens to the full vocal track.<br>
+          Typical songs take <strong>30–120 seconds</strong>.
+        </div>
+      {/if}
       <div class="transcribe-modal-footer">
         <button class="btn btn-cancel" on:click={cancelTranscription}>
           {isTranscribing ? '✕ Cancel' : '← Close'}
@@ -604,17 +636,16 @@
   .transcribe-modal-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-  }
-
-  .transcribe-modal-title {
-    display: flex;
-    align-items: center;
     gap: 0.75rem;
   }
 
-  .transcribe-modal-title h2 {
+  .transcribe-modal-header h2 {
     margin: 0;
+  }
+
+  .phase-icon {
+    font-size: 1.4rem;
+    line-height: 1;
   }
 
   .t-spinner {
@@ -635,6 +666,22 @@
     color: #aaa;
     font-size: 0.9rem;
     margin: 0;
+  }
+
+  .transcribe-elapsed {
+    font-size: 0.85rem;
+    color: #4fc3f7;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .transcribe-hint {
+    font-size: 0.82rem;
+    color: #666e7a;
+    line-height: 1.5;
+  }
+
+  .transcribe-hint strong {
+    color: #aaa;
   }
 
   .transcribe-modal-footer {

@@ -643,6 +643,85 @@ async def extract_vocals(session_id: str):
         raise ServiceError("Vocal extraction failed", str(e))
 
 
+@app.get("/api/extract-vocals-stream/{session_id}")
+async def extract_vocals_stream(session_id: str):
+    """SSE stream for vocal extraction — emits phase messages and elapsed-time heartbeats."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from services.vocal_separation import separate_vocals, DEMUCS_AVAILABLE
+    import asyncio
+
+    def _send(phase: str, message: str = "", **kwargs) -> str:
+        data = {"phase": phase, "message": message, **kwargs}
+        return f"data: {json.dumps(data)}\n\n"
+
+    async def event_generator():
+        if not DEMUCS_AVAILABLE:
+            yield _send("error", "Demucs not installed. Install with: pip install demucs")
+            return
+
+        if not session.get("original_audio"):
+            yield _send("error", "No audio file uploaded")
+            return
+
+        yield _send("loading", "Loading Demucs model…")
+        await asyncio.sleep(0.1)
+
+        session["extract_cancelled"] = False
+        session["status"] = "extracting_vocals"
+
+        loop = asyncio.get_event_loop()
+        output_dir = os.path.join(UPLOAD_DIR, session_id)
+        audio_path = session["original_audio"]
+
+        # Launch demucs in a thread pool so the event loop stays responsive
+        executor_future = loop.run_in_executor(None, separate_vocals, audio_path, output_dir)
+
+        yield _send("separating", "Separating vocals — may take 1–5 minutes depending on song length…")
+
+        # Send heartbeats while waiting
+        start = loop.time()
+        while not executor_future.done():
+            if session.get("extract_cancelled"):
+                executor_future.cancel()
+                yield _send("cancelled", "Extraction cancelled")
+                return
+            elapsed = int(loop.time() - start)
+            yield _send("heartbeat", "", elapsed=elapsed)
+            try:
+                await asyncio.wait_for(asyncio.shield(executor_future), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                break
+
+        if session.get("extract_cancelled") or executor_future.cancelled():
+            yield _send("cancelled", "Extraction cancelled")
+            return
+
+        exc = executor_future.exception() if not executor_future.cancelled() else RuntimeError("cancelled")
+        if exc:
+            session["status"] = "extraction_failed"
+            save_session(session_id)
+            yield _send("error", str(exc))
+            return
+
+        vocal_path = executor_future.result()
+        session["vocal_audio"] = vocal_path
+        session["status"] = "vocals_extracted"
+        save_session(session_id)
+        log_step("SEPARATE", f"Session {session_id}: vocals extracted via SSE stream")
+        yield _send("done", "Vocals extracted successfully!", vocal_url=f"/api/preview-audio/{session_id}/vocals")
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/upload-vocals/{session_id}")
 async def upload_corrected_vocals(session_id: str, vocals: UploadFile = File(...)):
     """Upload manually corrected vocals (skip or replace Demucs output)."""

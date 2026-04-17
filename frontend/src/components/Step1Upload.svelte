@@ -1,6 +1,6 @@
 <script>
   import { sessionId, uploadData, currentStep, isProcessing, processingStatus, errorMessage, lyricsData, generationResult, generationLog, generationShowPreview } from '../stores/appStore.js';
-  import { newSession, uploadAudio, extractVocals, cancelExtractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
+  import { newSession, uploadAudio, extractVocals, cancelExtractVocals, streamExtractVocals, uploadCorrectedVocals, uploadMixAudio, deleteAudio, getAudioUrl, resumeLastSession, getGenerationResult } from '../services/api.js';
 
   let dragOverMix = false;
   let dragOverVocals = false;
@@ -11,7 +11,18 @@
   let extractModalOpen = false;
   let extractDone = false;
   let extractStatus = '';
-  let extractAbortController = null;
+  let extractPhase = '';   // 'loading'|'separating'|'heartbeat'|'done'|'error'|'cancelled'
+  let extractElapsed = 0;
+  let stopExtractStream = null;
+  let elapsedTicker = null;
+
+  function startElapsedTicker() {
+    extractElapsed = 0;
+    elapsedTicker = setInterval(() => { extractElapsed += 1; }, 1000);
+  }
+  function stopElapsedTicker() {
+    if (elapsedTicker) { clearInterval(elapsedTicker); elapsedTicker = null; }
+  }
 
   $: mixUrl    = $sessionId && $uploadData.hasOriginal ? getAudioUrl($sessionId, 'original') : null;
   $: vocalsUrl = $sessionId && $uploadData.hasVocals   ? getAudioUrl($sessionId, 'vocals')   : null;
@@ -67,35 +78,49 @@
   }
 
   // ── Vocal extraction ─────────────────────────────────────
-  async function handleExtractVocals() {
+  function handleExtractVocals() {
     errorMessage.set('');
     extractDone = false;
-    extractStatus = '⏳ Starting Demucs vocal separation…';
+    extractStatus = '';
+    extractPhase = 'loading';
+    extractElapsed = 0;
     extractModalOpen = true;
-    extractAbortController = new AbortController();
-    try {
-      extractStatus = '⚡ Extracting vocals with Demucs (this may take a few minutes)…';
-      const result = await extractVocals($sessionId, extractAbortController.signal);
-      uploadData.update(d => ({
-        ...d,
-        hasVocals: true,
-        vocalUrl: getAudioUrl($sessionId, 'vocals'),
-      }));
-      extractStatus = '✅ Vocals extracted successfully!';
-      extractDone = true;
-      extractModalOpen = false;
-    } catch (err) {
-      if (err.name === 'AbortError' || err.message?.includes('499')) return;
-      extractStatus = `❌ ${err.message}`;
-      extractDone = true;
-    }
+
+    stopExtractStream = streamExtractVocals($sessionId, (event) => {
+      extractPhase = event.phase;
+      if (event.message) extractStatus = event.message;
+
+      if (event.phase === 'separating') {
+        startElapsedTicker();
+      } else if (event.phase === 'done') {
+        stopElapsedTicker();
+        uploadData.update(d => ({
+          ...d,
+          hasVocals: true,
+          vocalUrl: getAudioUrl($sessionId, 'vocals'),
+        }));
+        extractDone = true;
+        if (stopExtractStream) { stopExtractStream(); stopExtractStream = null; }
+        setTimeout(() => { extractModalOpen = false; }, 1800);
+      } else if (event.phase === 'error') {
+        stopElapsedTicker();
+        extractDone = true;
+        if (stopExtractStream) { stopExtractStream(); stopExtractStream = null; }
+      } else if (event.phase === 'cancelled') {
+        stopElapsedTicker();
+        extractModalOpen = false;
+        if (stopExtractStream) { stopExtractStream(); stopExtractStream = null; }
+      }
+    });
   }
 
   function cancelExtraction() {
+    stopElapsedTicker();
+    if (stopExtractStream) { stopExtractStream(); stopExtractStream = null; }
+    cancelExtractVocals($sessionId);
     extractModalOpen = false;
     extractDone = false;
-    if (extractAbortController) extractAbortController.abort();
-    cancelExtractVocals($sessionId);
+    extractPhase = '';
   }
 
   // ── Delete ───────────────────────────────────────────────
@@ -292,14 +317,28 @@
   <div class="extract-modal-backdrop">
     <div class="extract-modal-box">
       <div class="extract-modal-header">
-        <div class="extract-modal-title">
-          {#if !extractDone}
-            <span class="e-spinner"></span>
-          {/if}
-          <h2>{extractDone ? (extractStatus.startsWith('✅') ? '✅ Done' : '❌ Error') : '⚡ Extracting Vocals…'}</h2>
-        </div>
+        {#if extractPhase === 'done'}
+          <span class="phase-icon">✅</span>
+          <h2>Vocals Extracted!</h2>
+        {:else if extractPhase === 'error'}
+          <span class="phase-icon">❌</span>
+          <h2>Extraction Failed</h2>
+        {:else}
+          <span class="e-spinner"></span>
+          <h2>Extracting Vocals…</h2>
+        {/if}
       </div>
+
       <p class="extract-modal-status">{extractStatus}</p>
+
+      {#if extractPhase === 'separating' || extractPhase === 'heartbeat'}
+        <div class="extract-elapsed">⏱ {extractElapsed}s elapsed</div>
+        <div class="extract-hint">
+          Demucs AI separates vocals from the full mix.<br>
+          Typical songs take <strong>1–5 minutes</strong>.
+        </div>
+      {/if}
+
       <div class="extract-modal-footer">
         <button class="btn btn-cancel" on:click={cancelExtraction}>
           {extractDone ? '← Close' : '✕ Cancel'}
@@ -518,17 +557,17 @@
   .extract-modal-header {
     display: flex;
     align-items: center;
-  }
-
-  .extract-modal-title {
-    display: flex;
-    align-items: center;
     gap: 0.75rem;
   }
 
-  .extract-modal-title h2 {
+  .extract-modal-header h2 {
     margin: 0;
     color: #4fc3f7;
+  }
+
+  .phase-icon {
+    font-size: 1.4rem;
+    line-height: 1;
   }
 
   .e-spinner {
@@ -549,6 +588,22 @@
     color: #aaa;
     font-size: 0.9rem;
     margin: 0;
+  }
+
+  .extract-elapsed {
+    font-size: 0.85rem;
+    color: #4fc3f7;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .extract-hint {
+    font-size: 0.82rem;
+    color: #666e7a;
+    line-height: 1.5;
+  }
+
+  .extract-hint strong {
+    color: #aaa;
   }
 
   .extract-modal-footer {

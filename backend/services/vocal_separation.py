@@ -7,14 +7,18 @@ import tempfile
 import shutil
 from utils.logger import log_step
 
-# Check if Demucs is available
+# Check if Demucs is available without importing torch (which is very slow).
+# The actual import happens lazily inside the functions that use it.
 try:
-    import demucs
-    DEMUCS_AVAILABLE = True
-    log_step("INIT", "Demucs vocal separation available")
-except ImportError:
+    import importlib.util
+    DEMUCS_AVAILABLE = importlib.util.find_spec('demucs') is not None
+    if DEMUCS_AVAILABLE:
+        log_step("INIT", "Demucs vocal separation available")
+    else:
+        log_step("INIT", "Demucs not installed, vocal separation unavailable")
+except Exception:
     DEMUCS_AVAILABLE = False
-    log_step("INIT", "Demucs not installed, vocal separation unavailable")
+    log_step("INIT", "Demucs availability check failed")
 
 
 def _run_demucs_in_process(audio_path: str, temp_dir: str) -> None:

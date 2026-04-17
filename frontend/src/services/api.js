@@ -103,6 +103,24 @@ export async function extractVocals(sessionId, signal = null) {
   return request('POST', `/extract-vocals/${sessionId}`, null, false, false, signal);
 }
 
+/**
+ * Stream vocal extraction via SSE.
+ * onEvent receives objects: { phase, message, elapsed?, vocal_url? }
+ * phases: 'loading' | 'separating' | 'heartbeat' | 'done' | 'error' | 'cancelled'
+ * Returns a cleanup function that closes the stream.
+ */
+export function streamExtractVocals(sessionId, onEvent) {
+  const es = new EventSource(`${BASE}/extract-vocals-stream/${sessionId}`);
+  es.onmessage = (e) => {
+    try { onEvent(JSON.parse(e.data)); } catch {}
+  };
+  es.onerror = () => {
+    onEvent({ phase: 'error', message: 'Connection to server lost' });
+    es.close();
+  };
+  return () => es.close();
+}
+
 export async function uploadCorrectedVocals(sessionId, file) {
   const form = new FormData();
   form.append('vocals', file);
