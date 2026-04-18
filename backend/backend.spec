@@ -78,6 +78,28 @@ datas += _d; binaries += _b; hiddenimports += _h
 _d, _b, _h = collect_all('pydantic')
 datas += _d; binaries += _b; hiddenimports += _h
 
+# ── Bundle ffmpeg executable so end-users don't need to install it ───────────
+# Search common install locations (Homebrew arm64, Homebrew x86, MacPorts, Linux, Windows).
+_ffmpeg_search = [
+    '/opt/homebrew/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    '/opt/local/bin/ffmpeg',
+    '/usr/bin/ffmpeg',
+]
+import shutil as _shutil
+_ffmpeg_bin = _shutil.which('ffmpeg')
+if _ffmpeg_bin:
+    binaries += [(_ffmpeg_bin, '.')]
+    print(f"[spec] bundling ffmpeg from {_ffmpeg_bin}")
+else:
+    for _p in _ffmpeg_search:
+        if os.path.isfile(_p):
+            binaries += [(_p, '.')]
+            print(f"[spec] bundling ffmpeg from {_p}")
+            break
+    else:
+        print("[spec] WARNING: ffmpeg not found — it will not be bundled")
+
 # ── essentia (BPM detection) + its bundled SDL/ffmpeg dylibs ─────────────────
 # essentia ships its own .dylibs folder (SDL 1.2, SDL2, libavcodec, …).
 # PyInstaller only auto-discovers load-time dependencies, so libSDL2-2.0.0.dylib
