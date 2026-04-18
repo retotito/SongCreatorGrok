@@ -38,41 +38,41 @@ jobs:
       - name: Install Python deps
         run: |
           pip install --upgrade pip
-          # Core deps
-          pip install \
-            fastapi==0.115.0 \
-            "uvicorn[standard]==0.30.0" \
-            python-multipart==0.0.9 \
-            "librosa==0.10.2" \
-            "numpy>=1.24.0" \
-            mido==1.3.2 \
-            pyphen==0.16.0 \
-            "pydantic>=2.0.0" \
-            pyinstaller
-          # essentia — optional but needed to bundle SDL libs for macOS 26 compat
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+          # AI/ML packages (commented out in requirements.txt, required for sidecar)
+          pip install faster-whisper whisperx demucs || echo "some AI packages failed, continuing"
+          # essentia — optional BPM detection
           pip install essentia || echo "essentia not available for this arch, skipping"
 
       - name: Build sidecar with PyInstaller
         run: |
           pyinstaller backend/backend.spec --distpath dist-backend
 
-      - name: Rename binary for Tauri sidecar convention
-        run: |
-          mkdir -p sidecar-out
-          cp dist-backend/backend sidecar-out/backend-${{ matrix.target }}
-          chmod +x sidecar-out/backend-${{ matrix.target }}
-
-      - name: Upload sidecar artifact
+      - name: Upload sidecar artifact (full onedir)
         uses: actions/upload-artifact@v4
         with:
           name: sidecar-${{ matrix.target }}
-          path: sidecar-out/backend-${{ matrix.target }}
+          path: dist-backend/backend/
           retention-days: 1
 
-  # ── Step 2: Assemble universal .app with Tauri ──────────────────────────────
+  # ── Step 2: Build Tauri app for each architecture ───────────────────────────
   build-tauri:
     needs: build-python-sidecar
-    runs-on: macos-14   # Apple Silicon runner can cross-compile universal
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            sidecar: sidecar-aarch64-apple-darwin
+            dmg_suffix: arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            sidecar: sidecar-x86_64-apple-darwin
+            dmg_suffix: x86_64
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -83,47 +83,37 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Rust (stable) + universal target
+      - name: Install Rust (stable)
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           source "$HOME/.cargo/env"
-          rustup target add x86_64-apple-darwin
-          rustup target add aarch64-apple-darwin
+          rustup target add ${{ matrix.target }}
 
-      - name: Download ARM sidecar
+      - name: Download backend sidecar
         uses: actions/download-artifact@v4
         with:
-          name: sidecar-aarch64-apple-darwin
-          path: frontend/src-tauri/binaries
+          name: ${{ matrix.sidecar }}
+          path: frontend/src-tauri/resources/backend
 
-      - name: Download Intel sidecar
-        uses: actions/download-artifact@v4
-        with:
-          name: sidecar-x86_64-apple-darwin
-          path: frontend/src-tauri/binaries
-
-      - name: Make sidecars executable
-        run: |
-          chmod +x frontend/src-tauri/binaries/backend-aarch64-apple-darwin
-          chmod +x frontend/src-tauri/binaries/backend-x86_64-apple-darwin
+      - name: Make backend executable
+        run: chmod +x frontend/src-tauri/resources/backend/backend
 
       - name: Install npm deps
         run: |
           cd frontend
           npm ci
 
-      - name: Build Tauri app (universal)
+      - name: Build Tauri app
         run: |
           source "$HOME/.cargo/env"
           cd frontend
-          npm run tauri build -- --target universal-apple-darwin
+          npm run tauri build -- --target ${{ matrix.target }}
 
       - name: Upload .dmg artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UltrastarCreator-macOS-universal
-          path: |
-            frontend/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: UltrastarCreator-macOS-${{ matrix.dmg_suffix }}
+          path: frontend/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: warn
           retention-days: 30
 
@@ -131,5 +121,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            frontend/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          files: frontend/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
