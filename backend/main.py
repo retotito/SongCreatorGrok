@@ -244,8 +244,9 @@ async def setup_download():
                     lambda: whisperx.load_model("medium", "cpu", compute_type="int8")
                 )
                 yield send("done", "whisperx", "WhisperX medium model ready")
-            except ImportError:
-                yield send("done", "whisperx", "WhisperX not installed — lyrics will need manual entry", error=True)
+            except ImportError as e:
+                import traceback
+                yield send("done", "whisperx", f"WhisperX not installed — {traceback.format_exc()}", error=True)
             except Exception as e:
                 yield send("error", "whisperx", f"Download failed: {e}")
         else:
@@ -2509,11 +2510,30 @@ if __name__ == "__main__":
     # Python caches loaded modules in sys.modules, so once the dylib is loaded
     # here on the main thread, subsequent imports by uvicorn worker threads are
     # no-ops and dllinit is never called again.
+    # Minimal SDL2 preload: just dlopen the dylib on the main thread to trigger
+    # SDL's C-constructor (dllinit) before uvicorn spawns background threads.
+    # Avoids importing all of essentia (~13s) — essentia imports lazily on first use.
     try:
-        import services.bpm_detection  # noqa: F401 — triggers dllinit on main thread
-        log_step("PRELOAD", "essentia/SDL pre-loaded on main thread")
+        import ctypes as _ctypes, glob as _glob, os as _os, sys as _sys
+        _sdl_candidates = []
+        _meipass = getattr(_sys, '_MEIPASS', None)
+        if _meipass:
+            _sdl_candidates += _glob.glob(_os.path.join(_meipass, 'libSDL2*.dylib'))
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.find_spec('essentia')
+            if _spec and _spec.origin:
+                _sdl_candidates += _glob.glob(
+                    _os.path.join(_os.path.dirname(_spec.origin), '.dylibs', 'libSDL2*.dylib'))
+        except Exception:
+            pass
+        if _sdl_candidates:
+            _ctypes.CDLL(_sdl_candidates[0])
+            log_step("PRELOAD", f"SDL2 dlopen on main thread: {_os.path.basename(_sdl_candidates[0])}")
+        else:
+            log_step("PRELOAD", "SDL2 dylib not found — skipping preload")
     except Exception as _preload_err:
-        log_step("PRELOAD", f"bpm_detection preload skipped: {_preload_err}")
+        log_step("PRELOAD", f"SDL preload skipped: {_preload_err}")
 
     log_step("SERVER", "Starting Ultrastar Song Generator v2.0")
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")

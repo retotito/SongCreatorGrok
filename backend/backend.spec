@@ -13,7 +13,7 @@ to frontend/src-tauri/binaries/ before running `npm run tauri build`.
 import sys
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files, copy_metadata
 
 block_cipher = None
 
@@ -21,6 +21,19 @@ block_cipher = None
 datas = []
 binaries = []
 hiddenimports = []
+
+# ── Package metadata required by importlib.metadata.version() at runtime ─────
+# transformers/audio_utils.py calls importlib.metadata.version("torchcodec")
+# at import time; without the dist-info directory this raises PackageNotFoundError.
+for _meta_pkg in (
+    'torchcodec', 'transformers', 'tokenizers', 'huggingface_hub',
+    'whisperx', 'faster_whisper', 'pyannote.audio', 'pyannote.core',
+    'speechbrain', 'torch', 'torchaudio', 'torchvision', 'Pillow',
+):
+    try:
+        datas += copy_metadata(_meta_pkg)
+    except Exception:
+        pass
 
 # fastapi + starlette (lots of lazy loading)
 _d, _b, _h = collect_all('fastapi')
@@ -87,7 +100,7 @@ except Exception as _e:
     print(f"[spec] essentia collection skipped: {_e}")
 
 # ── Optional AI packages (only if installed) ──────────────────────────────────
-for optional_pkg in ('torch', 'torchaudio', 'demucs', 'whisperx', 'whisper'):
+for optional_pkg in ('torch', 'torchaudio', 'demucs', 'whisperx', 'whisper', 'pyannote', 'pyannote.audio', 'pyannote.core', 'pyannote.database', 'pyannote.metrics', 'pyannote.pipeline', 'asteroid_filterbanks', 'speechbrain', 'faster_whisper', 'PIL', 'torchvision', 'transformers'):
     try:
         _d, _b, _h = collect_all(optional_pkg)
         datas += _d; binaries += _b; hiddenimports += _h
@@ -163,21 +176,29 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='backend',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir='/tmp/ultrastar-creator',  # fixed dir so PyInstaller reuses extracted files on re-launch
     console=True,   # Keep console so backend logs are visible
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='backend',
 )
