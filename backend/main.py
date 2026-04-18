@@ -237,7 +237,7 @@ async def setup_download():
 
         # ── ffmpeg ──
         if not status["ffmpeg"]:
-            yield send("progress", "ffmpeg", "ffmpeg not found — please install via Homebrew: brew install ffmpeg", error=True)
+            yield send("progress", "ffmpeg", "ffmpeg not found — please reinstall the app", error=True)
         else:
             yield send("done", "ffmpeg", "ffmpeg found")
 
