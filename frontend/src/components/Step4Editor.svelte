@@ -5591,6 +5591,22 @@
     border-radius: 2px;
     outline: none;
   }
+  .wave-height-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .wave-height-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    background: rgba(79, 195, 247, 0.25);
+    border-radius: 2px;
+  }
 
   .wave-height-overlay {
     position: absolute;
