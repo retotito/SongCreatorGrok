@@ -23,6 +23,23 @@ if [[ ! -x "$PYINSTALLER" ]]; then
   exit 1
 fi
 
+# ── Ensure ffmpeg is available for bundling ──────────────────────────────────
+if ! command -v ffmpeg &>/dev/null && [[ ! -f /opt/homebrew/bin/ffmpeg ]] && [[ ! -f /usr/local/bin/ffmpeg ]]; then
+  echo "→ ffmpeg not found — downloading static binary for bundling..."
+  FFMPEG_TMP="$SCRIPT_DIR/.ffmpeg_build"
+  mkdir -p "$FFMPEG_TMP"
+  if [[ "$ARCH" == "arm64" ]]; then
+    FFMPEG_URL="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+  else
+    FFMPEG_URL="https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+  fi
+  curl -L "$FFMPEG_URL" -o "$FFMPEG_TMP/ffmpeg.zip"
+  unzip -o "$FFMPEG_TMP/ffmpeg.zip" -d "$FFMPEG_TMP"
+  chmod +x "$FFMPEG_TMP/ffmpeg"
+  export PATH="$FFMPEG_TMP:$PATH"
+  echo "→ ffmpeg ready at $FFMPEG_TMP/ffmpeg"
+fi
+
 # ── Step 1: Build Python sidecar with PyInstaller ───────────────────────────
 echo "→ Building Python sidecar (this takes a few minutes)..."
 rm -rf dist-backend build/backend
