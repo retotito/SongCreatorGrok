@@ -3535,11 +3535,21 @@
 
       // Start MediaRecorder for voice capture
       try {
-        micRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus' });
+        // WKWebView (macOS/Tauri) doesn't support webm/opus — pick a supported format
+        const preferredTypes = [
+          'audio/webm;codecs=opus',
+          'audio/webm',
+          'audio/mp4',
+          'audio/ogg;codecs=opus',
+          'audio/ogg',
+          '',
+        ];
+        const mimeType = preferredTypes.find(t => t === '' || MediaRecorder.isTypeSupported(t));
+        micRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
         micRecordedChunks = [];
         micRecorder.ondataavailable = (e) => { if (e.data.size > 0) micRecordedChunks.push(e.data); };
         micRecorder.start(1000); // collect in 1s chunks
-        console.log('[Mic] MediaRecorder started');
+        console.log('[Mic] MediaRecorder started, mimeType:', micRecorder.mimeType);
       } catch (recErr) {
         console.warn('[Mic] MediaRecorder not available:', recErr);
         micRecorder = null;
