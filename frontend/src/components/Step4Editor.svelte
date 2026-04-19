@@ -2035,6 +2035,7 @@
     editorState.update(s => ({ ...s, hasChanges: true }));
     hasUnsavedChanges = true;
     notes = [...notes]; // trigger reactivity
+    updatePitchRange();
     draw();
   }
 
@@ -2171,8 +2172,9 @@
       dragGain = null;
     }
     if (dragAudioCtx) {
-      setTimeout(() => { try { dragAudioCtx.close(); } catch(e) {} }, 100);
+      const ctxToClose = dragAudioCtx;
       dragAudioCtx = null;
+      setTimeout(() => { try { ctxToClose.close().catch(() => {}); } catch(e) {} }, 100);
     }
     dragLastPitch = null;
   }
@@ -3166,6 +3168,7 @@
           }
         }
         markUnsaved();
+        updatePitchRange();
         draw();
       } else {
         if (e.code === 'ArrowLeft')  seekPlayback(e.shiftKey ? -1 : -5);
