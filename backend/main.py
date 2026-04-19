@@ -14,6 +14,16 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import sys
 
+# Fix SSL certificate verification on macOS when running as a frozen PyInstaller app.
+# Python bundles certifi but doesn't always point SSL_CERT_FILE at it automatically.
+try:
+    import certifi
+    _certifi_ca = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _certifi_ca)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi_ca)
+except ImportError:
+    pass
+
 
 def _fix_frozen_path():
     """When running as a PyInstaller frozen binary the macOS GUI launch environment
