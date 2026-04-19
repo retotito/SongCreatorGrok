@@ -342,8 +342,10 @@
     if (pitchNotes.length === 0) return;
     
     const pitches = pitchNotes.map(n => n.pitch);
-    minPitch = Math.min(...pitches) - 6;
-    maxPitch = Math.max(...pitches) + 6;
+    const notesMin = Math.min(...pitches);
+    const notesMax = Math.max(...pitches);
+    minPitch = Math.min(notesMin - 6, 36);
+    maxPitch = Math.max(notesMax + 6, 84);
     // Ensure at least 12 semitones visible (one octave)
     if (maxPitch - minPitch < 12) {
       const mid = (minPitch + maxPitch) / 2;
