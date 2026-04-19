@@ -118,7 +118,10 @@ try:
         if os.path.isdir(_essentia_dylib_dir):
             import glob as _glob
             for _lib in _glob.glob(os.path.join(_essentia_dylib_dir, '*.dylib')):
-                binaries += [(_lib, '.')]
+                # Exclude essentia's libav*/libsw*/libpostproc* — they conflict
+                # with the bundled Homebrew ffmpeg binary (different ABI version).
+                if not os.path.basename(_lib).startswith(('libav', 'libsw', 'libpostproc')):
+                    binaries += [(_lib, '.')]
     _d, _b, _h = collect_all('essentia')
     datas += _d; binaries += _b; hiddenimports += _h
 except Exception as _e:
