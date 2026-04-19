@@ -237,6 +237,41 @@ export function streamGenerate(sessionId, onEvent) {
   return es;
 }
 
+export async function startGenerate(sessionId) {
+  return request('POST', `/generate/start/${sessionId}`, null, false, false, null);
+}
+
+export async function pollGenerate(sessionId, onStatus, signal) {
+  // Start generation
+  await startGenerate(sessionId);
+  // Poll every 3s until done, error, or cancelled
+  return new Promise((resolve, reject) => {
+    let interval = setInterval(async () => {
+      if (signal && signal.aborted) {
+        clearInterval(interval);
+        reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        return;
+      }
+      try {
+        const data = await request('GET', `/generate/result/${sessionId}`);
+        if (onStatus) onStatus(data.current_status || data.status);
+        if (data.status === 'ok') {
+          clearInterval(interval);
+          resolve({ ...data, type: 'done' });
+        } else if (data.status === 'error') {
+          clearInterval(interval);
+          reject(new Error(data.message || 'Generation failed'));
+        } else if (data.status === 'cancelled') {
+          clearInterval(interval);
+          reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        }
+      } catch (e) {
+        // transient network error — keep polling
+      }
+    }, 3000);
+  });
+}
+
 export async function cancelGeneration(sessionId) {
   return request('POST', `/cancel/${sessionId}`, null, false, false, null).catch(() => {});
 }

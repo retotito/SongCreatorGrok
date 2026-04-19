@@ -1920,10 +1920,32 @@ def generate_ultrastar_files(session_id: str):
         }
     except Exception as e:
         session["status"] = "generation_failed"
+        session["error"] = str(e)
         log.error(f"Generation failed for session {session_id}: {e}")
         import traceback
         traceback.print_exc()
         raise ServiceError("Generation failed", str(e))
+
+
+@app.post("/api/generate/start/{session_id}", status_code=202)
+async def generate_start(session_id: str):
+    """Start generation in a background thread and return immediately (202 Accepted).
+    Poll /api/generate/result/{session_id} to check progress."""
+    import threading
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Avoid double-starting if already running
+    if session.get("status") == "generating":
+        return {"status": "already_running"}
+    def run_generation():
+        try:
+            generate_ultrastar_files(session_id)
+        except Exception:
+            pass
+    thread = threading.Thread(target=run_generation, daemon=True)
+    thread.start()
+    return {"status": "started"}
 
 
 @app.get("/api/generate-stream/{session_id}")
@@ -1979,6 +2001,10 @@ async def get_generation_result(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     
+    if session["status"] == "generation_failed":
+        return {"status": "error", "current_status": session["status"], "message": session.get("error", "Generation failed")}
+    if session["status"] == "cancelled":
+        return {"status": "cancelled", "current_status": session["status"]}
     if session["status"] != "generated":
         return {"status": "pending", "current_status": session["status"]}
     
