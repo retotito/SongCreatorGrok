@@ -4170,14 +4170,10 @@
       loadSessionNotes();
       loadFlags();
 
-      // Load waveform for the active audio source and initialize audioEl
+      // Load waveform for the active audio source
       const activeAudioUrl = audioSource === 'original' ? originalUrl : vocalUrl;
       if (activeAudioUrl) {
         loadWaveform(activeAudioUrl);
-        if (audioEl) {
-          audioEl.src = activeAudioUrl;
-          audioEl.load();
-        }
       }
 
       updatePitchRange();
@@ -4799,9 +4795,7 @@
   {/if}
 
   <!-- Hidden audio element for playback -->
-  {#if vocalUrl}
-    <audio bind:this={audioEl} src={vocalUrl} preload="auto"></audio>
-  {/if}
+  <audio bind:this={audioEl} src={vocalUrl || originalUrl} preload="auto"></audio>
 
   <div class="shortcut-bar">
     <div class="shortcut-group">
