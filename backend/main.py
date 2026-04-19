@@ -1132,8 +1132,10 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
             "char_timestamps": len(all_chars),
         })
     
-    except ImportError:
-        log_step("WHISPER", "WhisperX not available, falling back to vanilla Whisper...")
+    except ImportError as e:
+        import traceback
+        log_step("WHISPER", f"WhisperX ImportError: {e}, falling back to vanilla Whisper...")
+        log_step("WHISPER", traceback.format_exc())
     except Exception as e:
         import traceback
         log_step("WHISPERX", f"WhisperX failed: {e}, falling back to vanilla Whisper")
@@ -1200,7 +1202,10 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
             "char_timestamps": 0,
         })
         
-    except ImportError:
+    except ImportError as e:
+        import traceback
+        log_step("WHISPER", f"Vanilla Whisper ImportError: {e}")
+        log_step("WHISPER", traceback.format_exc())
         raise HTTPException(status_code=500, detail="Neither WhisperX nor Whisper installed. Run: pip install whisperx")
     except Exception as e:
         import traceback
