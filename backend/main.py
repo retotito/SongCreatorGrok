@@ -206,11 +206,27 @@ def _check_model_status() -> dict:
                 demucs_ok = True
                 break
 
+    # WhisperX wav2vec2 alignment model (English)
+    wav2vec2_ok = False
+    hf_hub = os.path.expanduser("~/.cache/huggingface/hub")
+    if os.path.isdir(hf_hub):
+        for entry in os.listdir(hf_hub):
+            if "wav2vec2" in entry.lower() or "wav2vec" in entry.lower():
+                wav2vec2_ok = True
+                break
+    # Fallback: check torch hub checkpoints
+    if not wav2vec2_ok and os.path.isdir(torch_hub):
+        for f in os.listdir(torch_hub):
+            if "wav2vec" in f.lower():
+                wav2vec2_ok = True
+                break
+
     return {
         "ffmpeg": ffmpeg_ok,
         "whisperx": whisperx_ok,
         "demucs": demucs_ok,
-        "ready": ffmpeg_ok and whisperx_ok and demucs_ok,
+        "wav2vec2": wav2vec2_ok,
+        "ready": ffmpeg_ok and whisperx_ok and demucs_ok and wav2vec2_ok,
     }
 
 
@@ -336,6 +352,32 @@ async def setup_download():
                 yield send("error", "demucs", f"Download failed: {e}")
         else:
             yield send("done", "demucs", "Demucs model already downloaded")
+
+        await asyncio.sleep(0.05)
+
+        # ── wav2vec2 alignment model ──
+        if not status.get("wav2vec2"):
+            yield send("progress", "wav2vec2", "Downloading wav2vec2 alignment model (~360 MB)…", percent=0)
+            await asyncio.sleep(0.05)
+            try:
+                def _download_wav2vec2():
+                    import whisperx
+                    align_model, align_metadata = whisperx.load_align_model(language_code="en", device="cpu")
+                    del align_model, align_metadata
+
+                loop = asyncio.get_event_loop()
+                fut = loop.run_in_executor(None, _download_wav2vec2)
+                while not fut.done():
+                    await asyncio.sleep(2.0)
+                    yield send("progress", "wav2vec2", "Downloading alignment model (~360 MB)…")
+                await fut
+                yield send("done", "wav2vec2", "Alignment model ready")
+            except ImportError:
+                yield send("done", "wav2vec2", "WhisperX not installed — skipping", error=True)
+            except Exception as e:
+                yield send("error", "wav2vec2", f"Download failed: {e}")
+        else:
+            yield send("done", "wav2vec2", "Alignment model already downloaded")
 
         await asyncio.sleep(0.05)
         import json

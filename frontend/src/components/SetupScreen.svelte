@@ -8,9 +8,10 @@
 
   // Step state: 'pending' | 'downloading' | 'done' | 'error' | 'skipped'
   let steps = {
-    ffmpeg:   { label: 'ffmpeg (audio tools)',   size: '',         state: 'pending', message: '', elapsed: 0, percent: null },
-    whisperx: { label: 'WhisperX speech model',  size: '~1.5 GB', state: 'pending', message: '', elapsed: 0, percent: null },
-    demucs:   { label: 'Demucs vocal model',      size: '~80 MB',  state: 'pending', message: '', elapsed: 0, percent: null },
+    ffmpeg:   { label: 'ffmpeg (audio tools)',        size: '',          state: 'pending', message: '', elapsed: 0, percent: null },
+    whisperx: { label: 'WhisperX speech model',       size: '~1.5 GB',  state: 'pending', message: '', elapsed: 0, percent: null },
+    demucs:   { label: 'Demucs vocal model',          size: '~80 MB',   state: 'pending', message: '', elapsed: 0, percent: null },
+    wav2vec2: { label: 'wav2vec2 alignment model',    size: '~360 MB',  state: 'pending', message: '', elapsed: 0, percent: null },
   };
 
   let downloading = false;
@@ -34,9 +35,10 @@
 
   // Pre-fill states from the initial status check
   $: if (status) {
-    if (status.ffmpeg)   steps.ffmpeg.state   = 'done';
-    if (status.whisperx) steps.whisperx.state = 'done';
-    if (status.demucs)   steps.demucs.state   = 'done';
+    if (status.ffmpeg)    steps.ffmpeg.state   = 'done';
+    if (status.whisperx)  steps.whisperx.state = 'done';
+    if (status.demucs)    steps.demucs.state   = 'done';
+    if (status.wav2vec2)  steps.wav2vec2.state = 'done';
     if (status.ready) allDone = true;
     steps = steps; // trigger reactivity
   }
