@@ -319,39 +319,45 @@
     if (e.key === 'Escape') showEditPopup = false;
   }
 
-  function downloadZip() {
+  async function downloadZip() {
     const url = getDownloadZipUrl($sessionId);
+    const blob = await fetch(url).then(r => r.blob());
     const a = document.createElement('a');
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = getBaseFilename() + '.zip';
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(a.href);
     exported = true;
   }
 
-  function downloadFile(type) {
+  async function downloadFile(type) {
     const url = getDownloadUrl($sessionId, type);
     const base = getBaseFilename();
     const extMap = { txt: '.txt', midi: '.mid', summary: '_summary.txt' };
+    const blob = await fetch(url).then(r => r.blob());
     const a = document.createElement('a');
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = base + (extMap[type] || '.txt');
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(a.href);
   }
 
-  function downloadAudio(type) {
+  async function downloadAudio(type) {
     const url = getAudioUrl($sessionId, type);
     const base = getBaseFilename();
     const suffix = type === 'vocals' ? ' [Vocals]' : '';
+    const blob = await fetch(url).then(r => r.blob());
     const a = document.createElement('a');
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = base + suffix;
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(a.href);
   }
 
   async function downloadAll() {
