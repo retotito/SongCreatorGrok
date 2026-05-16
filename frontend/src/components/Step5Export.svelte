@@ -8,6 +8,10 @@
   let showEditPopup = false;
   let editArtist = '';
   let editTitle = '';
+  let editGenre = '';
+  let editCreator = '';
+  let editVocals = '';
+  let editInstrumental = '';
   let saving = false;
 
   // ── Song Assets state ──────────────────────────
@@ -65,6 +69,11 @@
       if (meta?.video_filename) videoFilename = meta.video_filename;
       if (meta?.video_gap != null) videoGap = meta.video_gap;
       if (meta?.youtube_url) youtubeUrl = meta.youtube_url;
+      if (meta?.genre) editGenre = meta.genre;
+      if (meta?.creator) editCreator = meta.creator;
+      else if (!editCreator) editCreator = 'Ultrastar Creator Tool';
+      if (meta?.vocals_header) editVocals = meta.vocals_header;
+      if (meta?.instrumental_header) editInstrumental = meta.instrumental_header;
     } catch (_) {}
   }
 
@@ -274,7 +283,7 @@
     videoSaving = true;
     videoSaved = false;
     try {
-      await saveAssetsMeta($sessionId, videoFilename.trim(), videoGap, youtubeUrl.trim());
+      await saveAssetsMeta($sessionId, videoFilename.trim(), videoGap, youtubeUrl.trim(), editGenre.trim(), editCreator.trim(), editVocals.trim(), editInstrumental.trim());
       videoSaved = true;
       setTimeout(() => { videoSaved = false; }, 2000);
     } finally {
@@ -298,6 +307,7 @@
   function openEditPopup() {
     editArtist = $lyricsData?.artist || '';
     editTitle = $lyricsData?.title || '';
+    // editGenre, editCreator, editVocals, editInstrumental already loaded from assets
     showEditPopup = true;
   }
 
@@ -306,6 +316,16 @@
     try {
       await updateMetadata($sessionId, editArtist.trim(), editTitle.trim());
       lyricsData.update(d => ({ ...d, artist: editArtist.trim(), title: editTitle.trim() }));
+      await saveAssetsMeta(
+        $sessionId,
+        videoFilename.trim(),
+        videoGap,
+        youtubeUrl.trim(),
+        editGenre.trim(),
+        editCreator.trim(),
+        editVocals.trim(),
+        editInstrumental.trim()
+      );
       showEditPopup = false;
     } catch (e) {
       console.error('Failed to save metadata:', e);
@@ -665,6 +685,22 @@
         <div class="modal-field">
           <label for="edit-title">Title</label>
           <input id="edit-title" type="text" bind:value={editTitle} placeholder="Song title" on:keydown={handleEditKeydown} />
+        </div>
+        <div class="modal-field">
+          <label for="edit-genre">Genre</label>
+          <input id="edit-genre" type="text" bind:value={editGenre} placeholder="e.g. Pop, Rock, Jazz (optional)" />
+        </div>
+        <div class="modal-field">
+          <label for="edit-creator">Creator</label>
+          <input id="edit-creator" type="text" bind:value={editCreator} placeholder="e.g. Ultrastar Creator Tool" />
+        </div>
+        <div class="modal-field">
+          <label for="edit-vocals">Vocals file (#VOCALS)</label>
+          <input id="edit-vocals" type="text" bind:value={editVocals} placeholder="e.g. song_vocals.mp3 (auto-filled if Demucs ran)" />
+        </div>
+        <div class="modal-field">
+          <label for="edit-instrumental">Instrumental file (#INSTRUMENTAL)</label>
+          <input id="edit-instrumental" type="text" bind:value={editInstrumental} placeholder="e.g. song_no_vocals.mp3 (auto-filled if Demucs ran)" />
         </div>
         <div class="modal-actions">
           <button class="btn btn-secondary" on:click={() => showEditPopup = false}>Cancel</button>

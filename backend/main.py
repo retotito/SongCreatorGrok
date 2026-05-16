@@ -486,6 +486,8 @@ async def resume_specific_session(session_id: str):
 
     has_vocals = vocal is not None and os.path.exists(vocal)
     has_original = original is not None and os.path.exists(original)
+    instrumental = session.get("instrumental_audio")
+    has_instrumental = instrumental is not None and os.path.exists(instrumental)
 
     lyrics = session.get("lyrics", "")
     syllable_count = 0
@@ -505,11 +507,17 @@ async def resume_specific_session(session_id: str):
         "has_vocals": has_vocals,
         "vocals_filename": os.path.basename(vocal) if has_vocals else None,
         "has_original": has_original,
+        "has_instrumental": has_instrumental,
+        "instrumental_filename": os.path.basename(instrumental) if has_instrumental else None,
         "has_lyrics": bool(lyrics),
         "lyrics": lyrics,
         "artist": session.get("artist", "Unknown Artist"),
         "title": session.get("title", "Unknown Song"),
         "language": session.get("language", "en"),
+        "genre": session.get("genre", ""),
+        "creator": session.get("creator", ""),
+        "vocals_header": session.get("vocals_header", ""),
+        "instrumental_header": session.get("instrumental_header", ""),
         "syllable_count": syllable_count,
         "line_count": line_count,
         "has_result": session.get("result") is not None,
@@ -760,12 +768,18 @@ async def extract_vocals(session_id: str):
         # Run Demucs in a thread so the event loop (and other requests) stay responsive
         import asyncio
         loop = asyncio.get_event_loop()
-        vocal_path = await loop.run_in_executor(None, separate_vocals, audio_path, output_dir)
+        vocal_path, instrumental_path = await loop.run_in_executor(None, separate_vocals, audio_path, output_dir)
 
         if session.get("extract_cancelled"):
             raise HTTPException(status_code=499, detail="Extraction cancelled")
 
         session["vocal_audio"] = vocal_path
+        if instrumental_path:
+            session["instrumental_audio"] = instrumental_path
+            if not session.get("vocals_header"):
+                session["vocals_header"] = os.path.basename(vocal_path)
+            if not session.get("instrumental_header"):
+                session["instrumental_header"] = os.path.basename(instrumental_path)
         session["status"] = "vocals_extracted"
         save_session(session_id)
         
@@ -847,8 +861,14 @@ async def extract_vocals_stream(session_id: str):
             yield _send("error", str(exc))
             return
 
-        vocal_path = executor_future.result()
+        vocal_path, instrumental_path = executor_future.result()
         session["vocal_audio"] = vocal_path
+        if instrumental_path:
+            session["instrumental_audio"] = instrumental_path
+            if not session.get("vocals_header"):
+                session["vocals_header"] = os.path.basename(vocal_path)
+            if not session.get("instrumental_header"):
+                session["instrumental_header"] = os.path.basename(instrumental_path)
         session["status"] = "vocals_extracted"
         save_session(session_id)
         log_step("SEPARATE", f"Session {session_id}: vocals extracted via SSE stream")
@@ -2457,6 +2477,30 @@ def _update_txt_asset_headers(session: dict) -> None:
     else:
         content = _remove_header(content, "YOUTUBE")
 
+    genre = session.get("genre", "").strip()
+    if genre:
+        content = _set_header(content, "GENRE", genre)
+    else:
+        content = _remove_header(content, "GENRE")
+
+    creator = session.get("creator", "").strip()
+    if creator:
+        content = _set_header(content, "CREATOR", creator)
+    else:
+        content = _remove_header(content, "CREATOR")
+
+    vocals_header = session.get("vocals_header", "").strip()
+    if vocals_header:
+        content = _set_header(content, "VOCALS", vocals_header)
+    else:
+        content = _remove_header(content, "VOCALS")
+
+    instrumental_header = session.get("instrumental_header", "").strip()
+    if instrumental_header:
+        content = _set_header(content, "INSTRUMENTAL", instrumental_header)
+    else:
+        content = _remove_header(content, "INSTRUMENTAL")
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     result["ultrastar_content"] = content
@@ -2564,7 +2608,7 @@ async def delete_bgimage(session_id: str):
 
 @app.get("/api/assets/{session_id}")
 async def get_assets_meta(session_id: str):
-    """Return stored video filename, gap and youtube url for the session."""
+    """Return stored video filename, gap, youtube url, and song metadata for the session."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2572,12 +2616,16 @@ async def get_assets_meta(session_id: str):
         "video_filename": session.get("video_filename", ""),
         "video_gap": session.get("video_gap", 0),
         "youtube_url": session.get("youtube_url", ""),
+        "genre": session.get("genre", ""),
+        "creator": session.get("creator", ""),
+        "vocals_header": session.get("vocals_header", ""),
+        "instrumental_header": session.get("instrumental_header", ""),
     }
 
 
 @app.post("/api/assets/{session_id}")
 async def save_assets_meta(session_id: str, request: Request):
-    """Save video filename and optional video gap for the session."""
+    """Save video filename, optional video gap, youtube url, and song metadata for the session."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2585,6 +2633,11 @@ async def save_assets_meta(session_id: str, request: Request):
     video_filename = (body.get("video_filename") or "").strip()
     video_gap = body.get("video_gap")
     youtube_url = (body.get("youtube_url") or "").strip()
+    genre = (body.get("genre") or "").strip()
+    creator = (body.get("creator") or "").strip()
+    vocals_header = (body.get("vocals_header") or "").strip()
+    instrumental_header = (body.get("instrumental_header") or "").strip()
+
     if video_filename:
         session["video_filename"] = video_filename
     else:
@@ -2600,9 +2653,26 @@ async def save_assets_meta(session_id: str, request: Request):
         session["youtube_url"] = youtube_url
     else:
         session.pop("youtube_url", None)
+    if genre:
+        session["genre"] = genre
+    else:
+        session.pop("genre", None)
+    if creator:
+        session["creator"] = creator
+    else:
+        session.pop("creator", None)
+    if vocals_header:
+        session["vocals_header"] = vocals_header
+    else:
+        session.pop("vocals_header", None)
+    if instrumental_header:
+        session["instrumental_header"] = instrumental_header
+    else:
+        session.pop("instrumental_header", None)
+
     save_session(session_id)
     _update_txt_asset_headers(session)
-    log_step("ASSETS", f"Video meta saved for session {session_id}: video={video_filename!r} youtube={youtube_url!r}")
+    log_step("ASSETS", f"Assets meta saved for session {session_id}: video={video_filename!r} genre={genre!r} creator={creator!r}")
     return {"status": "ok"}
 
 
@@ -2703,6 +2773,12 @@ async def download_zip(session_id: str):
         if vocal_path and os.path.exists(vocal_path):
             ext = os.path.splitext(vocal_path)[1]
             zf.write(vocal_path, f"{base} [Vocals]{ext}")
+
+        # Instrumental audio (no_vocals from Demucs)
+        instrumental_path = session.get("instrumental_audio")
+        if instrumental_path and os.path.exists(instrumental_path):
+            ext = os.path.splitext(instrumental_path)[1]
+            zf.write(instrumental_path, f"{base} [Instrumental]{ext}")
 
         # Original audio
         original_path = session.get("original_audio")

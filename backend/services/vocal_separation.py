@@ -117,6 +117,7 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
         song_name = os.path.splitext(os.path.basename(demucs_input))[0]
         
         vocal_path = None
+        no_vocal_path = None
         all_files = []
         for root, dirs, files in os.walk(temp_dir):
             for f in sorted(files):
@@ -126,17 +127,27 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
                 # Match exactly 'vocals.mp3' or 'vocals.wav' — NOT 'no_vocals.mp3'
                 if f.lower().startswith("vocals."):
                     vocal_path = full_path
+                elif f.lower().startswith("no_vocals."):
+                    no_vocal_path = full_path
         
         log_step("SEPARATE", f"All Demucs files: {all_files}")
         log_step("SEPARATE", f"Selected vocal file: {vocal_path}")
+        log_step("SEPARATE", f"Selected instrumental file: {no_vocal_path}")
         
         if vocal_path is None:
             raise RuntimeError(f"Demucs did not produce a vocals file. Files found: {all_files}")
         
-        # Copy to output directory, preserving the actual extension
+        # Copy vocals to output directory
         ext = os.path.splitext(vocal_path)[1] or ".wav"
         output_path = os.path.join(output_dir, f"{song_name}_vocals{ext}")
         shutil.copy2(vocal_path, output_path)
+
+        # Copy instrumental (no_vocals) to output directory if available
+        instrumental_output_path = None
+        if no_vocal_path:
+            no_ext = os.path.splitext(no_vocal_path)[1] or ".wav"
+            instrumental_output_path = os.path.join(output_dir, f"{song_name}_no_vocals{no_ext}")
+            shutil.copy2(no_vocal_path, instrumental_output_path)
         
-        log_step("SEPARATE", f"Vocals extracted: {output_path} (from {os.path.basename(vocal_path)})")
-        return output_path
+        log_step("SEPARATE", f"Vocals extracted: {output_path}")
+        return output_path, instrumental_output_path
