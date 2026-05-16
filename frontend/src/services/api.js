@@ -311,10 +311,11 @@ export function getDownloadZipUrl(sessionId) {
   return `${BASE}/download-zip/${sessionId}`;
 }
 
-export async function updateMetadata(sessionId, artist, title) {
+export async function updateMetadata(sessionId, artist, title, language) {
   const form = new FormData();
   form.append('artist', artist);
   form.append('title', title);
+  if (language !== undefined) form.append('language', language);
   return request('PATCH', `/session/${sessionId}/metadata`, form, true);
 }
 
@@ -351,12 +352,14 @@ export async function getAssetsMeta(sessionId) {
   return request('GET', `/assets/${sessionId}`, null, false, true);
 }
 
-export async function saveAssetsMeta(sessionId, videoFilename, videoGap, youtubeUrl, genre, creator, vocalsHeader, instrumentalHeader) {
+export async function saveAssetsMeta(sessionId, videoFilename, videoGap, youtubeUrl, genre, year, edition, creator, vocalsHeader, instrumentalHeader) {
   return request('POST', `/assets/${sessionId}`, {
     video_filename: videoFilename,
     video_gap: videoGap,
     youtube_url: youtubeUrl,
     genre: genre ?? '',
+    year: year ?? '',
+    edition: edition ?? '',
     creator: creator ?? '',
     vocals_header: vocalsHeader ?? '',
     instrumental_header: instrumentalHeader ?? '',

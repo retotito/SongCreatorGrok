@@ -8,11 +8,17 @@
   let showEditPopup = false;
   let editArtist = '';
   let editTitle = '';
+  let editLanguage = '';
   let editGenre = '';
+  let editYear = '';
+  let editEdition = '';
   let editCreator = '';
   let editVocals = '';
   let editInstrumental = '';
   let saving = false;
+
+  // Clear editVocals when vocal audio is deleted
+  $: if (!$uploadData?.hasVocals) editVocals = '';
 
   // ── Song Assets state ──────────────────────────
   const COVER_DISPLAY = 340;
@@ -70,10 +76,12 @@
       if (meta?.video_gap != null) videoGap = meta.video_gap;
       if (meta?.youtube_url) youtubeUrl = meta.youtube_url;
       if (meta?.genre) editGenre = meta.genre;
+      if (meta?.year) editYear = meta.year;
+      if (meta?.edition) editEdition = meta.edition;
       if (meta?.creator) editCreator = meta.creator;
       else if (!editCreator) editCreator = 'Ultrastar Creator Tool';
-      if (meta?.vocals_header) editVocals = meta.vocals_header;
-      if (meta?.instrumental_header) editInstrumental = meta.instrumental_header;
+      if (meta?.vocals_header != null) editVocals = meta.vocals_header;
+      if (meta?.instrumental_header != null) editInstrumental = meta.instrumental_header;
     } catch (_) {}
   }
 
@@ -283,7 +291,7 @@
     videoSaving = true;
     videoSaved = false;
     try {
-      await saveAssetsMeta($sessionId, videoFilename.trim(), videoGap, youtubeUrl.trim(), editGenre.trim(), editCreator.trim(), editVocals.trim(), editInstrumental.trim());
+      await saveAssetsMeta($sessionId, videoFilename.trim(), videoGap, youtubeUrl.trim(), editGenre.trim(), editYear.trim(), editEdition.trim(), editCreator.trim(), editVocals.trim(), editInstrumental.trim());
       videoSaved = true;
       setTimeout(() => { videoSaved = false; }, 2000);
     } finally {
@@ -304,9 +312,16 @@
     return 'Untitled Song';
   }
 
+  const LANG_NAMES = {en:'English',de:'German',fr:'French',es:'Spanish',it:'Italian',pt:'Portuguese',nl:'Dutch',pl:'Polish',ru:'Russian',ja:'Japanese',ko:'Korean',zh:'Chinese',sv:'Swedish',no:'Norwegian',da:'Danish',fi:'Finnish',tr:'Turkish',ar:'Arabic',cs:'Czech',sk:'Slovak',hu:'Hungarian',ro:'Romanian',hr:'Croatian',uk:'Ukrainian',he:'Hebrew'};
+
   function openEditPopup() {
     editArtist = $lyricsData?.artist || '';
     editTitle = $lyricsData?.title || '';
+    const lang = $lyricsData?.language || '';
+    editLanguage = LANG_NAMES[lang] || lang;
+    editGenre = editGenre; // already loaded
+    editYear = editYear;
+    editEdition = editEdition;
     // editGenre, editCreator, editVocals, editInstrumental already loaded from assets
     showEditPopup = true;
   }
@@ -314,14 +329,16 @@
   async function saveMetadata() {
     saving = true;
     try {
-      await updateMetadata($sessionId, editArtist.trim(), editTitle.trim());
-      lyricsData.update(d => ({ ...d, artist: editArtist.trim(), title: editTitle.trim() }));
+      await updateMetadata($sessionId, editArtist.trim(), editTitle.trim(), editLanguage.trim());
+      lyricsData.update(d => ({ ...d, artist: editArtist.trim(), title: editTitle.trim(), language: editLanguage.trim() }));
       await saveAssetsMeta(
         $sessionId,
         videoFilename.trim(),
         videoGap,
         youtubeUrl.trim(),
         editGenre.trim(),
+        editYear.trim(),
+        editEdition.trim(),
         editCreator.trim(),
         editVocals.trim(),
         editInstrumental.trim()
@@ -455,6 +472,37 @@
           <span class="label">Notes</span>
           <span class="value">{$generationResult.syllable_count}</span>
         </div>
+        {#if $lyricsData?.language}
+          <div class="summary-item">
+            <span class="label">Language</span>
+            <span class="value">{LANG_NAMES[$lyricsData.language] || $lyricsData.language}</span>
+          </div>
+        {/if}
+        {#if editGenre}
+          <div class="summary-item">
+            <span class="label">Genre</span>
+            <span class="value">{editGenre}</span>
+          </div>
+        {/if}
+        {#if editYear}
+          <div class="summary-item">
+            <span class="label">Year</span>
+            <span class="value">{editYear}</span>
+          </div>
+        {/if}
+        {#if editEdition}
+          <div class="summary-item">
+            <span class="label">Edition</span>
+            <span class="value">{editEdition}</span>
+          </div>
+        {/if}
+        {#if editCreator}
+          <div class="summary-item">
+            <span class="label">Creator</span>
+            <span class="value">{editCreator}</span>
+          </div>
+        {/if}
+
       </div>
     </div>
 
@@ -548,6 +596,49 @@
                 {videoSaved ? '✓ Saved' : 'Save'}
               </button>
             </div>
+          </div>
+        </div>
+
+        <!-- Instrumental file (#INSTRUMENTAL) -->
+        <div class="asset-row">
+          <span class="asset-label">Instrumental</span>
+          <div class="video-inputs">
+            <div class="video-input-row">
+              <input class="video-filename-input" style="margin-right:10px" type="text" bind:value={editInstrumental} placeholder="e.g. Artist - Title [Instrumental].mp3" />
+              <button class="asset-save-btn" on:click={saveVideoMeta} disabled={videoSaving}>{videoSaved ? '✓' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Full Mix audio (read-only display) -->
+        <div class="asset-row">
+          <span class="asset-label">Full Mix</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            {#if $uploadData?.hasOriginal}
+              <span class="asset-value">{$uploadData.filename}</span>
+            {:else}
+              <small style="color:#f0a500;font-size:0.72rem">
+                💡 No audio uploaded yet. Go to
+                <button class="link-btn" on:click={() => currentStep.set(2)}>Step 2</button>
+                to upload a file.
+              </small>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Vocals file (read-only display) -->
+        <div class="asset-row">
+          <span class="asset-label">Vocals</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            {#if $uploadData?.hasVocals && editVocals}
+              <span class="asset-value">{editVocals}</span>
+            {:else}
+              <small style="color:#f0a500;font-size:0.72rem">
+                💡 No vocals yet. Go to
+                <button class="link-btn" on:click={() => currentStep.set(2)}>Step 2</button>
+                to upload or separate vocals.
+              </small>
+            {/if}
           </div>
         </div>
       </div>
@@ -687,20 +778,24 @@
           <input id="edit-title" type="text" bind:value={editTitle} placeholder="Song title" on:keydown={handleEditKeydown} />
         </div>
         <div class="modal-field">
+          <label for="edit-language">Language</label>
+          <input id="edit-language" type="text" bind:value={editLanguage} placeholder="e.g. en, de, fr" />
+        </div>
+        <div class="modal-field">
           <label for="edit-genre">Genre</label>
           <input id="edit-genre" type="text" bind:value={editGenre} placeholder="e.g. Pop, Rock, Jazz (optional)" />
         </div>
         <div class="modal-field">
+          <label for="edit-year">Year</label>
+          <input id="edit-year" type="text" bind:value={editYear} placeholder="e.g. 2000 (optional)" />
+        </div>
+        <div class="modal-field">
+          <label for="edit-edition">Edition</label>
+          <input id="edit-edition" type="text" bind:value={editEdition} placeholder="e.g. SingStar PopHit (optional)" />
+        </div>
+        <div class="modal-field">
           <label for="edit-creator">Creator</label>
           <input id="edit-creator" type="text" bind:value={editCreator} placeholder="e.g. Ultrastar Creator Tool" />
-        </div>
-        <div class="modal-field">
-          <label for="edit-vocals">Vocals file (#VOCALS)</label>
-          <input id="edit-vocals" type="text" bind:value={editVocals} placeholder="e.g. song_vocals.mp3 (auto-filled if Demucs ran)" />
-        </div>
-        <div class="modal-field">
-          <label for="edit-instrumental">Instrumental file (#INSTRUMENTAL)</label>
-          <input id="edit-instrumental" type="text" bind:value={editInstrumental} placeholder="e.g. song_no_vocals.mp3 (auto-filled if Demucs ran)" />
         </div>
         <div class="modal-actions">
           <button class="btn btn-secondary" on:click={() => showEditPopup = false}>Cancel</button>
@@ -755,12 +850,12 @@
 
   .summary-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 0.75rem;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem 1.5rem;
   }
 
   .summary-item {
-    text-align: center;
+    text-align: left;
   }
 
   .summary-item.wide {
@@ -1145,6 +1240,21 @@
   }
   .asset-save-btn:hover:not(:disabled) { background: #2ea043; }
   .asset-save-btn:disabled { opacity: 0.5; cursor: default; }
+  .link-btn {
+    background: none;
+    border: none;
+    color: #58a6ff;
+    cursor: pointer;
+    padding: 0;
+    font-size: inherit;
+    text-decoration: underline;
+  }
+  .link-btn:hover { color: #79c0ff; }
+  .asset-value {
+    font-size: 0.88rem;
+    color: #ccc;
+    word-break: break-all;
+  }
 
   /* ── Crop modal ───────────────────────────── */
   .crop-modal {

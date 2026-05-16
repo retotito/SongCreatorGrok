@@ -515,6 +515,8 @@ async def resume_specific_session(session_id: str):
         "title": session.get("title", "Unknown Song"),
         "language": session.get("language", "en"),
         "genre": session.get("genre", ""),
+        "year": session.get("year", ""),
+        "edition": session.get("edition", ""),
         "creator": session.get("creator", ""),
         "vocals_header": session.get("vocals_header", ""),
         "instrumental_header": session.get("instrumental_header", ""),
@@ -570,6 +572,9 @@ async def import_ultrastar(
     artist = headers.get("ARTIST", "Unknown Artist")
     title = headers.get("TITLE", "Unknown Song")
     language = headers.get("LANGUAGE", "en")
+    genre = headers.get("GENRE", "")
+    year = headers.get("YEAR", "")
+    edition = headers.get("EDITION", "")
 
     # Save audio files
     session_id = str(uuid.uuid4())[:8]
@@ -632,6 +637,9 @@ async def import_ultrastar(
         "artist": artist,
         "title": title,
         "language": language,
+        "genre": genre,
+        "year": year,
+        "edition": edition,
         "status": "generated",
         "created_at": time.time(),
         "imported": True,
@@ -897,6 +905,8 @@ async def upload_corrected_vocals(session_id: str, vocals: UploadFile = File(...
     
     session["vocal_audio"] = vocal_path
     session["status"] = "vocals_extracted"
+    if not session.get("vocals_header"):
+        session["vocals_header"] = os.path.basename(vocal_path)
     
     log_step("UPLOAD", f"Session {session_id}: uploaded corrected vocals ({len(content)} bytes)")
     save_session(session_id)
@@ -946,6 +956,7 @@ async def delete_audio(session_id: str, audio_type: str):
         if path and os.path.exists(path):
             os.remove(path)
         session["vocal_audio"] = None
+        session["vocals_header"] = ""
         session["status"] = "uploaded" if session.get("original_audio") else "created"
         log_step("DELETE", f"Session {session_id}: deleted vocals")
     else:
@@ -2295,14 +2306,16 @@ async def export_with_corrections(
 
 
 @app.patch("/api/session/{session_id}/metadata")
-async def update_metadata(session_id: str, artist: str = Form(...), title: str = Form(...)):
-    """Update artist/title in session and rewrite the .txt file headers."""
+async def update_metadata(session_id: str, artist: str = Form(...), title: str = Form(...), language: str = Form(None)):
+    """Update artist/title/language in session and rewrite the .txt file headers."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     session["artist"] = artist
     session["title"] = title
+    if language is not None:
+        session["language"] = language
     save_session(session_id)
 
     # Rewrite headers in the .txt file on disk
@@ -2324,14 +2337,16 @@ async def update_metadata(session_id: str, artist: str = Form(...), title: str =
                 content = re.sub(r"^#TITLE:.*$", f"#TITLE:{title}", content, count=1, flags=re.MULTILINE)
                 content = re.sub(r"^#ARTIST:.*$", f"#ARTIST:{artist}", content, count=1, flags=re.MULTILINE)
                 content = re.sub(r"^#MP3:.*$", f"#MP3:{artist} - {title}{_ext}", content, count=1, flags=re.MULTILINE)
+                if language:
+                    content = re.sub(r"^#LANGUAGE:.*$", f"#LANGUAGE:{language}", content, count=1, flags=re.MULTILINE)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
                 log_step("METADATA", f"Updated headers in {fname}")
             except Exception as e:
                 log_step("METADATA", f"Failed to update {fname}: {e}")
 
-    log_step("METADATA", f"Session {session_id}: artist='{artist}', title='{title}'")
-    return {"status": "ok", "artist": artist, "title": title}
+    log_step("METADATA", f"Session {session_id}: artist='{artist}', title='{title}', language='{language}'")
+    return {"status": "ok", "artist": artist, "title": title, "language": language}
 
 
 @app.get("/api/download/{session_id}/{file_type}")
@@ -2483,19 +2498,47 @@ def _update_txt_asset_headers(session: dict) -> None:
     else:
         content = _remove_header(content, "GENRE")
 
+    year = session.get("year", "").strip()
+    if year:
+        content = _set_header(content, "YEAR", year)
+    else:
+        content = _remove_header(content, "YEAR")
+
+    edition = session.get("edition", "").strip()
+    if edition:
+        content = _set_header(content, "EDITION", edition)
+    else:
+        content = _remove_header(content, "EDITION")
+
     creator = session.get("creator", "").strip()
     if creator:
         content = _set_header(content, "CREATOR", creator)
     else:
         content = _remove_header(content, "CREATOR")
 
+    vocal_audio = session.get("vocal_audio")
     vocals_header = session.get("vocals_header", "").strip()
+    # If no custom header or header is just the raw internal filename, derive archive name
+    if vocal_audio:
+        raw_vocals_name = os.path.basename(vocal_audio)
+        ext = os.path.splitext(vocal_audio)[1]
+        computed_vocals = f"{base} [Vocals]{ext}"
+        if not vocals_header or vocals_header == raw_vocals_name:
+            vocals_header = computed_vocals
     if vocals_header:
         content = _set_header(content, "VOCALS", vocals_header)
     else:
         content = _remove_header(content, "VOCALS")
 
+    instrumental_audio = session.get("instrumental_audio")
     instrumental_header = session.get("instrumental_header", "").strip()
+    # Same logic for instrumental
+    if instrumental_audio:
+        raw_instrumental_name = os.path.basename(instrumental_audio)
+        ext_i = os.path.splitext(instrumental_audio)[1]
+        computed_instrumental = f"{base} [Instrumental]{ext_i}"
+        if not instrumental_header or instrumental_header == raw_instrumental_name:
+            instrumental_header = computed_instrumental
     if instrumental_header:
         content = _set_header(content, "INSTRUMENTAL", instrumental_header)
     else:
@@ -2612,14 +2655,43 @@ async def get_assets_meta(session_id: str):
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    vocal = session.get("vocal_audio")
+    instrumental = session.get("instrumental_audio")
+    artist = session.get("artist", "").strip()
+    title_val = session.get("title", "").strip()
+    if artist and title_val:
+        base = f"{artist} - {title_val}"
+    elif title_val:
+        base = title_val
+    elif artist:
+        base = artist
+    else:
+        base = "Untitled Song"
+
+    def _archive_name(audio_path, suffix):
+        if not audio_path:
+            return ""
+        ext = os.path.splitext(audio_path)[1]
+        return f"{base} [{suffix}]{ext}"
+
+    stored_vocals = session.get("vocals_header", "")
+    raw_vocals = os.path.basename(vocal) if vocal else ""
+    vocals_header = stored_vocals if (stored_vocals and stored_vocals != raw_vocals) else (_archive_name(vocal, "Vocals") if vocal else stored_vocals)
+
+    stored_instr = session.get("instrumental_header", "")
+    raw_instr = os.path.basename(instrumental) if instrumental else ""
+    instrumental_header = stored_instr if (stored_instr and stored_instr != raw_instr) else (_archive_name(instrumental, "Instrumental") if instrumental else stored_instr)
+
     return {
         "video_filename": session.get("video_filename", ""),
         "video_gap": session.get("video_gap", 0),
         "youtube_url": session.get("youtube_url", ""),
         "genre": session.get("genre", ""),
+        "year": session.get("year", ""),
+        "edition": session.get("edition", ""),
         "creator": session.get("creator", ""),
-        "vocals_header": session.get("vocals_header", ""),
-        "instrumental_header": session.get("instrumental_header", ""),
+        "vocals_header": vocals_header,
+        "instrumental_header": instrumental_header,
     }
 
 
@@ -2634,6 +2706,8 @@ async def save_assets_meta(session_id: str, request: Request):
     video_gap = body.get("video_gap")
     youtube_url = (body.get("youtube_url") or "").strip()
     genre = (body.get("genre") or "").strip()
+    year = (body.get("year") or "").strip()
+    edition = (body.get("edition") or "").strip()
     creator = (body.get("creator") or "").strip()
     vocals_header = (body.get("vocals_header") or "").strip()
     instrumental_header = (body.get("instrumental_header") or "").strip()
@@ -2657,6 +2731,14 @@ async def save_assets_meta(session_id: str, request: Request):
         session["genre"] = genre
     else:
         session.pop("genre", None)
+    if year:
+        session["year"] = year
+    else:
+        session.pop("year", None)
+    if edition:
+        session["edition"] = edition
+    else:
+        session.pop("edition", None)
     if creator:
         session["creator"] = creator
     else:

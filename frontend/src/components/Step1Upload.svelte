@@ -129,7 +129,7 @@
     try {
       await deleteAudio($sessionId, type);
       if (type === 'original') {
-        uploadData.update(d => ({ ...d, hasOriginal: false }));
+        uploadData.update(d => ({ ...d, hasOriginal: false, filename: null }));
       } else {
         uploadData.update(d => ({ ...d, hasVocals: false, vocalUrl: null }));
       }
