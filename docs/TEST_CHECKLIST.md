@@ -6,6 +6,7 @@ Legend: ⏳ not tested · ✅ pass · ❌ fail
 
 ## Bohning's requested fixes (next update)
 
+- [✅] Suport for m4a files
 - [✅] BPM should be multiplied until above 200 (e.g. 100 BPM → 400, not 200)
 - [✅] `#LANGUAGE` should use full English name (e.g. `English`, not `en`)
 - [✅] Empty line between header and notes in .txt (when no video file)
