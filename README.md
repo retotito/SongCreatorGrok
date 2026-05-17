@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v2.0.4** — Custom app icon, negative beat support, metronome divisor, CRLF import fix, m4a support, and more. See [Changelog](#changelog) below.
+> **Latest release: v2.0.5** — Audio compatibility fix (44.1kHz MP3 normalisation), session cleanup improvements, ZIP/download checkbox UI overhaul, and instrumental track support. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -207,6 +207,15 @@ npm run dev
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
 ## Changelog
+
+### v2.0.5
+- **Audio normalisation on upload** — all uploaded audio (m4a, wav, flac, …) is converted to 44 100 Hz MP3 at upload time, ensuring playback compatibility with QuickTime and Apple Music
+- **Session cleanup** — deleting a session now removes *all* generated files across multiple generation runs (tracked via `generated_files` list), plus session-prefixed mic trail, mic audio, and comparison files
+- **ZIP export checkboxes in asset rows** — Vocals, Instrumental, Summary, and MIDI checkboxes are now inline with each asset row instead of a separate options panel
+- **Instrumental download button** — a dedicated download button for the instrumental track is available in the export grid
+- **"All Files Individual" respects checkboxes** — the bulk download button honours the Vocals / Instrumental / Summary / MIDI include flags
+- **`subprocess` import fix** — fixed a `NameError` that silently prevented audio normalisation from running
+- **ffprobe bundled** — ffprobe is now bundled alongside ffmpeg in the PyInstaller sidecar
 
 ### v2.0.4
 - **Custom app icon** — new branded 1024×1024 icon (with padding) used across macOS, Windows, Android, and iOS builds
