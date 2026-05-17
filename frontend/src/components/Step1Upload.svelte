@@ -34,8 +34,8 @@
     processingStatus.set('Uploading full mix…');
     try {
       if ($sessionId) {
-        await uploadMixAudio($sessionId, file);
-        uploadData.update(d => ({ ...d, filename: file.name, hasOriginal: true }));
+        const mixResult = await uploadMixAudio($sessionId, file);
+        uploadData.update(d => ({ ...d, filename: mixResult.filename || file.name, hasOriginal: true }));
       } else {
         const result = await uploadAudio(file);
         sessionId.set(result.session_id);

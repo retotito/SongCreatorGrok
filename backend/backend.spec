@@ -103,6 +103,21 @@ else:
     else:
         print("[spec] WARNING: ffmpeg not found — it will not be bundled")
 
+# ── Bundle ffprobe alongside ffmpeg (needed for sample rate detection) ────────
+_ffprobe_bin = _shutil.which('ffprobe')
+if _ffprobe_bin:
+    binaries += [(_ffprobe_bin, '.')]
+    print(f"[spec] bundling ffprobe from {_ffprobe_bin}")
+else:
+    _ffprobe_search = [p.replace('ffmpeg', 'ffprobe') for p in _ffmpeg_search]
+    for _p in _ffprobe_search:
+        if os.path.isfile(_p):
+            binaries += [(_p, '.')]
+            print(f"[spec] bundling ffprobe from {_p}")
+            break
+    else:
+        print("[spec] WARNING: ffprobe not found — sample rate normalization may be skipped")
+
 # ── essentia (BPM detection) + its bundled SDL/ffmpeg dylibs ─────────────────
 # essentia ships its own .dylibs folder (SDL 1.2, SDL2, libavcodec, …).
 # PyInstaller only auto-discovers load-time dependencies, so libSDL2-2.0.0.dylib

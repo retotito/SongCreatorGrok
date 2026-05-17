@@ -49,6 +49,7 @@ import time
 import json
 import uuid
 import shutil
+import subprocess
 import tempfile
 from typing import Optional
 
@@ -457,14 +458,36 @@ async def delete_session_endpoint(session_id: str):
     if os.path.isdir(upload_dir):
         shutil.rmtree(upload_dir, ignore_errors=True)
 
-    # Remove generated files
+    # Remove generated files tracked in result
     result = session.get("result", {})
+    tracked = set()
     for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
         fname = result.get(key) if isinstance(result, dict) else None
         if fname:
-            fpath = os.path.join(DOWNLOADS_DIR, fname)
-            if os.path.exists(fpath):
+            tracked.add(fname)
+    # Also remove all filenames accumulated across multiple generation runs
+    for fname in session.get("generated_files", []):
+        tracked.add(fname)
+    for fname in tracked:
+        fpath = os.path.join(DOWNLOADS_DIR, fname)
+        if os.path.exists(fpath):
+            os.remove(fpath)
+
+    # Remove orphaned downloads: files prefixed with session_id or session_id[:8]
+    # Covers mic_trail_*, mic_audio_* (prefixed with session_id[:8])
+    # Also covers song_*, pitches_*, summary_* from prior generation runs
+    import glob as _glob
+    short_id = session_id[:8]
+    for pattern in (
+        f"mic_trail_{short_id}_*",
+        f"mic_audio_{short_id}_*",
+        f"comparison_ms_ref_{short_id}_*",
+    ):
+        for fpath in _glob.glob(os.path.join(DOWNLOADS_DIR, pattern)):
+            try:
                 os.remove(fpath)
+            except OSError:
+                pass
 
     del sessions[session_id]
     log_step("SESSION", f"Deleted session {session_id}")
@@ -525,6 +548,48 @@ async def resume_specific_session(session_id: str):
         "has_result": session.get("result") is not None,
         "result": session.get("result"),
     }))
+
+
+def _normalize_audio_to_mp3(file_path: str, orig_filename: str) -> tuple[str, str]:
+    """Ensure audio file is a 44100 Hz MP3. Converts in-place if needed.
+    Returns (final_file_path, final_filename)."""
+    try:
+        orig_ext = os.path.splitext(orig_filename)[1].lower()
+        needs_convert = orig_ext != '.mp3'
+
+        if not needs_convert:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_streams", "-print_format", "json", file_path],
+                capture_output=True, text=True, timeout=30
+            )
+            probe_data = json.loads(probe.stdout)
+            sample_rate = int(probe_data["streams"][0].get("sample_rate", 44100))
+            needs_convert = sample_rate != 44100
+            if needs_convert:
+                log_step("UPLOAD", f"MP3 at {sample_rate}Hz — re-encoding to 44100Hz")
+
+        if needs_convert:
+            mp3_filename = os.path.splitext(orig_filename)[0] + ".mp3"
+            mp3_path = os.path.join(os.path.dirname(file_path), mp3_filename)
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", file_path, "-ar", "44100", "-ac", "2",
+                 "-codec:a", "libmp3lame", "-q:a", "2", mp3_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0 and os.path.exists(mp3_path):
+                if orig_ext != '.mp3':
+                    os.remove(file_path)
+                else:
+                    os.replace(mp3_path, file_path)
+                    mp3_path = file_path
+                    mp3_filename = orig_filename
+                log_step("UPLOAD", f"Converted → 44100Hz MP3: {mp3_filename}")
+                return mp3_path, mp3_filename
+            else:
+                log_step("UPLOAD", f"Conversion failed, keeping original: {result.stderr[:200]}")
+    except Exception as _e:
+        log_step("UPLOAD", f"Audio normalization skipped: {_e}")
+    return file_path, orig_filename
 
 
 @app.post("/api/import")
@@ -590,6 +655,7 @@ async def import_ultrastar(
         audio_bytes = await audio_file.read()
         with open(original_path, "wb") as f:
             f.write(audio_bytes)
+        original_path, _ = _normalize_audio_to_mp3(original_path, audio_file.filename)
         duration_path = original_path
 
     if vocal_file:
@@ -597,6 +663,7 @@ async def import_ultrastar(
         vocal_bytes = await vocal_file.read()
         with open(vocal_path, "wb") as f:
             f.write(vocal_bytes)
+        vocal_path, _ = _normalize_audio_to_mp3(vocal_path, vocal_file.filename)
         if not duration_path:
             duration_path = vocal_path
 
@@ -659,6 +726,10 @@ async def import_ultrastar(
         },
     }
     sessions[session_id] = session
+    # Auto-set vocals_header from uploaded vocal file (archive name computed in _update_txt_asset_headers)
+    if vocal_path:
+        session["vocals_header"] = os.path.basename(vocal_path)
+    _update_txt_asset_headers(session)
     save_session(session_id)
 
     has_vocals = vocal_path is not None
@@ -714,17 +785,20 @@ async def new_session():
 
 @app.post("/api/upload")
 async def upload_audio(audio: UploadFile = File(...)):
-    """Upload an audio file (MP3/WAV). Returns a session ID."""
+    """Upload an audio file (MP3/WAV/M4A etc). Converts to 44100Hz MP3 for universal compatibility."""
     session_id = str(uuid.uuid4())[:8]
-    
+
     session_dir = os.path.join(UPLOAD_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
-    
-    file_path = os.path.join(session_dir, audio.filename)
+
+    orig_filename = audio.filename
+    file_path = os.path.join(session_dir, orig_filename)
     with open(file_path, "wb") as f:
         content = await audio.read()
         f.write(content)
-    
+
+    file_path, orig_filename = _normalize_audio_to_mp3(file_path, orig_filename)
+
     sessions[session_id] = {
         "id": session_id,
         "original_audio": file_path,
@@ -733,14 +807,14 @@ async def upload_audio(audio: UploadFile = File(...)):
         "status": "uploaded",
         "created_at": time.time(),
     }
-    
-    log_step("UPLOAD", f"Session {session_id}: uploaded {audio.filename} ({len(content)} bytes)")
+
+    log_step("UPLOAD", f"Session {session_id}: {audio.filename} → {orig_filename} ({len(content)} bytes)")
     save_session(session_id)
-    
+
     return {
         "status": "ok",
         "session_id": session_id,
-        "filename": audio.filename,
+        "filename": orig_filename,
         "size": len(content),
     }
 
@@ -784,11 +858,12 @@ async def extract_vocals(session_id: str):
         session["vocal_audio"] = vocal_path
         if instrumental_path:
             session["instrumental_audio"] = instrumental_path
-            if not session.get("vocals_header"):
-                session["vocals_header"] = os.path.basename(vocal_path)
-            if not session.get("instrumental_header"):
-                session["instrumental_header"] = os.path.basename(instrumental_path)
+        if not session.get("vocals_header"):
+            session["vocals_header"] = os.path.basename(vocal_path)
+        if instrumental_path and not session.get("instrumental_header"):
+            session["instrumental_header"] = os.path.basename(instrumental_path)
         session["status"] = "vocals_extracted"
+        _update_txt_asset_headers(session)
         save_session(session_id)
         
         return {
@@ -873,11 +948,12 @@ async def extract_vocals_stream(session_id: str):
         session["vocal_audio"] = vocal_path
         if instrumental_path:
             session["instrumental_audio"] = instrumental_path
-            if not session.get("vocals_header"):
-                session["vocals_header"] = os.path.basename(vocal_path)
-            if not session.get("instrumental_header"):
-                session["instrumental_header"] = os.path.basename(instrumental_path)
+        if not session.get("vocals_header"):
+            session["vocals_header"] = os.path.basename(vocal_path)
+        if instrumental_path and not session.get("instrumental_header"):
+            session["instrumental_header"] = os.path.basename(instrumental_path)
         session["status"] = "vocals_extracted"
+        _update_txt_asset_headers(session)
         save_session(session_id)
         log_step("SEPARATE", f"Session {session_id}: vocals extracted via SSE stream")
         yield _send("done", "Vocals extracted successfully!", vocal_url=f"/api/preview-audio/{session_id}/vocals")
@@ -897,17 +973,20 @@ async def upload_corrected_vocals(session_id: str, vocals: UploadFile = File(...
         raise HTTPException(status_code=404, detail="Session not found")
     
     session_dir = os.path.join(UPLOAD_DIR, session_id)
-    vocal_path = os.path.join(session_dir, f"vocals_{vocals.filename}")
-    
+    orig_vocal_filename = f"vocals_{vocals.filename}"
+    vocal_path = os.path.join(session_dir, orig_vocal_filename)
+
     with open(vocal_path, "wb") as f:
         content = await vocals.read()
         f.write(content)
-    
+
+    vocal_path, orig_vocal_filename = _normalize_audio_to_mp3(vocal_path, orig_vocal_filename)
+
     session["vocal_audio"] = vocal_path
     session["status"] = "vocals_extracted"
     if not session.get("vocals_header"):
         session["vocals_header"] = os.path.basename(vocal_path)
-    
+    _update_txt_asset_headers(session)
     log_step("UPLOAD", f"Session {session_id}: uploaded corrected vocals ({len(content)} bytes)")
     save_session(session_id)
     
@@ -923,19 +1002,22 @@ async def upload_mix_audio(session_id: str, audio: UploadFile = File(...)):
 
     session_dir = os.path.join(UPLOAD_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
-    file_path = os.path.join(session_dir, audio.filename)
+    orig_filename = audio.filename
+    file_path = os.path.join(session_dir, orig_filename)
 
     with open(file_path, "wb") as f:
         content = await audio.read()
         f.write(content)
 
-    session["original_audio"] = file_path
-    session["filename"] = audio.filename
+    file_path, orig_filename = _normalize_audio_to_mp3(file_path, orig_filename)
 
-    log_step("UPLOAD", f"Session {session_id}: replaced mix audio with {audio.filename} ({len(content)} bytes)")
+    session["original_audio"] = file_path
+    session["filename"] = orig_filename
+    _update_txt_asset_headers(session)
+    log_step("UPLOAD", f"Session {session_id}: replaced mix audio with {orig_filename} ({len(content)} bytes)")
     save_session(session_id)
 
-    return {"status": "ok", "session_id": session_id, "filename": audio.filename}
+    return {"status": "ok", "session_id": session_id, "filename": orig_filename}
 
 
 @app.delete("/api/delete-audio/{session_id}/{audio_type}")
@@ -962,6 +1044,7 @@ async def delete_audio(session_id: str, audio_type: str):
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type. Use 'original' or 'vocals'.")
 
+    _update_txt_asset_headers(session)
     save_session(session_id)
     return {
         "status": "ok",
@@ -981,6 +1064,8 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
         path = session.get("original_audio")
     elif audio_type == "vocals":
         path = session.get("vocal_audio")
+    elif audio_type == "instrumental":
+        path = session.get("instrumental_audio")
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type")
     
@@ -997,6 +1082,8 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
                         session["vocal_audio"] = path
                     elif audio_type == "original":
                         session["original_audio"] = path
+                    elif audio_type == "instrumental":
+                        session["instrumental_audio"] = path
                     log_step("PREVIEW", f"Found {audio_type} at alternate path: {path}")
                     break
             else:
@@ -1856,7 +1943,7 @@ def generate_ultrastar_files(session_id: str):
         from services.midi_export import generate_midi
         
         # Generate Ultrastar .txt
-        _orig_path = session.get('original_audio') or session.get('vocal_audio') or ''
+        _orig_path = session.get('original_audio') or ''
         _audio_ext = os.path.splitext(_orig_path)[1] or '.mp3'
         txt_content = generate_ultrastar(
             syllable_timings=syllable_timings,
@@ -1924,6 +2011,11 @@ def generate_ultrastar_files(session_id: str):
         
         # Store result in session
         session["status"] = "generated"
+        # Track all generated filenames for cleanup on session delete
+        session.setdefault("generated_files", [])
+        for _fn in (txt_filename, midi_filename, summary_filename):
+            if _fn not in session["generated_files"]:
+                session["generated_files"].append(_fn)
         session["result"] = {
             "txt_file": txt_filename,
             "midi_file": midi_filename,
@@ -1940,6 +2032,8 @@ def generate_ultrastar_files(session_id: str):
             "ultrastar_content": txt_content,
             "pitch_data": pitch_data,
         }
+        save_session(session_id)
+        _update_txt_asset_headers(session)
         save_session(session_id)
         
         # ── Auto-compare with reference (ms-based, BPM-independent) ──
@@ -2166,7 +2260,7 @@ async def save_editor_state(session_id: str, request: Request):
                  "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ja": "Japanese",
                  "ko": "Korean", "zh": "Chinese"}.get(lang, lang.title())
     lines.append(f"#LANGUAGE:{lang_name}")
-    _mp3_path = session.get('original_audio') or session.get('vocal_audio') or 'song.mp3'
+    _mp3_path = session.get('original_audio') or 'song.mp3'
     lines.append(f"#MP3:{os.path.basename(_mp3_path)}")
 
     # Extra headers from the editor (e.g. YOUTUBE, COVER, etc.)
@@ -2350,7 +2444,12 @@ async def update_metadata(session_id: str, artist: str = Form(...), title: str =
 
 
 @app.get("/api/download/{session_id}/{file_type}")
-async def download_file(session_id: str, file_type: str):
+async def download_file(
+    session_id: str,
+    file_type: str,
+    include_vocals: str = "1",
+    include_instrumental: str = "1",
+):
     """Download a generated file."""
     session = sessions.get(session_id)
     if not session:
@@ -2380,6 +2479,10 @@ async def download_file(session_id: str, file_type: str):
             content = f.read()
         import re as _re_dl
         content = _re_dl.sub(r'^(- \d+) \d+$', r'\1', content, flags=_re_dl.MULTILINE)
+        if include_vocals != "1":
+            content = _remove_header(content, "VOCALS")
+        if include_instrumental != "1":
+            content = _remove_header(content, "INSTRUMENTAL")
         # Build a user-friendly download name from artist/title
         artist = session.get("artist", "").strip()
         title = session.get("title", "").strip()
@@ -2437,7 +2540,7 @@ def _remove_header(content: str, key: str) -> str:
 
 
 def _update_txt_asset_headers(session: dict) -> None:
-    """Inject/update or remove COVER, BACKGROUND, VIDEO, VIDEOGAP, YOUTUBE in the session's .txt file."""
+    """Inject/update or remove MP3, VOCALS, INSTRUMENTAL, COVER, BACKGROUND, VIDEO, VIDEOGAP, YOUTUBE in the session's .txt file."""
     result = session.get("result")
     if not result:
         return
@@ -2453,6 +2556,15 @@ def _update_txt_asset_headers(session: dict) -> None:
 
     artist = session.get("artist", "").strip()
     title = session.get("title", "").strip()
+
+    # --- #MP3: set to original audio filename, or remove if no original ---
+    original_audio = session.get("original_audio")
+    if original_audio:
+        content = _set_header(content, "MP3", os.path.basename(original_audio))
+        log_step("TXT-HEADERS", f"Set #MP3 to {os.path.basename(original_audio)}")
+    else:
+        content = _remove_header(content, "MP3")
+        log_step("TXT-HEADERS", f"Removed #MP3 (original_audio={original_audio})")
     if artist and title:
         base = f"{artist} - {title}"
     elif title:
@@ -2759,7 +2871,13 @@ async def save_assets_meta(session_id: str, request: Request):
 
 
 @app.get("/api/download-zip/{session_id}")
-async def download_zip(session_id: str):
+async def download_zip(
+    session_id: str,
+    include_vocals: str = "1",
+    include_instrumental: str = "1",
+    include_summary: str = "1",
+    include_midi: str = "1",
+):
     """Bundle all generated files into a single ZIP download."""
     import zipfile
     import io
@@ -2834,31 +2952,37 @@ async def download_zip(session_id: str):
                     if video_gap is not None:
                         txt_content = _set_header(txt_content, "VIDEOGAP", str(video_gap))
 
+                # Strip VOCALS/INSTRUMENTAL headers from .txt copy if not included
+                if include_vocals != "1":
+                    txt_content = _remove_header(txt_content, "VOCALS")
+                if include_instrumental != "1":
+                    txt_content = _remove_header(txt_content, "INSTRUMENTAL")
+
                 zf.writestr(f"{base}.txt", txt_content)
 
         # MIDI
         midi_file = result.get("midi_file")
-        if midi_file:
+        if midi_file and include_midi == "1":
             path = os.path.join(DOWNLOADS_DIR, midi_file)
             if os.path.exists(path):
                 zf.write(path, f"{base}.mid")
 
         # Summary
         summary_file = result.get("summary_file")
-        if summary_file:
+        if summary_file and include_summary == "1":
             path = os.path.join(DOWNLOADS_DIR, summary_file)
             if os.path.exists(path):
                 zf.write(path, f"{base}_summary.txt")
 
         # Vocals audio
         vocal_path = session.get("vocal_audio")
-        if vocal_path and os.path.exists(vocal_path):
+        if vocal_path and os.path.exists(vocal_path) and include_vocals == "1":
             ext = os.path.splitext(vocal_path)[1]
             zf.write(vocal_path, f"{base} [Vocals]{ext}")
 
         # Instrumental audio (no_vocals from Demucs)
         instrumental_path = session.get("instrumental_audio")
-        if instrumental_path and os.path.exists(instrumental_path):
+        if instrumental_path and os.path.exists(instrumental_path) and include_instrumental == "1":
             ext = os.path.splitext(instrumental_path)[1]
             zf.write(instrumental_path, f"{base} [Instrumental]{ext}")
 

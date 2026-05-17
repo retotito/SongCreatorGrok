@@ -17,6 +17,12 @@
   let editInstrumental = '';
   let saving = false;
 
+  // ZIP export options (all off by default)
+  let zipIncludeVocals = false;
+  let zipIncludeInstrumental = false;
+  let zipIncludeSummary = false;
+  let zipIncludeMidi = false;
+
   // Clear editVocals when vocal audio is deleted
   $: if (!$uploadData?.hasVocals) editVocals = '';
 
@@ -357,7 +363,13 @@
   }
 
   async function downloadZip() {
-    const url = getDownloadZipUrl($sessionId);
+    const params = new URLSearchParams({
+      include_vocals: zipIncludeVocals ? '1' : '0',
+      include_instrumental: zipIncludeInstrumental ? '1' : '0',
+      include_summary: zipIncludeSummary ? '1' : '0',
+      include_midi: zipIncludeMidi ? '1' : '0',
+    });
+    const url = getDownloadZipUrl($sessionId) + '?' + params.toString();
     const blob = await fetch(url).then(r => r.blob());
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -370,7 +382,14 @@
   }
 
   async function downloadFile(type) {
-    const url = getDownloadUrl($sessionId, type);
+    let url = getDownloadUrl($sessionId, type);
+    if (type === 'txt') {
+      const params = new URLSearchParams({
+        include_vocals: zipIncludeVocals ? '1' : '0',
+        include_instrumental: zipIncludeInstrumental ? '1' : '0',
+      });
+      url += '?' + params.toString();
+    }
     const base = getBaseFilename();
     const extMap = { txt: '.txt', midi: '.mid', summary: '_summary.txt' };
     const blob = await fetch(url).then(r => r.blob());
@@ -386,16 +405,16 @@
   async function downloadAudio(type) {
     const url = getAudioUrl($sessionId, type);
     const base = getBaseFilename();
-    const suffix = type === 'vocals' ? ' [Vocals]' : '';
+    const suffix = type === 'vocals' ? ' [Vocals]' : type === 'instrumental' ? ' [Instrumental]' : '';
     // Vocals are always .mp3 (Demucs --mp3 output).
     // For original, derive extension from the uploaded filename.
     let ext;
     if (type === 'vocals') {
-      // Use actual vocal filename extension if known (uploaded vocal keeps its format);
-      // Demucs-generated vocals are always .mp3.
       const vocalsFilename = $uploadData?.vocalsFilename || '';
       const vocalsExtMatch = vocalsFilename.match(/\.\w+$/);
       ext = vocalsExtMatch ? vocalsExtMatch[0] : '.mp3';
+    } else if (type === 'instrumental') {
+      ext = '.mp3';
     } else {
       const origFilename = $uploadData?.filename || '';
       const extMatch = origFilename.match(/\.\w+$/);
@@ -414,16 +433,20 @@
   async function downloadAll() {
     // Download each file with a small delay so browser doesn't block them
     const files = ['txt'];
-    if ($generationResult?.midi_file) files.push('midi');
-    if ($generationResult?.summary_file) files.push('summary');
+    if ($generationResult?.midi_file && zipIncludeMidi) files.push('midi');
+    if ($generationResult?.summary_file && zipIncludeSummary) files.push('summary');
 
     for (const type of files) {
       downloadFile(type);
       await new Promise(r => setTimeout(r, 300));
     }
     // Download available audio
-    if ($uploadData.hasVocals) {
+    if ($uploadData.hasVocals && zipIncludeVocals) {
       downloadAudio('vocals');
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (editInstrumental && zipIncludeInstrumental) {
+      downloadAudio('instrumental');
       await new Promise(r => setTimeout(r, 300));
     }
     if ($uploadData.hasOriginal) {
@@ -512,7 +535,7 @@
 
       <div class="assets-grid">
         <!-- Cover image -->
-        <div class="asset-row">
+        <div class="asset-row" style="padding-top: 10px;">
           <span class="asset-label">Cover</span>
           {#if coverPreviewUrl}
             <div class="asset-preview">
@@ -538,7 +561,7 @@
         </div>
 
         <!-- Background image -->
-        <div class="asset-row">
+        <div class="asset-row" style="padding-top: 10px;">
           <span class="asset-label">Background</span>
           {#if bgPreviewUrl}
             <div class="asset-preview">
@@ -599,17 +622,6 @@
           </div>
         </div>
 
-        <!-- Instrumental file (#INSTRUMENTAL) -->
-        <div class="asset-row">
-          <span class="asset-label">Instrumental</span>
-          <div class="video-inputs">
-            <div class="video-input-row">
-              <input class="video-filename-input" style="margin-right:10px" type="text" bind:value={editInstrumental} placeholder="e.g. Artist - Title [Instrumental].mp3" />
-              <button class="asset-save-btn" on:click={saveVideoMeta} disabled={videoSaving}>{videoSaved ? '✓' : 'Save'}</button>
-            </div>
-          </div>
-        </div>
-
         <!-- Full Mix audio (read-only display) -->
         <div class="asset-row">
           <span class="asset-label">Full Mix</span>
@@ -619,7 +631,7 @@
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No audio uploaded yet. Go to
-                <button class="link-btn" on:click={() => currentStep.set(2)}>Step 2</button>
+                <button class="link-btn" on:click={() => currentStep.set(1)}>Step 1</button>
                 to upload a file.
               </small>
             {/if}
@@ -635,12 +647,57 @@
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No vocals yet. Go to
-                <button class="link-btn" on:click={() => currentStep.set(2)}>Step 2</button>
+                <button class="link-btn" on:click={() => currentStep.set(1)}>Step 1</button>
                 to upload or separate vocals.
               </small>
             {/if}
           </div>
+          <label class="asset-include">
+            <input type="checkbox" bind:checked={zipIncludeVocals} />
+            Include
+          </label>
         </div>
+
+        <!-- Instrumental file (#INSTRUMENTAL) -->
+        <div class="asset-row">
+          <span class="asset-label">Instrumental</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            {#if editInstrumental}
+              <span class="asset-value">{editInstrumental}</span>
+            {:else}
+              <small style="color:#888;font-size:0.72rem">Not available — run Demucs in Step 2 to generate.</small>
+            {/if}
+          </div>
+          <label class="asset-include">
+            <input type="checkbox" bind:checked={zipIncludeInstrumental} />
+            Include
+          </label>
+        </div>
+
+        <!-- Summary -->
+        <div class="asset-row">
+          <span class="asset-label">Summary</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            <small style="color:#888;font-size:0.72rem">Generation summary log (_summary.txt)</small>
+          </div>
+          <label class="asset-include">
+            <input type="checkbox" bind:checked={zipIncludeSummary} />
+            Include
+          </label>
+        </div>
+
+        <!-- MIDI -->
+        <div class="asset-row">
+          <span class="asset-label">MIDI</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            <small style="color:#888;font-size:0.72rem">Pitch data as MIDI file (.mid)</small>
+          </div>
+          <label class="asset-include">
+            <input type="checkbox" bind:checked={zipIncludeMidi} />
+            Include
+          </label>
+        </div>
+
       </div>
     </div>
 
@@ -676,6 +733,12 @@
           <span class="file-icon">🎤</span>
           <span class="file-name">Vocals</span>
           <span class="file-desc">{$uploadData.hasVocals ? 'Separated vocal track' : 'Not available'}</span>
+        </button>
+
+        <button class="download-btn" on:click={() => downloadAudio('instrumental')} disabled={!editInstrumental}>
+          <span class="file-icon">🎸</span>
+          <span class="file-name">Instrumental</span>
+          <span class="file-desc">{editInstrumental ? 'Instrumental track (no vocals)' : 'Not available'}</span>
         </button>
 
         <button class="download-btn" on:click={() => downloadAudio('original')} disabled={!$uploadData.hasOriginal}>
@@ -1097,10 +1160,12 @@
     display: flex;
     align-items: flex-start;
     gap: 0.75rem;
+    border-top: 1px solid #333;
   }
 
   .asset-row-video {
     align-items: flex-start;
+    padding-top: 10px;
   }
 
   .asset-label {
@@ -1250,6 +1315,23 @@
     text-decoration: underline;
   }
   .link-btn:hover { color: #79c0ff; }
+  .asset-include {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    color: #888;
+    cursor: pointer;
+    white-space: nowrap;
+    margin-left: auto;
+    padding-top: 10px;
+    align-self: flex-start;
+  }
+  .asset-include input { cursor: pointer; }
+  .zip-option input[type="checkbox"] {
+    accent-color: #58a6ff;
+    cursor: pointer;
+  }
   .asset-value {
     font-size: 0.88rem;
     color: #ccc;
