@@ -51,6 +51,11 @@ This shows all processing steps — vocal separation progress, transcription, pi
 | **3. Editor** | Review and adjust notes in the piano roll | Shows waveform, plays MIDI pitches, supports grid snap, BPM calibration |
 | **4. Export** | Add cover/background art, video info, download your files | Exports ZIP with Ultrastar .txt (including asset headers), MIDI, images, and audio |
 
+## Video Tutorial
+
+### Overview — Getting Started
+[![Overview Tutorial](https://img.youtube.com/vi/zKw03mhrYX8/maxresdefault.jpg)](https://www.youtube.com/watch?v=zKw03mhrYX8)
+
 ## Screenshots
 
 ### Home — Project Launcher
