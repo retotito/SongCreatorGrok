@@ -54,7 +54,9 @@ This shows all processing steps — vocal separation progress, transcription, pi
 ## Video Tutorial
 
 ### Overview — Getting Started
-[![Overview Tutorial](https://img.youtube.com/vi/zKw03mhrYX8/maxresdefault.jpg)](https://www.youtube.com/watch?v=zKw03mhrYX8)
+<a href="https://www.youtube.com/watch?v=zKw03mhrYX8">
+  <img src="docs/screenshots/youtube overview tutorial.jpeg" width="50%" alt="Overview Tutorial"/>
+</a>
 
 ## Screenshots
 
