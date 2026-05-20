@@ -26,6 +26,11 @@ fn main() {
             #[cfg(not(debug_assertions))]
             {
                 // Kill any stale process already holding port 8001
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :8001') do taskkill /F /PID %a 2>nul"])
+                    .status();
+                #[cfg(not(target_os = "windows"))]
                 let _ = std::process::Command::new("sh")
                     .args(["-c", "lsof -ti:8001 | xargs kill -9 2>/dev/null || true"])
                     .status();
@@ -43,14 +48,22 @@ fn main() {
                     .expect("resource dir not found");
                 // Tauri copies resources/backend/**/* preserving the path relative to src-tauri,
                 // so the binary ends up at Contents/Resources/resources/backend/backend
+                #[cfg(target_os = "windows")]
+                let backend_bin = resource_dir.join("resources").join("backend").join("backend.exe");
+                #[cfg(not(target_os = "windows"))]
                 let backend_bin = resource_dir.join("resources").join("backend").join("backend");
 
                 eprintln!("[tauri] Launching backend: {}", backend_bin.display());
 
-                let mut child = std::process::Command::new(&backend_bin)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
+                #[cfg(target_os = "windows")]
+                use std::os::windows::process::CommandExt;
+
+                let mut cmd = std::process::Command::new(&backend_bin);
+                cmd.stdout(std::process::Stdio::piped())
+                   .stderr(std::process::Stdio::piped());
+                #[cfg(target_os = "windows")]
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — suppress console popup
+                let mut child = cmd.spawn()
                     .expect("Failed to spawn backend process");
 
                 // Stream stdout+stderr to log file in background thread

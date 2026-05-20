@@ -14,6 +14,30 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import sys
 
+# On Windows, Tauri spawns the backend with piped stdout/stderr.
+# Python's logging StreamHandler.flush() raises OSError [Errno 22] when the pipe
+# read-end is dropped by Rust, which eventually crashes the uvicorn event loop.
+# Wrap sys.stdout/stderr so those errors are silently swallowed.
+if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+    class _PipeSafeStream:
+        def __init__(self, stream):
+            self._s = stream
+        def write(self, data):
+            try: return self._s.write(data)
+            except OSError: return 0
+        def flush(self):
+            try: self._s.flush()
+            except OSError: pass
+        def fileno(self):
+            try: return self._s.fileno()
+            except Exception: return -1
+        def isatty(self): return False
+        def readable(self): return False
+        def writable(self): return True
+        def __getattr__(self, name): return getattr(self._s, name)
+    sys.stdout = _PipeSafeStream(sys.stdout)
+    sys.stderr = _PipeSafeStream(sys.stderr)
+
 # Fix SSL certificate verification on macOS when running as a frozen PyInstaller app.
 # Python bundles certifi but doesn't always point SSL_CERT_FILE at it automatically.
 try:
@@ -75,7 +99,7 @@ app = FastAPI(title="Ultrastar Song Generator", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "tauri://localhost"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "tauri://localhost", "http://tauri.localhost"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,8 +114,12 @@ app.add_exception_handler(ServiceError, service_exception_handler)
 def _user_data_dir() -> str:
     """Return a persistent data directory that survives PyInstaller temp extraction."""
     if getattr(sys, 'frozen', False):
-        # Running as PyInstaller sidecar — store data in ~/Library/Application Support/com.ultrastar.creator
-        base = os.path.expanduser("~/Library/Application Support/com.ultrastar.creator")
+        if sys.platform == 'win32':
+            # Windows: store in %APPDATA%\com.ultrastar.creator
+            base = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'com.ultrastar.creator')
+        else:
+            # macOS: store in ~/Library/Application Support/com.ultrastar.creator
+            base = os.path.expanduser("~/Library/Application Support/com.ultrastar.creator")
     else:
         # Dev mode — store alongside source files as before
         base = os.path.dirname(__file__)
@@ -101,7 +129,7 @@ _DATA_DIR = _user_data_dir()
 DOWNLOADS_DIR = os.path.join(_DATA_DIR, "downloads")
 CORRECTIONS_DIR = os.path.join(_DATA_DIR, "corrections")
 UPLOAD_DIR = os.path.join(_DATA_DIR, "uploads")
-REFERENCE_DIR = os.path.join(os.path.dirname(__file__), "reference_songs")
+REFERENCE_DIR = os.path.join(_DATA_DIR, "reference_songs")
 SESSIONS_DIR = os.path.join(_DATA_DIR, "sessions")
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -187,7 +215,10 @@ def _check_model_status() -> dict:
 
     # WhisperX / faster-whisper medium model
     whisperx_ok = False
-    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE as hf_cache
+    except ImportError:
+        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
     faster_whisper_dir = os.path.join(hf_cache, "models--Systran--faster-whisper-medium")
     if os.path.isdir(faster_whisper_dir):
         # Check that there's at least one snapshot with the required model files
@@ -272,9 +303,11 @@ async def setup_download():
                 from huggingface_hub import snapshot_download
 
                 WHISPERX_TOTAL_BYTES = 1_528_000_000  # ~1.5 GB
-                blobs_dir = os.path.expanduser(
-                    "~/.cache/huggingface/hub/models--Systran--faster-whisper-medium/blobs"
-                )
+                try:
+                    from huggingface_hub.constants import HF_HUB_CACHE as _hf_cache
+                except ImportError:
+                    _hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+                blobs_dir = os.path.join(_hf_cache, "models--Systran--faster-whisper-medium", "blobs")
 
                 def _get_written_bytes():
                     if not os.path.isdir(blobs_dir):

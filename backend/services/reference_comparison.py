@@ -6,14 +6,26 @@ Stores diffs for learning and applies learned corrections to future songs.
 
 import os
 import re
+import sys
 import json
 import time
 import statistics
 from typing import List, Optional
 from utils.logger import log_step
 
+
+def _data_dir() -> str:
+    """Return persistent data directory, matching main.py logic."""
+    if getattr(sys, 'frozen', False):
+        if sys.platform == 'win32':
+            return os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'com.ultrastar.creator')
+        else:
+            return os.path.expanduser('~/Library/Application Support/com.ultrastar.creator')
+    return os.path.dirname(os.path.dirname(__file__))
+
+
 # Where we store comparison data and learned biases
-REFERENCE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_songs")
+REFERENCE_DIR = os.path.join(_data_dir(), "reference_songs")
 LEARNED_FILE = os.path.join(REFERENCE_DIR, "_learned_biases.json")
 
 os.makedirs(REFERENCE_DIR, exist_ok=True)
