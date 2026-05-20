@@ -238,14 +238,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'tkinter', 'IPython', 'jupyter',
-        # AI packages are loaded lazily at runtime (never imported at the top level).
-        # Excluding them keeps the sidecar small (~100 MB) so the NSIS installer works.
-        # Model weights are downloaded on first launch via the setup screen.
-        'torch', 'torchaudio', 'torchvision',
-        'demucs', 'whisperx', 'whisper',
-        'faster_whisper', 'transformers',
-        'pyannote', 'asteroid_filterbanks', 'speechbrain',
-        'lightning_fabric', 'pytorch_lightning',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

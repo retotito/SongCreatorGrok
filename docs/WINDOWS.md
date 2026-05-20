@@ -138,3 +138,19 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\torch" -ErrorAction Silentl
 | App data dir | `~/Library/Application Support/com.ultrastar.creator` | `%APPDATA%\com.ultrastar.creator` |
 | Log dir | `~/Library/Logs/com.ultrastar.creator` | `%APPDATA%\com.ultrastar.creator\logs` |
 | Build script | `./build_local.sh` | Manual steps above |
+
+
+## Tauri dev
+**backend:
+```
+cd C:\Users\retok\Projects\UltrastarCreatorTool
+.venv\Scripts\activate
+cd backend
+python main.py
+```
+
+**frontend:
+```
+cd C:\Users\retok\Projects\UltrastarCreatorTool\frontend
+npm run tauri dev
+```
