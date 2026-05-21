@@ -14,6 +14,30 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import sys
 
+# On Windows, Tauri spawns the backend with piped stdout/stderr.
+# Python's logging StreamHandler.flush() raises OSError [Errno 22] when the pipe
+# read-end is dropped by Rust, which eventually crashes the uvicorn event loop.
+# Wrap sys.stdout/stderr so those errors are silently swallowed.
+if getattr(sys, 'frozen', False) and sys.platform == 'win32':
+    class _PipeSafeStream:
+        def __init__(self, stream):
+            self._s = stream
+        def write(self, data):
+            try: return self._s.write(data)
+            except OSError: return 0
+        def flush(self):
+            try: self._s.flush()
+            except OSError: pass
+        def fileno(self):
+            try: return self._s.fileno()
+            except Exception: return -1
+        def isatty(self): return False
+        def readable(self): return False
+        def writable(self): return True
+        def __getattr__(self, name): return getattr(self._s, name)
+    sys.stdout = _PipeSafeStream(sys.stdout)
+    sys.stderr = _PipeSafeStream(sys.stderr)
+
 # Fix SSL certificate verification on macOS when running as a frozen PyInstaller app.
 # Python bundles certifi but doesn't always point SSL_CERT_FILE at it automatically.
 try:
@@ -34,7 +58,8 @@ def _fix_frozen_path():
     # 1. bundled ffmpeg extracted alongside our binary by PyInstaller
     if hasattr(sys, '_MEIPASS'):
         mei = sys._MEIPASS
-        if os.path.isfile(os.path.join(mei, 'ffmpeg')):
+        ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+        if os.path.isfile(os.path.join(mei, ffmpeg_name)):
             os.environ['PATH'] = mei + os.pathsep + os.environ.get('PATH', '')
             return
     # 2. common macOS install locations (Homebrew arm64, Homebrew x86, MacPorts)
@@ -75,7 +100,7 @@ app = FastAPI(title="Ultrastar Song Generator", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "tauri://localhost"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "tauri://localhost", "http://tauri.localhost"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,8 +115,12 @@ app.add_exception_handler(ServiceError, service_exception_handler)
 def _user_data_dir() -> str:
     """Return a persistent data directory that survives PyInstaller temp extraction."""
     if getattr(sys, 'frozen', False):
-        # Running as PyInstaller sidecar — store data in ~/Library/Application Support/com.ultrastar.creator
-        base = os.path.expanduser("~/Library/Application Support/com.ultrastar.creator")
+        if sys.platform == 'win32':
+            # Windows: store in %APPDATA%\com.ultrastar.creator
+            base = os.path.join(os.environ.get('APPDATA', os.path.expanduser('~')), 'com.ultrastar.creator')
+        else:
+            # macOS: store in ~/Library/Application Support/com.ultrastar.creator
+            base = os.path.expanduser("~/Library/Application Support/com.ultrastar.creator")
     else:
         # Dev mode — store alongside source files as before
         base = os.path.dirname(__file__)
@@ -101,7 +130,7 @@ _DATA_DIR = _user_data_dir()
 DOWNLOADS_DIR = os.path.join(_DATA_DIR, "downloads")
 CORRECTIONS_DIR = os.path.join(_DATA_DIR, "corrections")
 UPLOAD_DIR = os.path.join(_DATA_DIR, "uploads")
-REFERENCE_DIR = os.path.join(os.path.dirname(__file__), "reference_songs")
+REFERENCE_DIR = os.path.join(_DATA_DIR, "reference_songs")
 SESSIONS_DIR = os.path.join(_DATA_DIR, "sessions")
 
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -178,6 +207,49 @@ async def health_check():
 # First-run setup: model download status + SSE download stream
 # ────────────────────────────────────────────────────────────
 
+def _file_size_accurate(path: str) -> int:
+    """Return the current size of a file.
+    On Windows, uses CreateFileW + GetFileSizeEx which reads from the kernel's
+    in-memory FCB (updated in real-time), bypassing the lazy NTFS MFT metadata
+    that os.stat() reads and which stays at 0 for in-progress downloads.
+    Falls back to os.path.getsize() on other platforms.
+    """
+    if sys.platform == 'win32':
+        import ctypes
+        GENERIC_READ      = 0x80000000
+        FILE_SHARE_ALL    = 0x07  # READ | WRITE | DELETE
+        OPEN_EXISTING     = 3
+        FILE_ATTR_NORMAL  = 0x80
+        handle = ctypes.windll.kernel32.CreateFileW(
+            str(path), GENERIC_READ, FILE_SHARE_ALL,
+            None, OPEN_EXISTING, FILE_ATTR_NORMAL, None,
+        )
+        INVALID = ctypes.c_size_t(-1).value
+        if ctypes.c_size_t(handle).value == INVALID:
+            return 0
+        size = ctypes.c_int64(0)
+        if ctypes.windll.kernel32.GetFileSizeEx(handle, ctypes.byref(size)):
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return max(0, size.value)
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return 0
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _dir_bytes_accurate(directory: str) -> int:
+    """Sum accurate file sizes for all files in a directory tree."""
+    if not os.path.isdir(directory):
+        return 0
+    total = 0
+    for root, _, files in os.walk(directory):
+        for fname in files:
+            total += _file_size_accurate(os.path.join(root, fname))
+    return total
+
+
 def _check_model_status() -> dict:
     """Return which AI models are already downloaded."""
     import shutil
@@ -187,7 +259,10 @@ def _check_model_status() -> dict:
 
     # WhisperX / faster-whisper medium model
     whisperx_ok = False
-    hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE as hf_cache
+    except ImportError:
+        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
     faster_whisper_dir = os.path.join(hf_cache, "models--Systran--faster-whisper-medium")
     if os.path.isdir(faster_whisper_dir):
         # Check that there's at least one snapshot with the required model files
@@ -272,20 +347,11 @@ async def setup_download():
                 from huggingface_hub import snapshot_download
 
                 WHISPERX_TOTAL_BYTES = 1_528_000_000  # ~1.5 GB
-                blobs_dir = os.path.expanduser(
-                    "~/.cache/huggingface/hub/models--Systran--faster-whisper-medium/blobs"
-                )
-
-                def _get_written_bytes():
-                    if not os.path.isdir(blobs_dir):
-                        return 0
-                    total = 0
-                    for entry in os.scandir(blobs_dir):
-                        try:
-                            total += entry.stat().st_size
-                        except OSError:
-                            pass
-                    return total
+                try:
+                    from huggingface_hub.constants import HF_HUB_CACHE as _hf_cache
+                except ImportError:
+                    _hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+                _wx_model_dir = os.path.join(_hf_cache, "models--Systran--faster-whisper-medium")
 
                 loop = asyncio.get_event_loop()
                 fut = loop.run_in_executor(
@@ -294,11 +360,11 @@ async def setup_download():
                 )
                 while not fut.done():
                     await asyncio.sleep(2.0)
-                    downloaded = _get_written_bytes()
+                    downloaded = _dir_bytes_accurate(_wx_model_dir)
                     pct = min(99, int(downloaded * 100 / WHISPERX_TOTAL_BYTES))
                     mb_done = downloaded / 1_000_000
                     mb_total = WHISPERX_TOTAL_BYTES / 1_000_000
-                    log_step("DOWNLOAD", f"whisperx du={downloaded} bytes ({mb_done:.1f} MB) pct={pct}%")
+                    log_step("DOWNLOAD", f"whisperx downloaded={downloaded} bytes ({mb_done:.1f} MB) pct={pct}%")
                     yield send("progress", "whisperx",
                                f"Downloading… {mb_done:.0f} / {mb_total:.0f} MB",
                                percent=pct)
@@ -320,18 +386,7 @@ async def setup_download():
             await asyncio.sleep(0.05)
             try:
                 DEMUCS_TOTAL_BYTES = 85_000_000
-                torch_hub_dir = os.path.expanduser("~/.cache/torch/hub/checkpoints")
-
-                def _get_demucs_bytes():
-                    if not os.path.isdir(torch_hub_dir):
-                        return 0
-                    total = 0
-                    for entry in os.scandir(torch_hub_dir):
-                        try:
-                            total += entry.stat().st_size
-                        except OSError:
-                            pass
-                    return total
+                _torch_checkpoints = os.path.expanduser("~/.cache/torch/hub/checkpoints")
 
                 def _download_demucs():
                     from demucs.pretrained import get_model
@@ -341,7 +396,7 @@ async def setup_download():
                 fut = loop.run_in_executor(None, _download_demucs)
                 while not fut.done():
                     await asyncio.sleep(2.0)
-                    downloaded = _get_demucs_bytes()
+                    downloaded = _dir_bytes_accurate(_torch_checkpoints)
                     pct = min(99, int(downloaded * 100 / DEMUCS_TOTAL_BYTES))
                     mb_done = downloaded / 1_000_000
                     mb_total = DEMUCS_TOTAL_BYTES / 1_000_000
@@ -366,21 +421,8 @@ async def setup_download():
             await asyncio.sleep(0.05)
             try:
                 WAV2VEC2_TOTAL_BYTES = 360_000_000  # ~360 MB
-                torch_checkpoints = os.path.expanduser("~/.cache/torch/hub/checkpoints")
-
-                def _dir_total_bytes(path):
-                    if not os.path.isdir(path):
-                        return 0
-                    total = 0
-                    for entry in os.scandir(path):
-                        try:
-                            total += entry.stat().st_size
-                        except OSError:
-                            pass
-                    return total
-
-                # Snapshot before download starts so we measure only new bytes
-                bytes_before = _dir_total_bytes(torch_checkpoints)
+                _torch_checkpoints = os.path.expanduser("~/.cache/torch/hub/checkpoints")
+                _bytes_before_wv = _dir_bytes_accurate(_torch_checkpoints)
 
                 def _download_wav2vec2():
                     import whisperx
@@ -391,7 +433,7 @@ async def setup_download():
                 fut = loop.run_in_executor(None, _download_wav2vec2)
                 while not fut.done():
                     await asyncio.sleep(2.0)
-                    downloaded = max(0, _dir_total_bytes(torch_checkpoints) - bytes_before)
+                    downloaded = max(0, _dir_bytes_accurate(_torch_checkpoints) - _bytes_before_wv)
                     pct = min(99, int(downloaded * 100 / WAV2VEC2_TOTAL_BYTES))
                     mb_done = downloaded / 1_000_000
                     mb_total = WAV2VEC2_TOTAL_BYTES / 1_000_000
@@ -399,6 +441,7 @@ async def setup_download():
                                f"Downloading… {mb_done:.0f} / {mb_total:.0f} MB",
                                percent=pct)
                 await fut
+
                 yield send("done", "wav2vec2", "Alignment model ready")
             except ImportError:
                 yield send("done", "wav2vec2", "WhisperX not installed — skipping", error=True)

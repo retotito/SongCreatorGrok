@@ -90,7 +90,21 @@ _ffmpeg_search = [
     '/usr/bin/ffmpeg',
 ]
 import shutil as _shutil
-_ffmpeg_bin = _shutil.which('ffmpeg')
+# On Windows, shutil.which() may return a WinGet symlink that PyInstaller
+# cannot dereference correctly.  Resolve it to the real .exe first.
+def _resolve_bin(p):
+    if p is None:
+        return None
+    import pathlib
+    try:
+        resolved = pathlib.Path(p).resolve()
+        if resolved.is_file():
+            return str(resolved)
+    except Exception:
+        pass
+    return p if os.path.isfile(p) else None
+
+_ffmpeg_bin = _resolve_bin(_shutil.which('ffmpeg'))
 if _ffmpeg_bin:
     binaries += [(_ffmpeg_bin, '.')]
     print(f"[spec] bundling ffmpeg from {_ffmpeg_bin}")
@@ -104,7 +118,7 @@ else:
         print("[spec] WARNING: ffmpeg not found — it will not be bundled")
 
 # ── Bundle ffprobe alongside ffmpeg (needed for sample rate detection) ────────
-_ffprobe_bin = _shutil.which('ffprobe')
+_ffprobe_bin = _resolve_bin(_shutil.which('ffprobe'))
 if _ffprobe_bin:
     binaries += [(_ffprobe_bin, '.')]
     print(f"[spec] bundling ffprobe from {_ffprobe_bin}")
@@ -236,7 +250,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'IPython', 'jupyter'],
+    excludes=[
+        'tkinter', 'IPython', 'jupyter',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

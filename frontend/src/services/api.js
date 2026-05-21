@@ -59,7 +59,8 @@ export function streamSetupDownload(onEvent) {
   const es = new EventSource(url);
   es.onmessage = (e) => {
     try {
-      onEvent(JSON.parse(e.data));
+      const parsed = JSON.parse(e.data);
+      onEvent(parsed);
     } catch {}
   };
   es.onerror = () => {

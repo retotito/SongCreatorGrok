@@ -6,6 +6,44 @@
 
   let exported = false;
   let showEditPopup = false;
+
+  // ── Download sound + toast ─────────────────────────
+  let toastMessage = '';
+  let toastVisible = false;
+  let _toastTimer = null;
+
+  function showToast(msg) {
+    toastMessage = msg;
+    toastVisible = true;
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => { toastVisible = false; }, 2500);
+  }
+
+  function playDownloadSound() {
+    try {
+      const ctx = new AudioContext();
+      const t = ctx.currentTime;
+      [784, 988].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        const start = t + i * 0.13;
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.25, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.28);
+        osc.start(start);
+        osc.stop(start + 0.28);
+      });
+    } catch (_) {}
+  }
+
+  function notifyDownload(msg) {
+    playDownloadSound();
+    showToast(msg);
+  }
   let editArtist = '';
   let editTitle = '';
   let editLanguage = '';
@@ -189,9 +227,10 @@
     a.download = getBaseFilename() + ' [CO].jpg';
     a.click();
     URL.revokeObjectURL(a.href);
+    notifyDownload('✓ Cover downloaded');
   }
 
-  // ── Background crop ───────────────────────────
+  // ── Background crop ─────────────────────────────
   function onBgFileChange(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -290,6 +329,7 @@
     a.download = getBaseFilename() + ' [BG].jpg';
     a.click();
     URL.revokeObjectURL(a.href);
+    notifyDownload('✓ Background image downloaded');
   }
 
   // ── Video meta ────────────────────────────────
@@ -379,6 +419,7 @@
     a.remove();
     URL.revokeObjectURL(a.href);
     exported = true;
+    notifyDownload('✓ ZIP downloaded');
   }
 
   async function downloadFile(type) {
@@ -400,6 +441,7 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(a.href);
+    notifyDownload(`✓ ${a.download} downloaded`);
   }
 
   async function downloadAudio(type) {
@@ -428,6 +470,7 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(a.href);
+    notifyDownload(`✓ ${a.download} downloaded`);
   }
 
   async function downloadAll() {
@@ -453,6 +496,7 @@
       downloadAudio('original');
     }
     exported = true;
+    notifyDownload('✓ All files downloaded');
   }
 
   function startOver() {
@@ -757,10 +801,6 @@
       </div>
     </div>
 
-    {#if exported}
-      <div class="success-banner">✓ Files downloaded</div>
-    {/if}
-
     <div class="actions">
       <button class="btn btn-secondary" on:click={startOver}>
         ↩ Start New Song
@@ -870,6 +910,10 @@
     </div>
   {/if}
 </div>
+
+{#if toastVisible}
+  <div class="download-toast">{toastMessage}</div>
+{/if}
 
 <style>
   .step-content {
@@ -993,17 +1037,6 @@
   .file-icon { font-size: 2rem; }
   .file-name { font-weight: 600; font-size: 0.9rem; }
   .file-desc { font-size: 0.7rem; color: #666; text-align: center; }
-
-  .success-banner {
-    text-align: center;
-    padding: 0.5rem;
-    margin-top: 1rem;
-    background: #1a3a2a;
-    border: 1px solid #66bb6a;
-    border-radius: 8px;
-    color: #66bb6a;
-    font-size: 0.85rem;
-  }
 
   .actions {
     margin-top: 2rem;
@@ -1358,4 +1391,26 @@
     border: 1px solid #333;
   }
   .crop-canvas:active { cursor: grabbing; }
+
+  .download-toast {
+    position: fixed;
+    bottom: 28px;
+    right: 28px;
+    background: #1a1a2e;
+    border: 1px solid #4fc3f7;
+    color: #4fc3f7;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    z-index: 9999;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    pointer-events: none;
+    animation: toast-in 0.2s ease;
+  }
+
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
 </style>
