@@ -137,6 +137,20 @@ Output goes to `frontend/dist/`.
 
 ---
 
+## Full App Build (Tauri + Sidecar)
+
+```bash
+./build_local.sh
+```
+
+Output: `frontend/src-tauri/target/release/bundle/` — produces `.app` + `.dmg` on Mac.
+
+> **Platform note for `tauri.conf.json` `targets`:**
+> - **Mac**: keep `"targets": "all"` (produces `.app` + `.dmg`; requires `brew install create-dmg`)
+> - **Windows**: change to `"targets": ["msi"]` — the NSIS `.exe` installer cannot handle the large Python sidecar binary due to file size limits. See [WINDOWS.md](WINDOWS.md) for details.
+
+---
+
 ## Install Dependencies
 
 **Python (backend):**
