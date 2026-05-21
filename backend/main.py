@@ -58,7 +58,8 @@ def _fix_frozen_path():
     # 1. bundled ffmpeg extracted alongside our binary by PyInstaller
     if hasattr(sys, '_MEIPASS'):
         mei = sys._MEIPASS
-        if os.path.isfile(os.path.join(mei, 'ffmpeg')):
+        ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+        if os.path.isfile(os.path.join(mei, ffmpeg_name)):
             os.environ['PATH'] = mei + os.pathsep + os.environ.get('PATH', '')
             return
     # 2. common macOS install locations (Homebrew arm64, Homebrew x86, MacPorts)
