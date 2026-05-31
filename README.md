@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v2.0.5** — Header editing (#GENRE, #CREATOR, #VOCALS, #INSTRUMENTAL, #YEAR, #EDITION, #LANGUAGE), audio compatibility fix (44.1kHz MP3 normalisation), session cleanup improvements, ZIP/download checkbox UI overhaul, and instrumental track support. See [Changelog](#changelog) below.
+> **Latest release: v3.0.0** — Pitch tolerance / difficulty selector (Hard ±1, Medium ±2, Easy ±3) for mic and vocal trace, hit/miss block overlap fix, and mic startup latency fix. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
