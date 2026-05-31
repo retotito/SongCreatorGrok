@@ -1326,8 +1326,8 @@
               i++; endBeat = vocalTraceFrames[i].beat;
             }
             const missY  = pitchToY(missPitch);
-            const xStart = beatToX(frame.beat);
-            const xEnd   = beatToX(endBeat + vtBeatGap);
+            const xStart = beatToX(Math.max(frame.beat, note.startBeat));
+            const xEnd   = beatToX(Math.min(endBeat + vtBeatGap, noteEndBeat));
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
@@ -1384,8 +1384,8 @@
               endBeat = hits[i].beat;
             }
             const missY = pitchToY(missPitch);
-            const xStart = beatToX(sample.beat);
-            const xEnd = beatToX(endBeat + beatGap);
+            const xStart = beatToX(Math.max(sample.beat, note.startBeat));
+            const xEnd = beatToX(Math.min(endBeat + beatGap, noteEndBeat));
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
