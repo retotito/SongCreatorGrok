@@ -1327,7 +1327,7 @@
             }
             const missY  = pitchToY(missPitch);
             const xStart = beatToX(frame.beat);
-            const xEnd   = beatToX(endBeat + vtBeatGap);
+            const xEnd   = beatToX(endBeat);
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
@@ -1360,6 +1360,9 @@
         // Estimate beat gap per frame for extending segments
         const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) * 1.5 : 0.3;
 
+        const noteXStart = beatToX(note.startBeat);
+        const noteXEnd   = beatToX(noteEndBeat);
+
         let i = 0;
         while (i < hits.length) {
           const sample = hits[i];
@@ -1385,7 +1388,7 @@
             }
             const missY = pitchToY(missPitch);
             const xStart = beatToX(sample.beat);
-            const xEnd = beatToX(endBeat + beatGap);
+            const xEnd = beatToX(endBeat);
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
