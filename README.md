@@ -109,6 +109,7 @@ This shows all processing steps — vocal separation progress, transcription, pi
 ### Playback & Audio
 - **Sing-along mode** — use your microphone to sing along with the song in real time, see your pitch trail overlaid on the notes for realistic editing
 - **Pitch tolerance / difficulty** — select Hard (±1), Medium (±2), or Easy (±3) semitone tolerance for hit detection in both mic and vocal trace modes
+- **Pitch line** — precomputes an offline full-song pitch analysis of the vocal audio and draws it as thin continuous dots across the entire canvas (behind all other overlays); toggled on/off with a dedicated button; useful for a quick global pitch overview without running the vocal trace in real time
 - **Vocal trace** — automatically runs the separated vocal audio through the same pitch detector as the mic; draws a pink trail behind the notes so you can see exactly where the vocals land and align notes by eye. Right-click a pink frame to insert a note at the exact position and pitch (snapped to grid). Toggle with **V**.
 - **Mic device selection** — choose from available microphones with volume gain control
 - **Active mode badge** — pulsing red MIC / pink VOCAL indicator on the canvas when recording
