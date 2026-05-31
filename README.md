@@ -18,7 +18,7 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 |----------|--------|------|
 | macOS (Apple Silicon / ARM) | ✅ Available | [Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing) |
 | macOS (Intel x86) | ✅ Available | [Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing) |
-| Windows | ✅ Available | [[Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing)]|
+| Windows | ✅ Available | [[[Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing)](https://drive.google.com/drive/folders/1ZYr0LAnmvewVIIbvbDlu5pK6F9XCBxjr)]|
 | Linux | 🔜 Coming soon | Same folder above |
 
 ### Opening on macOS (Gatekeeper bypass)
