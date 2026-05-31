@@ -2453,9 +2453,12 @@ async def update_metadata(session_id: str, artist: str = Form(...), title: str =
     session["title"] = title
     if language is not None:
         session["language"] = language
+    # Clear derived headers so _update_txt_asset_headers recomputes them from new artist/title
+    session.pop("vocals_header", None)
+    session.pop("instrumental_header", None)
     save_session(session_id)
 
-    # Rewrite headers in the .txt file on disk
+    # Rewrite all headers in the .txt file via the single source of truth
     result = session.get("result")
     if result:
         for key in ["corrected_txt_file", "txt_file"]:
@@ -2469,18 +2472,17 @@ async def update_metadata(session_id: str, artist: str = Form(...), title: str =
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
                 import re
-                _orig = session.get('original_audio') or session.get('vocal_audio') or ''
-                _ext = os.path.splitext(_orig)[1] or '.mp3'
                 content = re.sub(r"^#TITLE:.*$", f"#TITLE:{title}", content, count=1, flags=re.MULTILINE)
                 content = re.sub(r"^#ARTIST:.*$", f"#ARTIST:{artist}", content, count=1, flags=re.MULTILINE)
-                content = re.sub(r"^#MP3:.*$", f"#MP3:{artist} - {title}{_ext}", content, count=1, flags=re.MULTILINE)
                 if language:
                     content = re.sub(r"^#LANGUAGE:.*$", f"#LANGUAGE:{language}", content, count=1, flags=re.MULTILINE)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
-                log_step("METADATA", f"Updated headers in {fname}")
             except Exception as e:
                 log_step("METADATA", f"Failed to update {fname}: {e}")
+
+    # Now rewrite all asset headers (MP3, VOCALS, INSTRUMENTAL, COVER, etc.) using the single source of truth
+    _update_txt_asset_headers(session)
 
     log_step("METADATA", f"Session {session_id}: artist='{artist}', title='{title}', language='{language}'")
     return {"status": "ok", "artist": artist, "title": title, "language": language}
@@ -2587,121 +2589,122 @@ def _update_txt_asset_headers(session: dict) -> None:
     result = session.get("result")
     if not result:
         return
+    # Update both txt_file and corrected_txt_file (if they exist and are different)
+    files_to_update = []
     txt_file = result.get("txt_file")
-    if not txt_file:
+    corrected_txt_file = result.get("corrected_txt_file")
+    if txt_file:
+        files_to_update.append(txt_file)
+    if corrected_txt_file and corrected_txt_file != txt_file:
+        files_to_update.append(corrected_txt_file)
+    if not files_to_update:
         return
-    path = os.path.join(DOWNLOADS_DIR, txt_file)
-    if not os.path.exists(path):
-        return
+    for txt_file in files_to_update:
+        path = os.path.join(DOWNLOADS_DIR, txt_file)
+        if not os.path.exists(path):
+            continue
 
-    with open(path, encoding="utf-8") as f:
-        content = f.read()
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
 
-    artist = session.get("artist", "").strip()
-    title = session.get("title", "").strip()
+        artist = session.get("artist", "").strip()
+        title = session.get("title", "").strip()
 
-    # --- #MP3: set to original audio filename, or remove if no original ---
-    original_audio = session.get("original_audio")
-    if original_audio:
-        content = _set_header(content, "MP3", os.path.basename(original_audio))
-        log_step("TXT-HEADERS", f"Set #MP3 to {os.path.basename(original_audio)}")
-    else:
-        content = _remove_header(content, "MP3")
-        log_step("TXT-HEADERS", f"Removed #MP3 (original_audio={original_audio})")
-    if artist and title:
-        base = f"{artist} - {title}"
-    elif title:
-        base = title
-    elif artist:
-        base = artist
-    else:
-        base = "Untitled Song"
-
-    cover_file = session.get("cover_file")
-    if cover_file and os.path.exists(cover_file):
-        content = _set_header(content, "COVER", f"{base} [CO].jpg")
-    else:
-        content = _remove_header(content, "COVER")
-
-    bg_file = session.get("bgimage_file")
-    if bg_file and os.path.exists(bg_file):
-        content = _set_header(content, "BACKGROUND", f"{base} [BG].jpg")
-    else:
-        content = _remove_header(content, "BACKGROUND")
-
-    video_filename = session.get("video_filename")
-    if video_filename:
-        content = _set_header(content, "VIDEO", video_filename)
-        video_gap = session.get("video_gap")
-        if video_gap is not None:
-            content = _set_header(content, "VIDEOGAP", str(video_gap))
+        if artist and title:
+            base = f"{artist} - {title}"
+        elif title:
+            base = title
+        elif artist:
+            base = artist
         else:
+            base = "Untitled Song"
+
+        # --- #MP3: use Artist - Title + original extension, or remove if no original ---
+        original_audio = session.get("original_audio")
+        if original_audio:
+            ext = os.path.splitext(original_audio)[1] or '.mp3'
+            mp3_name = f"{base}{ext}"
+            content = _set_header(content, "MP3", mp3_name)
+            log_step("TXT-HEADERS", f"Set #MP3 to {mp3_name}")
+        else:
+            content = _remove_header(content, "MP3")
+            log_step("TXT-HEADERS", f"Removed #MP3 (original_audio={original_audio})")
+
+        cover_file = session.get("cover_file")
+        if cover_file and os.path.exists(cover_file):
+            content = _set_header(content, "COVER", f"{base} [CO].jpg")
+        else:
+            content = _remove_header(content, "COVER")
+
+        bg_file = session.get("bgimage_file")
+        if bg_file and os.path.exists(bg_file):
+            content = _set_header(content, "BACKGROUND", f"{base} [BG].jpg")
+        else:
+            content = _remove_header(content, "BACKGROUND")
+
+        video_filename = session.get("video_filename")
+        if video_filename:
+            content = _set_header(content, "VIDEO", video_filename)
+            video_gap = session.get("video_gap")
+            if video_gap is not None:
+                content = _set_header(content, "VIDEOGAP", str(video_gap))
+            else:
+                content = _remove_header(content, "VIDEOGAP")
+        else:
+            content = _remove_header(content, "VIDEO")
             content = _remove_header(content, "VIDEOGAP")
-    else:
-        content = _remove_header(content, "VIDEO")
-        content = _remove_header(content, "VIDEOGAP")
 
-    youtube_url = session.get("youtube_url")
-    if youtube_url:
-        content = _set_header(content, "YOUTUBE", youtube_url)
-    else:
-        content = _remove_header(content, "YOUTUBE")
+        youtube_url = session.get("youtube_url")
+        if youtube_url:
+            content = _set_header(content, "YOUTUBE", youtube_url)
+        else:
+            content = _remove_header(content, "YOUTUBE")
 
-    genre = session.get("genre", "").strip()
-    if genre:
-        content = _set_header(content, "GENRE", genre)
-    else:
-        content = _remove_header(content, "GENRE")
+        genre = session.get("genre", "").strip()
+        if genre:
+            content = _set_header(content, "GENRE", genre)
+        else:
+            content = _remove_header(content, "GENRE")
 
-    year = session.get("year", "").strip()
-    if year:
-        content = _set_header(content, "YEAR", year)
-    else:
-        content = _remove_header(content, "YEAR")
+        year = session.get("year", "").strip()
+        if year:
+            content = _set_header(content, "YEAR", year)
+        else:
+            content = _remove_header(content, "YEAR")
 
-    edition = session.get("edition", "").strip()
-    if edition:
-        content = _set_header(content, "EDITION", edition)
-    else:
-        content = _remove_header(content, "EDITION")
+        edition = session.get("edition", "").strip()
+        if edition:
+            content = _set_header(content, "EDITION", edition)
+        else:
+            content = _remove_header(content, "EDITION")
 
-    creator = session.get("creator", "").strip()
-    if creator:
-        content = _set_header(content, "CREATOR", creator)
-    else:
-        content = _remove_header(content, "CREATOR")
+        creator = session.get("creator", "").strip()
+        if creator:
+            content = _set_header(content, "CREATOR", creator)
+        else:
+            content = _remove_header(content, "CREATOR")
 
-    vocal_audio = session.get("vocal_audio")
-    vocals_header = session.get("vocals_header", "").strip()
-    # If no custom header or header is just the raw internal filename, derive archive name
-    if vocal_audio:
-        raw_vocals_name = os.path.basename(vocal_audio)
-        ext = os.path.splitext(vocal_audio)[1]
-        computed_vocals = f"{base} [Vocals]{ext}"
-        if not vocals_header or vocals_header == raw_vocals_name:
-            vocals_header = computed_vocals
-    if vocals_header:
-        content = _set_header(content, "VOCALS", vocals_header)
-    else:
-        content = _remove_header(content, "VOCALS")
+        vocal_audio = session.get("vocal_audio")
+        if vocal_audio:
+            ext = os.path.splitext(vocal_audio)[1]
+            vocals_header = f"{base} [Vocals]{ext}"
+            content = _set_header(content, "VOCALS", vocals_header)
+            log_step("TXT-HEADERS", f"Set #VOCALS to {vocals_header}")
+        else:
+            content = _remove_header(content, "VOCALS")
 
-    instrumental_audio = session.get("instrumental_audio")
-    instrumental_header = session.get("instrumental_header", "").strip()
-    # Same logic for instrumental
-    if instrumental_audio:
-        raw_instrumental_name = os.path.basename(instrumental_audio)
-        ext_i = os.path.splitext(instrumental_audio)[1]
-        computed_instrumental = f"{base} [Instrumental]{ext_i}"
-        if not instrumental_header or instrumental_header == raw_instrumental_name:
-            instrumental_header = computed_instrumental
-    if instrumental_header:
-        content = _set_header(content, "INSTRUMENTAL", instrumental_header)
-    else:
-        content = _remove_header(content, "INSTRUMENTAL")
+        instrumental_audio = session.get("instrumental_audio")
+        if instrumental_audio:
+            ext_i = os.path.splitext(instrumental_audio)[1]
+            instrumental_header = f"{base} [Instrumental]{ext_i}"
+            content = _set_header(content, "INSTRUMENTAL", instrumental_header)
+            log_step("TXT-HEADERS", f"Set #INSTRUMENTAL to {instrumental_header}")
+        else:
+            content = _remove_header(content, "INSTRUMENTAL")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    result["ultrastar_content"] = content
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        result["ultrastar_content"] = content
 
 
 # ────────────────────────────────────────────────────────────

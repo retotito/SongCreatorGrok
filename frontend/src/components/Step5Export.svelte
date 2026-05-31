@@ -349,13 +349,17 @@
   $: hasTitle = !!($lyricsData?.title?.trim());
   $: missingInfo = !hasArtist || !hasTitle;
 
-  function getBaseFilename() {
+  $: baseFilename = (() => {
     const artist = ($lyricsData?.artist || '').trim();
     const title = ($lyricsData?.title || '').trim();
     if (artist && title) return `${artist} - ${title}`;
     if (title) return title;
     if (artist) return artist;
     return 'Untitled Song';
+  })();
+
+  function getBaseFilename() {
+    return baseFilename;
   }
 
   const LANG_NAMES = {en:'English',de:'German',fr:'French',es:'Spanish',it:'Italian',pt:'Portuguese',nl:'Dutch',pl:'Polish',ru:'Russian',ja:'Japanese',ko:'Korean',zh:'Chinese',sv:'Swedish',no:'Norwegian',da:'Danish',fi:'Finnish',tr:'Turkish',ar:'Arabic',cs:'Czech',sk:'Slovak',hu:'Hungarian',ro:'Romanian',hr:'Croatian',uk:'Ukrainian',he:'Hebrew'};
@@ -671,7 +675,8 @@
           <span class="asset-label">Full Mix</span>
           <div class="video-inputs" style="padding-top: 10px;">
             {#if $uploadData?.hasOriginal}
-              <span class="asset-value">{$uploadData.filename}</span>
+              {@const origExt = ($uploadData.filename || '').match(/\.[^.]+$/)?.[0] || '.mp3'}
+              <span class="asset-value">{baseFilename}{origExt}</span>
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No audio uploaded yet. Go to
@@ -686,8 +691,9 @@
         <div class="asset-row">
           <span class="asset-label">Vocals</span>
           <div class="video-inputs" style="padding-top: 10px;">
-            {#if $uploadData?.hasVocals && editVocals}
-              <span class="asset-value">{editVocals}</span>
+            {#if $uploadData?.hasVocals}
+              {@const vocExt = ($uploadData?.vocalsFilename || '').match(/\.[^.]+$/)?.[0] || '.mp3'}
+              <span class="asset-value">{baseFilename} [Vocals]{vocExt}</span>
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No vocals yet. Go to
@@ -707,7 +713,7 @@
           <span class="asset-label">Instrumental</span>
           <div class="video-inputs" style="padding-top: 10px;">
             {#if editInstrumental}
-              <span class="asset-value">{editInstrumental}</span>
+              <span class="asset-value">{baseFilename} [Instrumental].mp3</span>
             {:else}
               <small style="color:#888;font-size:0.72rem">Not available — run Demucs in Step 2 to generate.</small>
             {/if}
