@@ -1298,8 +1298,8 @@
         const noteY = pitchToY(note.pitch);
         const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
                        : note.isRap    ? 'rgba(255, 152, 0, 0.65)'
-                       :                 'rgba(102, 187, 106, 0.7)';
-        const missColor = 'rgba(255, 100, 100, 0.45)';
+                       :                 'rgba(255, 80, 180, 0.65)';
+        const missColor = 'rgba(255, 140, 50, 0.5)';
 
         let i = lo;
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
