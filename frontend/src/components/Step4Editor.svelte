@@ -4475,7 +4475,12 @@
             Pitch <span style="font-size:0.85em">〰️</span>
           </button>
           {#if pitchLineLoading}
-            <span class="loading-label" style="font-size:0.78em; margin-left:4px">Analysing…</span>
+            <div class="loading-modal-overlay">
+              <div class="loading-modal">
+                <span class="loading-spinner"></span>
+                <span class="loading-label">Analysing vocal pitch…</span>
+              </div>
+            </div>
           {/if}
           {#if pitchLineFrames.length > 0 && !pitchLineLoading}
             <button class="tool-btn sm" on:click={() => { pitchLineFrames = []; pitchLineSourceUrl = null; pitchLineVisible = false; draw(); }} title="Clear pitch line">🗑</button>
