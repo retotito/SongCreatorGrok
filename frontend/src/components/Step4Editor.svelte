@@ -262,6 +262,12 @@
   let vocalTracePitchConfidence = 0;
   let vocalTraceRecentPitches = [];
 
+  // Pitch line — precomputed offline pitch analysis of the full vocal file
+  let pitchLineFrames = [];       // [{beat, pitch}] for the whole song
+  let pitchLineVisible = false;   // default off
+  let pitchLineLoading = false;
+  let pitchLineSourceUrl = null;  // URL used for last computation (for cache invalidation)
+
   // Text editor modal
   let showTextEditor = false;
   let textEditorContent = '';
@@ -1249,6 +1255,21 @@
         ctx.beginPath();
         ctx.arc(x + width - dotR - 1, y - noteHeight / 2 + dotR + 1, dotR, 0, Math.PI * 2);
         ctx.fill();
+      }
+    }
+
+    // ── Pitch line: precomputed full-song pitch drawn as thin continuous dots (behind everything) ──
+    if (pitchLineVisible && pitchLineFrames.length > 0) {
+      const visibleStartBeat = xToBeat(0);
+      const visibleEndBeat = xToBeat(w);
+      ctx.fillStyle = 'rgba(0, 220, 255, 0.55)';
+      const dotH = Math.max(2, noteHeight * 0.3);
+      for (let i = 0; i < pitchLineFrames.length; i++) {
+        const { beat, pitch } = pitchLineFrames[i];
+        if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
+        const x = beatToX(beat);
+        const y = pitchToY(pitch);
+        ctx.fillRect(x, y - dotH / 2, 2, dotH);
       }
     }
 
@@ -3894,6 +3915,68 @@
     }
   }
 
+  // ── Pitch line: offline full-song pitch analysis ──
+
+  async function computePitchLine() {
+    if (!vocalUrl) return;
+    pitchLineLoading = true;
+    pitchLineSourceUrl = vocalUrl;
+    pitchLineFrames = [];
+    try {
+      const response = await fetch(vocalUrl);
+      const arrayBuffer = await response.arrayBuffer();
+      const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const buffer = await tmpCtx.decodeAudioData(arrayBuffer);
+      tmpCtx.close();
+
+      const sampleRate = buffer.sampleRate;
+      const channelData = buffer.getChannelData(0);
+      const fftSize = 2048;
+      const hopSize = 512; // ~11.6ms per frame at 44100 Hz
+      const detector = PitchDetector.forFloat32Array(fftSize);
+      const samples = new Float32Array(fftSize);
+      const frames = [];
+      const yieldEvery = 2000; // yield to UI every N frames
+
+      for (let startSample = 0; startSample + fftSize <= channelData.length; startSample += hopSize) {
+        for (let i = 0; i < fftSize; i++) samples[i] = channelData[startSample + i];
+        const timeSec = startSample / sampleRate;
+        const [frequency, clarity] = detector.findPitch(samples, sampleRate);
+        if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
+          let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+          if (midiPitch < 36) midiPitch += 12;
+          if (midiPitch > 84) midiPitch -= 12;
+          frames.push({ beat: timeToBeat(timeSec), pitch: midiPitch });
+        }
+        // Yield periodically so UI stays responsive
+        if (frames.length % yieldEvery === 0 && frames.length > 0) {
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      pitchLineFrames = frames;
+      console.log(`[PitchLine] Done: ${frames.length} voiced frames`);
+    } catch (err) {
+      console.error('[PitchLine] Failed:', err);
+    } finally {
+      pitchLineLoading = false;
+      draw();
+    }
+  }
+
+  async function togglePitchLine() {
+    pitchLineVisible = !pitchLineVisible;
+    if (pitchLineVisible) {
+      // Recompute if no data yet or vocal file changed
+      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== vocalUrl) {
+        await computePitchLine();
+      } else {
+        draw();
+      }
+    } else {
+      draw();
+    }
+  }
+
   async function exportMicTrail() {
     // Convert USDX note hits to exportable format
     const noteHitsData = {};
@@ -4383,6 +4466,19 @@
               <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace"><span class="mic-icon-wrap mic-off">👁</span></button>
             {/if}
             <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
+          {/if}
+        </div>
+        <div id="pitch-line-controls-wrapper">
+          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio}
+            on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
+            title={hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
+            Pitch <span style="font-size:0.85em">〰️</span>
+          </button>
+          {#if pitchLineLoading}
+            <span class="loading-label" style="font-size:0.78em; margin-left:4px">Analysing…</span>
+          {/if}
+          {#if pitchLineFrames.length > 0 && !pitchLineLoading}
+            <button class="tool-btn sm" on:click={() => { pitchLineFrames = []; pitchLineSourceUrl = null; pitchLineVisible = false; draw(); }} title="Clear pitch line">🗑</button>
           {/if}
         </div>
       </div>
