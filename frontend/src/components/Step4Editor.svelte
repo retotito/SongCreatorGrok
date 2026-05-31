@@ -237,6 +237,7 @@
   let micRecordingStartTime = 0; // playback time when recording started
   let micGain = 1.0;        // mic volume gain (0-2)
   let micGainNode = null;   // GainNode for mic volume control
+  let pitchTolerance = 1;   // semitone hit tolerance: 1=hard, 2=medium, 3=easy
   let micLevel = 0;         // current mic input level (0-1) for indicator
   let micLevelTimer = null; // interval for level polling
   // Sticky prediction state for smoothing
@@ -1304,13 +1305,13 @@
         let i = lo;
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
           const frame = vocalTraceFrames[i];
-          const isHit = Math.abs(frame.pitch - note.pitch) <= 1;
+          const isHit = Math.abs(frame.pitch - note.pitch) <= pitchTolerance;
 
           if (isHit) {
             let endBeat = frame.beat;
             while (i + 1 < vocalTraceFrames.length
                 && vocalTraceFrames[i + 1].beat <= noteEndBeat
-                && Math.abs(vocalTraceFrames[i + 1].pitch - note.pitch) <= 1) {
+                && Math.abs(vocalTraceFrames[i + 1].pitch - note.pitch) <= pitchTolerance) {
               i++; endBeat = vocalTraceFrames[i].beat;
             }
             const xStart = beatToX(Math.max(frame.beat, note.startBeat));
@@ -3789,8 +3790,8 @@
     if (midiPitch < 36) midiPitch += 12;
     if (midiPitch > 84) midiPitch -= 12;
 
-    // ── Determine hit/miss (±2 semitones = hit, like USDX) ──
-    const isHit = Math.abs(midiPitch - targetPitch) <= 2;
+    // ── Determine hit/miss ──
+    const isHit = Math.abs(midiPitch - targetPitch) <= pitchTolerance;
 
     // Store in per-note hit map
     if (!micNoteHits.has(targetNote.id)) {
@@ -4456,6 +4457,11 @@
                value={Math.round(micGain * 100)}
                on:input={(e) => { micGain = parseInt(e.target.value) / 100; if (micGainNode) micGainNode.gain.value = micGain; }}
                title="Mic volume: {Math.round(micGain * 100)}%" />
+        <select class="mic-select" bind:value={pitchTolerance} on:change={() => draw()} title="Pitch tolerance (difficulty)">
+          <option value={1}>Hard (±1)</option>
+          <option value={2}>Medium (±2)</option>
+          <option value={3}>Easy (±3)</option>
+        </select>
         {#if micShowRawTrail && micPitchTrail.length > 0}
           <button class="tool-btn sm" on:click={exportMicTrail} title="Export mic trail as JSON">📋 Export</button>
         {/if}
@@ -5381,7 +5387,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    width: 335px;
+    width: 400px;
     border: 1px solid #333;
     border-radius: 4px;
   }
