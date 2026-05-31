@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v3.0.0** — Pitch tolerance / difficulty selector (Hard ±1, Medium ±2, Easy ±3) for mic and vocal trace, hit/miss block overlap fix, and mic startup latency fix. See [Changelog](#changelog) below.
+> **Latest release: v3.0.0** — Pitch line overlay (precomputed full-song pitch dots, toggleable), pitch tolerance / difficulty selector (Hard ±1, Medium ±2, Easy ±3) for mic and vocal trace, hit/miss block overlap fix, and mic startup latency fix. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -218,6 +218,7 @@ Open **http://localhost:5173** in your browser. The Vite proxy automatically for
 ## Changelog
 
 ### v3.0.0
+- **Pitch line overlay** — precomputes an offline full-song pitch analysis of the vocal audio and draws thin continuous dots across the entire canvas; toggle on/off with a dedicated button
 - **Pitch tolerance selector** — choose Hard (±1 semitone), Medium (±2), or Easy (±3) hit tolerance for both mic sing-along and vocal trace modes; dropdown appears in the mic controls panel
 - **Hit/miss overlap fix** — red (miss) blocks no longer extend into the start of adjacent green (hit) blocks; miss blocks now end exactly at their last detected sample beat
 - **Mic startup latency fix** — disabled `echoCancellation` and `noiseSuppression` on mic input to eliminate the initial audio processing delay before pitch detection begins
