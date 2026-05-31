@@ -1273,28 +1273,66 @@
       }
     }
 
-    // ── Vocal trace: draw cyan at actual sung pitch for every voiced frame (behind notes) ──
+    // ── Vocal trace: note-bound hit/miss blocks (mirrors mic sing-along) ──
     if (vocalTraceVisible && vocalTraceFrames.length > 0) {
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
-      const traceColor = 'rgba(255, 80, 180, 0.55)';
-      ctx.fillStyle = traceColor;
-      let i = 0;
-      while (i < vocalTraceFrames.length) {
-        const sample = vocalTraceFrames[i];
-        if (sample.beat < visibleStartBeat - 1 || sample.beat > visibleEndBeat + 1) { i++; continue; }
-        const pitch = sample.pitch;
-        let endBeat = sample.beat;
-        while (i + 1 < vocalTraceFrames.length && vocalTraceFrames[i + 1].pitch === pitch) {
-          i++;
-          endBeat = vocalTraceFrames[i].beat;
+      // Estimate beat gap between frames (for visual continuity)
+      const vtBeatGap = vocalTraceFrames.length > 1
+        ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5
+        : 0.15;
+
+      for (const note of notes) {
+        if (note.type === 'break') continue;
+        const noteEndBeat = note.startBeat + note.duration;
+        if (noteEndBeat < visibleStartBeat - 1 || note.startBeat > visibleEndBeat + 1) continue;
+
+        // Binary search: first frame at or after note.startBeat
+        let lo = 0, hi = vocalTraceFrames.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (vocalTraceFrames[mid].beat < note.startBeat) lo = mid + 1;
+          else hi = mid;
         }
-        const beatGap = 0.3;
-        const y = pitchToY(pitch);
-        const xStart = beatToX(sample.beat);
-        const xEnd = beatToX(endBeat + beatGap);
-        ctx.fillRect(xStart, y - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
-        i++;
+
+        const noteY = pitchToY(note.pitch);
+        const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
+                       : note.isRap    ? 'rgba(255, 152, 0, 0.65)'
+                       :                 'rgba(102, 187, 106, 0.7)';
+        const missColor = 'rgba(255, 100, 100, 0.45)';
+
+        let i = lo;
+        while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
+          const frame = vocalTraceFrames[i];
+          const isHit = Math.abs(frame.pitch - note.pitch) <= 1;
+
+          if (isHit) {
+            let endBeat = frame.beat;
+            while (i + 1 < vocalTraceFrames.length
+                && vocalTraceFrames[i + 1].beat <= noteEndBeat
+                && Math.abs(vocalTraceFrames[i + 1].pitch - note.pitch) <= 1) {
+              i++; endBeat = vocalTraceFrames[i].beat;
+            }
+            const xStart = beatToX(Math.max(frame.beat, note.startBeat));
+            const xEnd   = beatToX(Math.min(endBeat + vtBeatGap, noteEndBeat));
+            ctx.fillStyle = hitColor;
+            ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
+          } else {
+            const missPitch = frame.pitch;
+            let endBeat = frame.beat;
+            while (i + 1 < vocalTraceFrames.length
+                && vocalTraceFrames[i + 1].beat <= noteEndBeat
+                && vocalTraceFrames[i + 1].pitch === missPitch) {
+              i++; endBeat = vocalTraceFrames[i].beat;
+            }
+            const missY  = pitchToY(missPitch);
+            const xStart = beatToX(frame.beat);
+            const xEnd   = beatToX(endBeat + vtBeatGap);
+            ctx.fillStyle = missColor;
+            ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
+          }
+          i++;
+        }
       }
     }
 
