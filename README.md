@@ -18,7 +18,7 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 |----------|--------|------|
 | macOS (Apple Silicon / ARM) | ✅ Available | [Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing) |
 | macOS (Intel x86) | ✅ Available | [Google Drive](https://drive.google.com/drive/folders/1sFrLy6YNSMU56L0XAZ8I3tmb6WcEh1Oc?usp=sharing) |
-| Windows | ✅ Available |  [Google Drive](https://drive.google.com/drive/folders/1ZYr0LAnmvewVIIbvbDlu5pK6F9XCBxjr?usp=sharing) |
+| Windows | 🔜 Coming soon | Same folder above |
 | Linux | 🔜 Coming soon | Same folder above |
 
 ### Opening on macOS (Gatekeeper bypass)
@@ -108,6 +108,7 @@ This shows all processing steps — vocal separation progress, transcription, pi
 
 ### Playback & Audio
 - **Sing-along mode** — use your microphone to sing along with the song in real time, see your pitch trail overlaid on the notes for realistic editing
+- **Pitch tolerance / difficulty** — select Hard (±1), Medium (±2), or Easy (±3) semitone tolerance for hit detection in both mic and vocal trace modes
 - **Vocal trace** — automatically runs the separated vocal audio through the same pitch detector as the mic; draws a pink trail behind the notes so you can see exactly where the vocals land and align notes by eye. Right-click a pink frame to insert a note at the exact position and pitch (snapped to grid). Toggle with **V**.
 - **Mic device selection** — choose from available microphones with volume gain control
 - **Active mode badge** — pulsing red MIC / pink VOCAL indicator on the canvas when recording
@@ -214,6 +215,11 @@ npm run dev
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
 ## Changelog
+
+### v3.0.0
+- **Pitch tolerance selector** — choose Hard (±1 semitone), Medium (±2), or Easy (±3) hit tolerance for both mic sing-along and vocal trace modes; dropdown appears in the mic controls panel
+- **Hit/miss overlap fix** — red (miss) blocks no longer extend into the start of adjacent green (hit) blocks; miss blocks now end exactly at their last detected sample beat
+- **Mic startup latency fix** — disabled `echoCancellation` and `noiseSuppression` on mic input to eliminate the initial audio processing delay before pitch detection begins
 
 ### v2.0.5
 - **Header editing** — `#GENRE`, `#CREATOR`, `#VOCALS`, `#INSTRUMENTAL`, `#YEAR`, `#EDITION`, and `#LANGUAGE` fields are now editable in the Edit Song modal; all are written into the exported `.txt` and ZIP
