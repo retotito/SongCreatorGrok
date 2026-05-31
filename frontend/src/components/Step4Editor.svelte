@@ -3598,8 +3598,8 @@
   async function startMic() {
     try {
       const audioConstraints = {
-        echoCancellation: true,
-        noiseSuppression: true,
+        echoCancellation: false, // warm-up latency + distorts pitch signal; highpass filter handles bass
+        noiseSuppression: false, // same — introduces ~1s init delay and degrades pitch clarity
         autoGainControl: false,  // keep off — we want raw pitch, not normalized volume
         ...(micDeviceId ? { deviceId: { exact: micDeviceId } } : {})
       };
