@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v3.0.0** — Pitch line overlay (precomputed full-song pitch dots, toggleable), pitch tolerance / difficulty selector (Hard ±1, Medium ±2, Easy ±3) for mic and vocal trace, hit/miss block overlap fix, and mic startup latency fix. See [Changelog](#changelog) below.
+> **Latest release: v3.0.1** — BPM tapper modal, BPM change fixes (no gaps, preserve note edits), vocal trace octave correction. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -216,6 +216,14 @@ npm run dev
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
 ## Changelog
+
+### v3.0.1
+- **BPM tapper** — new Tap button next to the BPM input opens a modal where you tap the beat by clicking or pressing Enter; shows live BPM and apply buttons for 1×–8× multipliers; play/pause and jump-to-GAP controls included; metronome is muted while the tapper is open
+- **BPM change: no gaps** — fixed double-rounding that caused gaps to appear between adjacent notes when changing BPM; notes now scale using a single proportional multiply
+- **BPM change: preserve edits** — syllable, pitch, and x-position/duration edits are now preserved when BPM is changed
+- **BPM change: clear overlays** — pitch line, vocal trace, and mic trail are automatically cleared on BPM change (they would be misaligned at the new BPM)
+- **GAP change: stable positions** — notes now stay at their absolute audio positions when only the GAP is adjusted
+- **Vocal trace octave correction** — vocal trace hit detection now applies the same octave-correction logic as mic sing-along, so singing an octave higher or lower still counts as a hit
 
 ### v3.0.0
 - **Pitch line overlay** — precomputes an offline full-song pitch analysis of the vocal audio and draws thin continuous dots across the entire canvas; toggle on/off with a dedicated button
