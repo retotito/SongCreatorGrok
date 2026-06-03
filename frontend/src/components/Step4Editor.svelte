@@ -858,6 +858,16 @@
     // and would produce corrupted notes if restored after a BPM change.
     undoStack = [];
     redoStack = [];
+    // Clear pitch line — its beat positions were computed at the old BPM and would be misaligned
+    pitchLineFrames = [];
+    pitchLineVisible = false;
+    pitchLineSourceUrl = null;
+    // Clear vocal trace — beat positions are BPM-dependent
+    vocalTraceFrames = [];
+    vocalTraceEnabled = false;
+    // Stop mic and clear trail — hit positions are beat-based at old BPM
+    if (micEnabled) { micEnabled = false; stopMic(); }
+    clearMicTrail();
     snapGapToGrid();
     handleBpmGapChange(true);
     markUnsaved();
