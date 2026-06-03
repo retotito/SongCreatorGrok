@@ -1401,13 +1401,20 @@
         let i = lo;
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
           const frame = vocalTraceFrames[i];
-          const isHit = Math.abs(frame.pitch - note.pitch) <= pitchTolerance;
+          // Octave-correct the frame pitch toward the note (same as mic sing-along)
+          let framePitch = frame.pitch;
+          while (framePitch - note.pitch > 6)  framePitch -= 12;
+          while (framePitch - note.pitch < -6) framePitch += 12;
+          const isHit = Math.abs(framePitch - note.pitch) <= pitchTolerance;
 
           if (isHit) {
             let endBeat = frame.beat;
             while (i + 1 < vocalTraceFrames.length
-                && vocalTraceFrames[i + 1].beat <= noteEndBeat
-                && Math.abs(vocalTraceFrames[i + 1].pitch - note.pitch) <= pitchTolerance) {
+                && vocalTraceFrames[i + 1].beat <= noteEndBeat) {
+              let fp = vocalTraceFrames[i + 1].pitch;
+              while (fp - note.pitch > 6)  fp -= 12;
+              while (fp - note.pitch < -6) fp += 12;
+              if (Math.abs(fp - note.pitch) > pitchTolerance) break;
               i++; endBeat = vocalTraceFrames[i].beat;
             }
             const xStart = beatToX(Math.max(frame.beat, note.startBeat));
