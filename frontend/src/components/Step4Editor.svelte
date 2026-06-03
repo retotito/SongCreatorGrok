@@ -460,6 +460,18 @@
     }
     console.log(`[Requantize] bpm=${bpm} gap=${gapMs}ms, ${rawTimings.length} timings`);
 
+    // Preserve user edits (syllable, pitch) by capturing current note values indexed by rawTimings position.
+    // Notes and rawTimings are in the same order (one note per timing entry), so we match by index.
+    const currentNotes = notes.filter(n => n.type !== 'break');
+    const userEdits = {}; // index in rawTimings → { syllable, pitch, isRap }
+    let noteIdx = 0;
+    for (let i = 0; i < rawTimings.length; i++) {
+      if (noteIdx < currentNotes.length) {
+        userEdits[i] = { syllable: currentNotes[noteIdx].syllable, pitch: currentNotes[noteIdx].pitch, isRap: currentNotes[noteIdx].isRap };
+        noteIdx++;
+      }
+    }
+
     const gapSec = gapMs / 1000;
     let id = 0;
     let prevLineIndex = null;
@@ -484,27 +496,40 @@
         }
       }
 
-      let startBeat = Math.round(((startSec - gapSec) * bpm) / 15);
-      let endBeat   = Math.max(startBeat + 1, Math.round(((endSec - gapSec) * bpm) / 15));
+      // Use stored beat positions for direct proportional scaling (single Math.round, no drift).
+      // Fall back to seconds-based conversion for notes that have never been synced.
+      let startBeat, duration;
+      if (timing.syncedBpm != null && timing.beatAtBpm != null) {
+        startBeat = Math.round(timing.beatAtBpm * bpm / timing.syncedBpm);
+        duration  = Math.max(1, Math.round(timing.durationAtBpm * bpm / timing.syncedBpm));
+      } else {
+        startBeat = Math.round(((timing.start - gapSec) * bpm) / 15);
+        const endBeat = Math.max(startBeat + 1, Math.round(((timing.end - gapSec) * bpm) / 15));
+        duration  = Math.max(1, endBeat - startBeat);
+      }
+      let endBeat = startBeat + duration;
 
       // Prevent overlap with previous note
-      if (startBeat <= lastEndBeat && newNotes.some(n => n.type !== 'break')) {
+      if (startBeat < lastEndBeat && newNotes.some(n => n.type !== 'break')) {
         startBeat = lastEndBeat + 1;
         endBeat = Math.max(startBeat + 1, endBeat);
+        duration = endBeat - startBeat;
       }
 
-      const duration = Math.max(1, endBeat - startBeat);
-      const pitch = pitchMap[i] ?? 60;
+      // Use user-edited syllable/pitch if available, otherwise fall back to rawTimings/pitchMap
+      const editedSyllable = userEdits[i]?.syllable ?? timing.syllable;
+      const editedPitch    = userEdits[i]?.pitch    ?? pitchMap[i] ?? 60;
+      const editedIsRap    = userEdits[i]?.isRap    ?? timing.is_rap ?? false;
 
       newNotes.push({
         id: id++,
         startBeat,
         duration,
-        pitch,
-        syllable: timing.syllable,
-        isRap: timing.is_rap ?? false,
+        pitch: editedPitch,
+        syllable: editedSyllable,
+        isRap: editedIsRap,
         confidence: timing.confidence ?? 1.0,
-        original: { startBeat, duration, pitch },
+        original: { startBeat, duration, pitch: editedPitch },
       });
 
       lastEndBeat = startBeat + duration;
@@ -513,6 +538,8 @@
 
     notes = newNotes;
     console.log(`[Requantize] Built ${newNotes.filter(n => n.type !== 'break').length} notes, ${newNotes.filter(n => n.type === 'break').length} breaks`);
+    // Keep rawTimings in sync so the next BPM change requantizes from these beat positions
+    syncRawTimingsFromNotes();
     updatePitchRange();
     computeTotalBeats();
     draw();
@@ -533,6 +560,7 @@
       downbeatOffsetMs,
       downbeatFromHeader,
       extraHeaders: JSON.parse(JSON.stringify(extraHeaders)),
+      rawTimings: JSON.parse(JSON.stringify(rawTimings)),
     };
   }
 
@@ -543,6 +571,7 @@
     if (snap.downbeatOffsetMs !== undefined) downbeatOffsetMs = snap.downbeatOffsetMs;
     if (snap.downbeatFromHeader !== undefined) downbeatFromHeader = snap.downbeatFromHeader;
     if (snap.extraHeaders !== undefined) extraHeaders = snap.extraHeaders;
+    if (snap.rawTimings !== undefined) rawTimings = snap.rawTimings;
 
     selectedNote = null;
     selectedNotes = new Set();
@@ -773,8 +802,13 @@
 
   /** Called when only BPM changes — snaps GAP to nearest beat first, then requantizes. */
   function handleBpmChange() {
+    // Clear undo/redo history — old snapshots reference beat positions at the previous BPM
+    // and would produce corrupted notes if restored after a BPM change.
+    undoStack = [];
+    redoStack = [];
     snapGapToGrid();
     handleBpmGapChange();
+    markUnsaved();
   }
 
   function handleBpmGapChange() {
@@ -2102,6 +2136,23 @@
     draw();
   }
 
+  /** After a manual note drag/resize, write current beat positions back to rawTimings (as seconds)
+   *  so that a subsequent BPM change will requantize from the user's adjusted positions. */
+  function syncRawTimingsFromNotes() {
+    if (!rawTimings || rawTimings.length === 0) return;
+    const gapSec = gapMs / 1000;
+    const nonBreakNotes = notes.filter(n => n.type !== 'break');
+    for (let i = 0; i < rawTimings.length && i < nonBreakNotes.length; i++) {
+      const note = nonBreakNotes[i];
+      rawTimings[i].start = gapSec + (note.startBeat * 15) / bpm;
+      rawTimings[i].end   = gapSec + ((note.startBeat + note.duration) * 15) / bpm;
+      // Also store beat positions + BPM so requantize can scale directly (avoids double-rounding)
+      rawTimings[i].beatAtBpm       = note.startBeat;
+      rawTimings[i].durationAtBpm   = note.duration;
+      rawTimings[i].syncedBpm       = bpm;
+    }
+  }
+
   function handleMouseUp() {
     // Finish flag drag
     if (isDragging && selectedFlag !== null) {
@@ -2196,6 +2247,8 @@
 
     if (isDragging) {
       console.log('[Mouse] mouseUp, drag ended');
+      // Sync manual note positions back into rawTimings so requantize preserves them
+      syncRawTimingsFromNotes();
     }
     stopDragOsc();
     isDragging = false;
