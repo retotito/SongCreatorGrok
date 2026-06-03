@@ -51,12 +51,15 @@ This shows all processing steps — vocal separation progress, transcription, pi
 | **3. Editor** | Review and adjust notes in the piano roll | Shows waveform, plays MIDI pitches, supports grid snap, BPM calibration |
 | **4. Export** | Add cover/background art, video info, download your files | Exports ZIP with Ultrastar .txt (including asset headers), MIDI, images, and audio |
 
-## Video Tutorial
+## Video Tutorials
 
-### Overview — Getting Started
-<a href="https://www.youtube.com/watch?v=zKw03mhrYX8">
-  <img src="docs/screenshots/youtube overview tutorial.jpeg" width="50%" alt="Overview Tutorial"/>
-</a>
+| Overview — Getting Started | Pitch Line, Vocal Tracing & Sing Along |
+|:--------------------------:|:--------------------------------------:|
+| [![Overview](https://img.youtube.com/vi/zKw03mhrYX8/hqdefault.jpg)](https://www.youtube.com/watch?v=zKw03mhrYX8&t=5s) | [![Pitch Line & Vocal Trace](https://img.youtube.com/vi/p4ihQaDhwfg/hqdefault.jpg)](https://www.youtube.com/watch?v=p4ihQaDhwfg) |
+
+| Looping & Scrubbing | BPM & Metronome |
+|:-------------------:|:---------------:|
+| [![Looping & Scrubbing](https://img.youtube.com/vi/WwAZQlhqSwE/hqdefault.jpg)](https://www.youtube.com/watch?v=WwAZQlhqSwE&t=2s) | [![BPM & Metronome](https://img.youtube.com/vi/L8jnov5M-XY/hqdefault.jpg)](https://www.youtube.com/watch?v=L8jnov5M-XY) |
 
 ## Screenshots
 
