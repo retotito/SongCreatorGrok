@@ -453,7 +453,7 @@
   // ──── BPM Re-quantization ────────────────────
   // Rebuild notes from raw ms timings using the current bpm/gapMs,
   // preserving pitches from the original Ultrastar parse.
-  function requantizeFromMs() {
+  function requantizeFromMs(bpmActuallyChanged = false) {
     if (!rawTimings || rawTimings.length === 0) {
       console.log('[Requantize] No rawTimings, skipping');
       return;
@@ -497,9 +497,10 @@
       }
 
       // Use stored beat positions for direct proportional scaling (single Math.round, no drift).
-      // Fall back to seconds-based conversion for notes that have never been synced.
+      // Only use this path on actual BPM changes; for GAP-only changes use seconds so notes
+      // stay at their absolute audio positions.
       let startBeat, duration;
-      if (timing.syncedBpm != null && timing.beatAtBpm != null) {
+      if (bpmActuallyChanged && timing.syncedBpm != null && timing.beatAtBpm != null) {
         startBeat = Math.round(timing.beatAtBpm * bpm / timing.syncedBpm);
         duration  = Math.max(1, Math.round(timing.durationAtBpm * bpm / timing.syncedBpm));
       } else {
@@ -807,11 +808,11 @@
     undoStack = [];
     redoStack = [];
     snapGapToGrid();
-    handleBpmGapChange();
+    handleBpmGapChange(true);
     markUnsaved();
   }
 
-  function handleBpmGapChange() {
+  function handleBpmGapChange(bpmActuallyChanged = false) {
     console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} (initial: bpm=${initialBpm} gap=${initialGap})`);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
@@ -819,7 +820,7 @@
       const gapSec = gapMs / 1000;
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
-    requantizeFromMs();
+    requantizeFromMs(bpmActuallyChanged);
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
