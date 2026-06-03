@@ -205,6 +205,57 @@
   let showWaveform = true;
   let waveformHeight = 60; // px reserved at top of canvas for waveform (adjustable)
 
+  // BPM Tapper modal
+  let tapperOpen = false;
+  let tapTimes = [];       // Array of Date.now() timestamps
+  let tapBpm = null;       // Computed BPM from taps
+  let tapLastTime = 0;     // For detecting stale session
+
+  function openTapper() {
+    tapTimes = [];
+    tapBpm = null;
+    tapLastTime = 0;
+    tapperOpen = true;
+  }
+
+  function closeTapper() {
+    tapperOpen = false;
+  }
+
+  function recordTap() {
+    const now = Date.now();
+    // Reset if more than 3 seconds since last tap (new session)
+    if (tapLastTime > 0 && now - tapLastTime > 3000) {
+      tapTimes = [];
+    }
+    tapTimes = [...tapTimes, now];
+    tapLastTime = now;
+    if (tapTimes.length >= 2) {
+      const span = tapTimes[tapTimes.length - 1] - tapTimes[0];
+      const intervals = tapTimes.length - 1;
+      tapBpm = Math.round((intervals / span) * 60000 * 10) / 10; // 1 decimal
+    }
+  }
+
+  function resetTapper() {
+    tapTimes = [];
+    tapBpm = null;
+    tapLastTime = 0;
+  }
+
+  function applyTappedBpm() {
+    if (!tapBpm) return;
+    bpm = tapBpm;
+    handleBpmChange();
+    closeTapper();
+  }
+
+  function handleTapperKeydown(e) {
+    if (!tapperOpen) return;
+    if (e.key === 'Enter') { e.preventDefault(); recordTap(); }
+    if (e.key === 'Escape') { closeTapper(); }
+  }
+
   // Beat Marker BPM Calibration
   // Each marker: { t: seconds, bar: integer (1-based bar number in the song) }
   let beatMarkers = [];
@@ -3557,6 +3608,7 @@
   }
 
   function playMetronomeClick(isDownbeat) {
+    if (tapperOpen) return; // muted while tapper modal is open
     ensureMetronomeCtx();
     const osc = metronomeCtx.createOscillator();
     const gain = metronomeCtx.createGain();
@@ -4403,6 +4455,7 @@
     }
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('keydown', handleKeydownSave);
+    window.addEventListener('keydown', handleTapperKeydown);
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('click', handleGlobalClick);
     autosaveInterval = setInterval(() => { if (hasUnsavedChanges) handleSave(); }, 10000);
@@ -4420,6 +4473,7 @@
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
     window.removeEventListener('keydown', handleKeydownSave);
+    window.removeEventListener('keydown', handleTapperKeydown);
     window.removeEventListener('resize', resizeCanvas);
     window.removeEventListener('click', handleGlobalClick);
     stopMic();
@@ -4598,11 +4652,18 @@
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
+          <button class="tool-btn" style="margin-left: 4px;"
+                on:click={openTapper}
+                title="Tap the beat to calculate BPM (Enter key)">
+            Tap
+          </button>
+          <!-- Cal button kept for reference (beat marker calibration)
           <button class="tool-btn" class:active={beatMarkerMode} style="margin-left: 4px;"
                 on:click={() => beatMarkerMode ? (exitBeatMarkerMode(), draw()) : enterBeatMarkerMode()}
                 title="Calibrate BPM by clicking downbeats on the waveform">
             Cal
           </button>
+          -->
         </div>
         <div id="gap-controls" title="Click to set a new GAP position on the waveform (Ctrl+G)">
           <span class="bpm-label gap-label">GAP</span>
@@ -4739,6 +4800,55 @@
       </span>
       <button class="gridalign-confirm-btn" on:click={confirmGridAlign}>✓ Confirm</button>
       <button class="gridalign-cancel-btn" on:click={cancelGridAlign}>✕ Cancel</button>
+    </div>
+  {/if}
+
+  <!-- BPM Tapper modal -->
+  {#if tapperOpen}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div class="tapper-backdrop" on:click|self={closeTapper}>
+      <div class="tapper-modal">
+        <button class="tapper-close-btn" on:click={closeTapper} title="Close">✕</button>
+        <h3 class="tapper-title">BPM Tapper</h3>
+        <p class="tapper-hint">Tap the button or press <kbd>Enter</kbd> on every beat.<br><kbd>Space</kbd> still controls playback.</p>
+
+        <div class="tapper-bpm">
+          {#if tapBpm !== null}
+            <span class="tapper-bpm-value">{tapBpm.toFixed(1)}</span>
+            <span class="tapper-bpm-unit">BPM</span>
+          {:else if tapTimes.length === 1}
+            <span class="tapper-bpm-waiting">---</span>
+          {:else}
+            <span class="tapper-bpm-waiting">Tap to start…</span>
+          {/if}
+        </div>
+
+        {#if tapTimes.length > 0}
+          <div class="tapper-count">{tapTimes.length} tap{tapTimes.length !== 1 ? 's' : ''}</div>
+        {/if}
+
+        <button class="tapper-tap-btn" on:click={recordTap}>TAP</button>
+
+        <div class="tapper-actions">
+          <button class="tool-btn" on:click={() => seekToTime(0)} title="Jump to 0s">⏮⏮</button>
+          <button class="tool-btn" on:click={() => seekToTime(gapMs / 1000)} title="Jump to GAP">GAP⏮</button>
+          <button class="tool-btn" on:click={togglePlayback}>{isPlaying ? '⏸ Pause' : '▶ Play'}</button>
+          <button class="tool-btn tapper-reset-btn" on:click={resetTapper}>Reset</button>
+        </div>
+
+        {#if tapBpm !== null}
+          <div class="tapper-apply-row">
+            {#each [1,2,3,4,5,6,7,8] as mult}
+              <button class="tapper-apply-btn" class:primary={mult === 1}
+                on:click={() => { bpm = Math.round(tapBpm * mult * 10) / 10; handleBpmChange(); closeTapper(); }}>
+                <span class="tapper-mult">{mult}×</span>
+                <span class="tapper-mult-bpm">{(tapBpm * mult).toFixed(1)}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -5221,6 +5331,151 @@
     transition: background 0.2s;
   }
   .setgap-cancel-btn:hover { background: #e53935; }
+
+  /* ── BPM Tapper modal ── */
+  .tapper-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .tapper-modal {
+    background: #1e1e2e;
+    border: 1px solid #444;
+    border-radius: 12px;
+    padding: 2rem 2.5rem;
+    min-width: 320px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+    position: relative;
+  }
+  .tapper-close-btn {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.75rem;
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+  .tapper-close-btn:hover { color: #fff; background: #444; }
+  .tapper-title {
+    margin: 0;
+    font-size: 1.2rem;
+    color: #ccc;
+    font-weight: 600;
+  }
+  .tapper-hint {
+    margin: 0;
+    font-size: 0.78rem;
+    color: #888;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .tapper-hint kbd {
+    background: #333;
+    border: 1px solid #555;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 0.75rem;
+    color: #ccc;
+  }
+  .tapper-bpm {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-height: 3.5rem;
+  }
+  .tapper-bpm-value {
+    font-size: 3rem;
+    font-weight: 700;
+    color: #7ec8e3;
+    line-height: 1;
+  }
+  .tapper-bpm-unit {
+    font-size: 1.1rem;
+    color: #888;
+  }
+  .tapper-bpm-waiting {
+    font-size: 1.1rem;
+    color: #555;
+  }
+  .tapper-count {
+    font-size: 0.8rem;
+    color: #666;
+  }
+  .tapper-tap-btn {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: #2a4a6a;
+    border: 3px solid #7ec8e3;
+    color: #7ec8e3;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    transition: background 0.08s, transform 0.08s;
+    user-select: none;
+  }
+  .tapper-tap-btn:active {
+    background: #3a6a9a;
+    transform: scale(0.94);
+  }
+  .tapper-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+  }
+  .tapper-reset-btn { background: #6a3a00 !important; border-color: #ff8c00 !important; color: #ff8c00 !important; }
+  .tapper-reset-btn:hover { background: #8a5000 !important; }
+
+  .tapper-apply-row {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 0.25rem;
+  }
+  .tapper-apply-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.4rem 0.6rem;
+    background: #2a3a4a;
+    border: 1px solid #4a6a8a;
+    border-radius: 6px;
+    color: #9ec8e3;
+    cursor: pointer;
+    min-width: 56px;
+    transition: background 0.1s;
+  }
+  .tapper-apply-btn:hover { background: #3a5a7a; }
+  .tapper-apply-btn.primary {
+    border-color: #7ec8e3;
+    background: #2a4a6a;
+  }
+  .tapper-apply-btn.primary:hover { background: #3a6a9a; }
+  .tapper-mult {
+    font-size: 0.65rem;
+    color: #7a9ab0;
+    line-height: 1;
+  }
+  .tapper-mult-bpm {
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1.3;
+  }
 
   /* ── Beat Marker Calibration bar ── */
   .beatcal-mode-bar {
