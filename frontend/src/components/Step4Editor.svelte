@@ -313,6 +313,10 @@
   let vocalTraceLastPitch = -1;
   let vocalTracePitchConfidence = 0;
   let vocalTraceRecentPitches = [];
+  // Fixed-grid sampling: sample every fixed number of seconds of audio time so the
+  // same audio bytes are always sampled at the same positions regardless of rAF timing.
+  const VOCAL_TRACE_STEP_SEC = 0.025;   // sample every 25ms (~0.67 beats at BPM 120)
+  let vocalTraceNextSampleSec = 0;
 
   // Pitch line — precomputed offline pitch analysis of the full vocal file
   let pitchLineFrames = [];       // [{beat, pitch}] for the whole song
@@ -1399,8 +1403,12 @@
         const missColor = 'rgba(255, 140, 50, 0.5)';
 
         let i = lo;
+        let firstHitDrawn = false; // track if we've drawn the first hit block for this note
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
           const frame = vocalTraceFrames[i];
+          // Don't draw frames ahead of the playhead during active playback
+          // (same behaviour as mic sing-along). When paused, show all recorded frames.
+          if (isPlaying && frame.beat > playbackBeat) break;
           // Octave-correct the frame pitch toward the note (same as mic sing-along)
           let framePitch = frame.pitch;
           while (framePitch - note.pitch > 6)  framePitch -= 12;
@@ -1417,7 +1425,13 @@
               if (Math.abs(fp - note.pitch) > pitchTolerance) break;
               i++; endBeat = vocalTraceFrames[i].beat;
             }
-            const xStart = beatToX(Math.max(frame.beat, note.startBeat));
+            // Extend first hit block back to note start if it began within 2 beats
+            // (compensates for rAF warmup jitter — the sampler may miss the first few frames)
+            const hitStart = !firstHitDrawn && (frame.beat - note.startBeat) <= 2.0
+              ? note.startBeat
+              : frame.beat;
+            firstHitDrawn = true;
+            const xStart = beatToX(Math.max(hitStart, note.startBeat));
             const xEnd   = beatToX(Math.min(endBeat + vtBeatGap, noteEndBeat));
             ctx.fillStyle = hitColor;
             ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
@@ -3087,6 +3101,7 @@
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
+      if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
       audioEl.pause();
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
@@ -3111,6 +3126,14 @@
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
+      // Clear any existing vocal trace frames from this point forward so re-plays
+      // don't mix old and new frames at different beat positions.
+      if (vocalTraceEnabled) {
+        const cutBeat = playbackBeat;
+        vocalTraceFrames = vocalTraceFrames.filter(f => f.beat < cutBeat);
+        // Align next sample to the nearest grid step at or after current time
+        vocalTraceNextSampleSec = Math.ceil(currentTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+      }
       // Pre-warm vocal trace rolling median so frame 1 already has a full window
       if (vocalTraceEnabled && vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf) {
         warmupVocalTrace(currentTimeSec);
@@ -3621,7 +3644,13 @@
     if (midiPlayback) updateMidiPlayback(playbackBeat);
     if (metronomeEnabled) updateMetronome(playbackBeat);
     if (micEnabled && micAnalyser) sampleMicPitch(currentTimeSec);
-    if (vocalTraceEnabled && vocalTraceDecodedBuffer) sampleVocalTrace(currentTimeSec);
+    if (vocalTraceEnabled && vocalTraceDecodedBuffer) {
+      // Fixed-grid: sample at deterministic timeSec positions regardless of rAF timing
+      while (vocalTraceNextSampleSec <= currentTimeSec) {
+        sampleVocalTrace(vocalTraceNextSampleSec);
+        vocalTraceNextSampleSec += VOCAL_TRACE_STEP_SEC;
+      }
+    }
     animFrame = requestAnimationFrame(updatePlayback);
   }
 
@@ -4066,17 +4095,16 @@
   }
 
   function warmupVocalTrace(startTimeSec) {
-    // Pre-fill the rolling median by silently sampling the 5 frames just before startTimeSec.
-    // This prevents the first real frames from getting unstable median values.
+    // Pre-fill the rolling median using the same fixed-sec grid so warmup is consistent.
     vocalTraceLastPitch = -1;
     vocalTracePitchConfidence = 0;
     vocalTraceRecentPitches = [];
+    const firstGridSec = Math.ceil(startTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
     const sampleRate = vocalTraceDecodedBuffer.sampleRate;
     const channelData = vocalTraceDecodedBuffer.getChannelData(0);
     const fftSize = 2048;
-    const hopSec = fftSize / sampleRate; // ~46ms per frame at 44100 Hz
     for (let i = 5; i >= 1; i--) {
-      const t = startTimeSec - i * hopSec;
+      const t = firstGridSec - i * VOCAL_TRACE_STEP_SEC;
       if (t < 0) continue;
       const startSample = Math.floor(t * sampleRate);
       if (startSample + fftSize > channelData.length) continue;
@@ -4104,8 +4132,10 @@
     for (let i = 0; i < fftSize; i++) vocalTraceSampleBuf[i] = channelData[startSample + i];
 
     const [frequency, clarity] = vocalTraceDetector.findPitch(vocalTraceSampleBuf, sampleRate);
+    const currentBeatForLog = timeToBeat(timeSec);
 
     if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) {
+      console.log(`[VT:sample] beat=${currentBeatForLog.toFixed(3)} timeSec=${timeSec.toFixed(4)} UNVOICED clarity=${clarity.toFixed(2)} freq=${frequency.toFixed(1)}`);
       if (vocalTracePitchConfidence > 0) vocalTracePitchConfidence--;
       if (vocalTracePitchConfidence === 0) { vocalTraceLastPitch = -1; vocalTraceRecentPitches = []; }
       return;
@@ -4139,30 +4169,11 @@
     if (midiPitch < 36) midiPitch += 12;
     if (midiPitch > 84) midiPitch -= 12;
 
-    const currentBeat = timeToBeat(timeSec);
-    console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}]`);
+    const currentBeat = currentBeatForLog;
+    console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} timeSec=${timeSec.toFixed(4)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}] windowSize=${vocalTraceRecentPitches.length}`);
 
-    // In-place overwrite on re-record: replace the existing frame nearest currentBeat
-    // rather than bulk-clearing ahead (which would wipe frames the playhead hasn't reached yet).
-    const lastFrame = vocalTraceFrames.length > 0 ? vocalTraceFrames[vocalTraceFrames.length - 1] : null;
-    if (lastFrame && lastFrame.beat > currentBeat + 0.5) {
-      // Playhead is behind the last frame — re-recording a section.
-      // Binary search for the frame nearest currentBeat and replace it.
-      let lo = 0, hi = vocalTraceFrames.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (vocalTraceFrames[mid].beat < currentBeat) lo = mid + 1;
-        else hi = mid;
-      }
-      if (Math.abs(vocalTraceFrames[lo].beat - currentBeat) < 1) {
-        vocalTraceFrames[lo] = { beat: currentBeat, pitch: midiPitch };
-      } else {
-        vocalTraceFrames.splice(lo, 0, { beat: currentBeat, pitch: midiPitch });
-      }
-    } else {
-      // Normal forward play — append.
-      vocalTraceFrames.push({ beat: currentBeat, pitch: midiPitch });
-    }
+    // Always append — frames ahead of playhead are cleared on play start.
+    vocalTraceFrames.push({ beat: currentBeat, pitch: midiPitch });
   }
 
   // ── Pitch line: offline full-song pitch analysis ──
