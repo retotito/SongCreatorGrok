@@ -3124,7 +3124,11 @@
       audioEl.preservesPitch = true;
       audioEl.volume = muteVocal ? 0 : audioVolume;
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
-      audioEl.play();
+      audioEl.play().catch(err => {
+        console.warn('[Play] audioEl.play() rejected (autoplay policy?):', err.message);
+        isPlaying = false;
+        return;
+      });
       isPlaying = true;
       // Clear any existing vocal trace frames from this point forward so re-plays
       // don't mix old and new frames at different beat positions.
@@ -4095,29 +4099,52 @@
   }
 
   function warmupVocalTrace(startTimeSec) {
-    // Pre-fill the rolling median using the same fixed-sec grid so warmup is consistent.
+    // Backward-scan warmup: step back from startTimeSec collecting up to 5 voiced
+    // grid points. This seeds the rolling median with exactly the values that would
+    // have been present had we played from GAP, regardless of actual start position.
     vocalTraceLastPitch = -1;
     vocalTracePitchConfidence = 0;
     vocalTraceRecentPitches = [];
-    const firstGridSec = Math.ceil(startTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+
+    const gapSec = gapMs / 1000;
     const sampleRate = vocalTraceDecodedBuffer.sampleRate;
     const channelData = vocalTraceDecodedBuffer.getChannelData(0);
     const fftSize = 2048;
-    for (let i = 5; i >= 1; i--) {
-      const t = firstGridSec - i * VOCAL_TRACE_STEP_SEC;
-      if (t < 0) continue;
-      const startSample = Math.floor(t * sampleRate);
-      if (startSample + fftSize > channelData.length) continue;
-      for (let j = 0; j < fftSize; j++) vocalTraceSampleBuf[j] = channelData[startSample + j];
-      const [frequency, clarity] = vocalTraceDetector.findPitch(vocalTraceSampleBuf, sampleRate);
-      if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) continue;
-      let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
-      if (midiPitch < 36) midiPitch += 12;
-      if (midiPitch > 84) midiPitch -= 12;
-      vocalTraceRecentPitches.push(midiPitch);
-      vocalTraceLastPitch = midiPitch;
+
+    // Start one grid step before startTimeSec (the step we're about to sample live)
+    const firstGridSec = Math.ceil(startTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    const collected = []; // chronological order, oldest last (we prepend)
+
+    // Safety: don't scan before GAP (or at all if startTimeSec is already at/before GAP)
+    if (startTimeSec <= gapSec) {
+      console.log(`[VocalTrace] Warmed up: window=0 frames (start at/before GAP), startTimeSec=${startTimeSec.toFixed(3)}`);
+      return;
     }
-    console.log(`[VocalTrace] Warmed up: window=${vocalTraceRecentPitches.length} frames, lastPitch=${vocalTraceLastPitch}`);
+
+    let t = firstGridSec - VOCAL_TRACE_STEP_SEC;
+    let maxSteps = 200; // safety cap: scan at most 200 steps back (~5 seconds)
+    while (collected.length < 5 && t >= gapSec && maxSteps-- > 0) {
+      // Snap t to the exact grid (avoid float drift)
+      const gridT = Math.round(t / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+      const startSample = Math.floor(gridT * sampleRate);
+      if (startSample >= 0 && startSample + fftSize <= channelData.length) {
+        for (let j = 0; j < fftSize; j++) vocalTraceSampleBuf[j] = channelData[startSample + j];
+        const [frequency, clarity] = vocalTraceDetector.findPitch(vocalTraceSampleBuf, sampleRate);
+        if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
+          let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+          if (midiPitch < 36) midiPitch += 12;
+          if (midiPitch > 84) midiPitch -= 12;
+          collected.unshift(midiPitch); // prepend → oldest first
+        }
+      }
+      t -= VOCAL_TRACE_STEP_SEC;
+    }
+
+    vocalTraceRecentPitches = collected;
+    if (collected.length > 0) {
+      vocalTraceLastPitch = collected[collected.length - 1];
+    }
+    console.log(`[VocalTrace] Warmed up: window=${vocalTraceRecentPitches.length} frames, lastPitch=${vocalTraceLastPitch}, startTimeSec=${startTimeSec.toFixed(3)}`);
   }
 
   function sampleVocalTrace(timeSec) {
@@ -4706,11 +4733,12 @@
       </div>
       <div id="vocal_trace_outer_wrapper">
         <div id="vocal_trace-controls-wrapper">
-          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio} on:click={() => {
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio} on:click={(e) => {
             if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
             vocalTraceEnabled = !vocalTraceEnabled;
             if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
             toggleVocalTrace();
+            e.currentTarget.blur();
           }} title={hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
             Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
           </button>
