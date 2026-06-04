@@ -3111,6 +3111,10 @@
       console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play();
       isPlaying = true;
+      // Pre-warm vocal trace rolling median so frame 1 already has a full window
+      if (vocalTraceEnabled && vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf) {
+        warmupVocalTrace(currentTimeSec);
+      }
       // Auto-show trails when recording starts
       if (vocalTraceEnabled) vocalTraceVisible = true;
       if (micEnabled) micShowTrail = true;
@@ -3125,8 +3129,61 @@
     }
   }
 
+  function logVocalTraceState() {
+    console.group('[VocalTrace] Stop summary');
+    console.log(`Total frames recorded: ${vocalTraceFrames.length}`);
+    const vtBeatGap = vocalTraceFrames.length > 1
+      ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5 : 0.15;
+    for (const note of notes) {
+      if (note.type === 'break') continue;
+      const noteEndBeat = note.startBeat + note.duration;
+      // Find frames for this note
+      let lo = 0, hi = vocalTraceFrames.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (vocalTraceFrames[mid].beat < note.startBeat) lo = mid + 1; else hi = mid; }
+      const noteFrames = [];
+      for (let i = lo; i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat; i++) {
+        noteFrames.push(vocalTraceFrames[i]);
+      }
+      if (noteFrames.length === 0) continue;
+      // Compute drawn blocks
+      const blocks = [];
+      let i = 0;
+      while (i < noteFrames.length) {
+        const frame = noteFrames[i];
+        let fp = frame.pitch;
+        while (fp - note.pitch > 6)  fp -= 12;
+        while (fp - note.pitch < -6) fp += 12;
+        const isHit = Math.abs(fp - note.pitch) <= pitchTolerance;
+        let endBeat = frame.beat;
+        if (isHit) {
+          while (i + 1 < noteFrames.length) {
+            let fp2 = noteFrames[i + 1].pitch;
+            while (fp2 - note.pitch > 6)  fp2 -= 12;
+            while (fp2 - note.pitch < -6) fp2 += 12;
+            if (Math.abs(fp2 - note.pitch) > pitchTolerance) break;
+            i++; endBeat = noteFrames[i].beat;
+          }
+          const drawnStart = Math.max(frame.beat, note.startBeat);
+          const drawnEnd   = Math.min(endBeat + vtBeatGap, noteEndBeat);
+          blocks.push({ type: 'HIT', start: drawnStart, end: drawnEnd, len: drawnEnd - drawnStart });
+        } else {
+          while (i + 1 < noteFrames.length && noteFrames[i + 1].pitch === frame.pitch) { i++; endBeat = noteFrames[i].beat; }
+          blocks.push({ type: 'MISS', start: frame.beat, end: endBeat, pitch: frame.pitch, len: endBeat - frame.beat });
+        }
+        i++;
+      }
+      console.log(`Note beat=${note.startBeat}–${noteEndBeat} (dur=${note.duration}) pitch=${note.pitch} | ${noteFrames.length} frames | blocks:`);
+      for (const b of blocks) {
+        if (b.type === 'HIT') console.log(`  HIT  drawn=${b.start.toFixed(2)}–${b.end.toFixed(2)} len=${b.len.toFixed(2)} (note starts at ${note.startBeat}, offset=${( b.start - note.startBeat).toFixed(2)})`);
+        else                  console.log(`  MISS drawn=${b.start.toFixed(2)}–${b.end.toFixed(2)} len=${b.len.toFixed(2)} pitch=${b.pitch}`);
+      }
+    }
+    console.groupEnd();
+  }
+
   function stopPlayback() {
     console.log('[Stop] Resetting to 0');
+    if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
     if (audioEl) {
       audioEl.pause();
       audioEl.currentTime = 0;
@@ -4008,6 +4065,33 @@
     }
   }
 
+  function warmupVocalTrace(startTimeSec) {
+    // Pre-fill the rolling median by silently sampling the 5 frames just before startTimeSec.
+    // This prevents the first real frames from getting unstable median values.
+    vocalTraceLastPitch = -1;
+    vocalTracePitchConfidence = 0;
+    vocalTraceRecentPitches = [];
+    const sampleRate = vocalTraceDecodedBuffer.sampleRate;
+    const channelData = vocalTraceDecodedBuffer.getChannelData(0);
+    const fftSize = 2048;
+    const hopSec = fftSize / sampleRate; // ~46ms per frame at 44100 Hz
+    for (let i = 5; i >= 1; i--) {
+      const t = startTimeSec - i * hopSec;
+      if (t < 0) continue;
+      const startSample = Math.floor(t * sampleRate);
+      if (startSample + fftSize > channelData.length) continue;
+      for (let j = 0; j < fftSize; j++) vocalTraceSampleBuf[j] = channelData[startSample + j];
+      const [frequency, clarity] = vocalTraceDetector.findPitch(vocalTraceSampleBuf, sampleRate);
+      if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) continue;
+      let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+      if (midiPitch < 36) midiPitch += 12;
+      if (midiPitch > 84) midiPitch -= 12;
+      vocalTraceRecentPitches.push(midiPitch);
+      vocalTraceLastPitch = midiPitch;
+    }
+    console.log(`[VocalTrace] Warmed up: window=${vocalTraceRecentPitches.length} frames, lastPitch=${vocalTraceLastPitch}`);
+  }
+
   function sampleVocalTrace(timeSec) {
     if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) return;
 
@@ -4056,6 +4140,7 @@
     if (midiPitch > 84) midiPitch -= 12;
 
     const currentBeat = timeToBeat(timeSec);
+    console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}]`);
 
     // In-place overwrite on re-record: replace the existing frame nearest currentBeat
     // rather than bulk-clearing ahead (which would wipe frames the playhead hasn't reached yet).
