@@ -1406,9 +1406,9 @@
         let firstHitDrawn = false; // track if we've drawn the first hit block for this note
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
           const frame = vocalTraceFrames[i];
-          // Don't draw frames ahead of the playhead during active playback
-          // (same behaviour as mic sing-along). When paused, show all recorded frames.
-          if (isPlaying && frame.beat > playbackBeat) break;
+          // Don't draw frames ahead of the playhead during active recording.
+          // When vocal trace is off (view-only) or paused, show all recorded frames.
+          if (isPlaying && vocalTraceEnabled && frame.beat > playbackBeat) break;
           // Octave-correct the frame pitch toward the note (same as mic sing-along)
           let framePitch = frame.pitch;
           while (framePitch - note.pitch > 6)  framePitch -= 12;
@@ -1947,19 +1947,23 @@
         }
       }
     } else {
-      // No note hit — check if a vocal trace frame is near the click
+      // No note hit — check if a vocal trace frame near the click falls within a rendered note
+      // (frames between notes are not visible and must not block seeking)
       if (vocalTraceVisible && vocalTraceFrames.length > 0 && !isMultiKey) {
         const clickBeat = xToBeat(mx);
         const clickPitch = yToPitch(my);
-        // Find the closest frame within ±1 beat and ±1 semitone
         let closest = null;
         let closestDist = Infinity;
         for (const frame of vocalTraceFrames) {
           const db = Math.abs(frame.beat - clickBeat);
           const dp = Math.abs(frame.pitch - clickPitch);
           if (db <= 1 && dp <= 1) {
-            const dist = db + dp * 0.5;
-            if (dist < closestDist) { closestDist = dist; closest = frame; }
+            // Only match if frame falls within an actual note's beat range
+            const inNote = notes.some(n => n.type !== 'break' && frame.beat >= n.startBeat && frame.beat <= n.endBeat);
+            if (inNote) {
+              const dist = db + dp * 0.5;
+              if (dist < closestDist) { closestDist = dist; closest = frame; }
+            }
           }
         }
         if (closest) {
