@@ -3134,11 +3134,10 @@
         return;
       });
       isPlaying = true;
-      // Clear any existing vocal trace frames from this point forward so re-plays
-      // don't mix old and new frames at different beat positions.
+      // Clear all existing vocal trace frames when starting a new recording run.
+      // Keeping frames from a previous run would mix stale data with the new trace.
       if (vocalTraceEnabled) {
-        const cutBeat = playbackBeat;
-        vocalTraceFrames = vocalTraceFrames.filter(f => f.beat < cutBeat);
+        vocalTraceFrames = [];
         // Align next sample to the nearest grid step at or after current time
         vocalTraceNextSampleSec = Math.ceil(currentTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
       }
@@ -3611,6 +3610,17 @@
             if (noteEnd > loopStartBeat && note.startBeat < loopEndBeat) {
               micNoteHits.delete(note.id);
             }
+          }
+        }
+        // Clear vocal trace frames in the loop region so each pass starts fresh
+        if (vocalTraceEnabled && vocalTraceFrames.length > 0) {
+          vocalTraceFrames = vocalTraceFrames.filter(f => f.beat < loopStartBeat || f.beat >= loopEndBeat);
+          vocalTraceRecentPitches = [];
+          vocalTraceLastPitch = -1;
+          vocalTracePitchConfidence = 0;
+          vocalTraceNextSampleSec = Math.ceil(beatToTime(loopStartBeat) / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+          if (vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf) {
+            warmupVocalTrace(loopStartTime);
           }
         }
         console.log(`[Loop] Wrapped to beat ${loopStartBeat}`);
