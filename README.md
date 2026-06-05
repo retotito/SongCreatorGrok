@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v3.0.1** — BPM tapper modal, BPM change fixes (no gaps, preserve note edits), vocal trace octave correction. See [Changelog](#changelog) below.
+> **Latest release: v3.0.2** — Vocal trace fully deterministic across all start positions (sticky prediction removed), UI bug fixes (view-only frames, between-note clicks, frame clearing on play/loop). See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -97,7 +97,7 @@ This shows all processing steps — vocal separation progress, transcription, pi
 - **Golden/Rap note types** — visual indicators (★ gold, orange rap)
 - **Grid alignment** (Ctrl+B) — snap the entire beat grid to match the audio
 - **GAP adjustment** (Ctrl+G) — click any grid line to set the GAP position
-- **BPM calibration tool** — manually place beat markers on the waveform; linear regression over all markers calculates the exact BPM; persistent grey reference markers survive across calibration sessions
+- **BPM tapper** — tap the beat in a modal (click or press Enter) to measure BPM; shows live BPM with apply buttons for 1×–8× multipliers; play/pause and jump-to-GAP controls included; metronome muted while tapper is open
 - **Text editor** — edit raw Ultrastar content with live preview
 - **Session notes** — jot down reminders while editing; saved automatically per session and restored next time you open the editor
 - **Flag markers** — place green marker lines anywhere on the canvas (right-click → Add Flag); drag, nudge ±1 beat, or delete via right-click; shown as green ticks on the scrollbar; persisted per session
@@ -220,6 +220,14 @@ npm run dev
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
 ## Changelog
+
+### v3.0.2
+- **Vocal trace determinism** — removed sticky pitch prediction from `sampleVocalTrace`; the vocal trace now produces identical results regardless of where playback starts
+- **Unvoiced reset** — on an unvoiced frame the rolling median window is immediately cleared, preventing stale pitches from influencing the next voiced frame
+- **Frame clearing on play** — all vocal trace frames ahead of the playhead are cleared when playback starts, so stale data from a previous run never bleeds into a new recording pass
+- **Loop wrap re-warmup** — on loop wrap, frames are cleared and the rolling median is re-seeded via backward scan, keeping trace consistent across repeated loops
+- **View-only frames visible during playback** — frames outside the current playback pass (view-only mode) are now drawn correctly while audio is playing
+- **Between-note frame clicks** — right-clicking a vocal trace frame in the gap between notes no longer accidentally blocks a seek
 
 ### v3.0.1
 - **BPM tapper** — new Tap button next to the BPM input opens a modal where you tap the beat by clicking or pressing Enter; shows live BPM and apply buttons for 1×–8× multipliers; play/pause and jump-to-GAP controls included; metronome is muted while the tapper is open
