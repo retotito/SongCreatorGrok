@@ -3105,7 +3105,7 @@
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
-      if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+      // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
       audioEl.pause();
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
@@ -3213,7 +3213,7 @@
 
   function stopPlayback() {
     console.log('[Stop] Resetting to 0');
-    if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+    // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
     if (audioEl) {
       audioEl.pause();
       audioEl.currentTime = 0;
