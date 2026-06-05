@@ -77,6 +77,7 @@ This shows all processing steps — vocal separation progress, transcription, pi
 ![Step 3 - Edit Note](docs/screenshots/Step3-edit%20note.png)
 ![Step 3 - Looping](docs/screenshots/Step3-Looping.png)
 ![Step 3 - Sing Along](docs/screenshots/Step3-sing%20along%20inside%20editor.png)
+![Step 3 - BPM Tapper](docs/screenshots/Step3-BPM%20Tapper.png)
 
 ### Step 4 — Export Files
 ![Step 4 - Export](docs/screenshots/Step4-Export%20Files.png)
