@@ -3105,7 +3105,7 @@
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
-      // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+      if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
       audioEl.pause();
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
@@ -3213,7 +3213,7 @@
 
   function stopPlayback() {
     console.log('[Stop] Resetting to 0');
-    // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+    if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
     if (audioEl) {
       audioEl.pause();
       audioEl.currentTime = 0;
@@ -4131,7 +4131,7 @@
 
     // Safety: don't scan before GAP (or at all if startTimeSec is already at/before GAP)
     if (startTimeSec <= gapSec) {
-      // console.log(`[VocalTrace] Warmed up: window=0 frames (start at/before GAP), startTimeSec=${startTimeSec.toFixed(3)}`);
+      console.log(`[VocalTrace] Warmed up: window=0 frames (start at/before GAP), startTimeSec=${startTimeSec.toFixed(3)}`);
       return;
     }
 
@@ -4157,8 +4157,17 @@
     vocalTraceRecentPitches = collected;
     if (collected.length > 0) {
       vocalTraceLastPitch = collected[collected.length - 1];
+      // Seed confidence to reflect how stable the warmup window is.
+      // Count how many trailing frames match the last pitch — same as if we had
+      // played forward from GAP and accumulated confidence naturally.
+      let conf = 0;
+      for (let i = collected.length - 1; i >= 0; i--) {
+        if (collected[i] === vocalTraceLastPitch) conf++;
+        else break;
+      }
+      vocalTracePitchConfidence = Math.min(8, conf);
     }
-    // console.log(`[VocalTrace] Warmed up: window=${vocalTraceRecentPitches.length} frames, lastPitch=${vocalTraceLastPitch}, startTimeSec=${startTimeSec.toFixed(3)}`);
+    console.log(`[VocalTrace] Warmed up: window=${vocalTraceRecentPitches.length} frames, lastPitch=${vocalTraceLastPitch}, startTimeSec=${startTimeSec.toFixed(3)}`);
   }
 
   function sampleVocalTrace(timeSec) {
@@ -4176,9 +4185,9 @@
     const currentBeatForLog = timeToBeat(timeSec);
 
     if (clarity < micClarityThreshold || frequency < 60 || frequency > 2000) {
-      // console.log(`[VT:sample] beat=${currentBeatForLog.toFixed(3)} timeSec=${timeSec.toFixed(4)} UNVOICED clarity=${clarity.toFixed(2)} freq=${frequency.toFixed(1)}`);
-      if (vocalTracePitchConfidence > 0) vocalTracePitchConfidence--;
-      if (vocalTracePitchConfidence === 0) { vocalTraceLastPitch = -1; vocalTraceRecentPitches = []; }
+      console.log(`[VT:sample] beat=${currentBeatForLog.toFixed(3)} timeSec=${timeSec.toFixed(4)} UNVOICED clarity=${clarity.toFixed(2)} freq=${frequency.toFixed(1)}`);
+      vocalTraceRecentPitches = [];
+      vocalTraceLastPitch = -1;
       return;
     }
 
@@ -4189,21 +4198,6 @@
     if (vocalTraceRecentPitches.length > 5) vocalTraceRecentPitches.shift();
     const sorted = [...vocalTraceRecentPitches].sort((a, b) => a - b);
     midiPitch = sorted[Math.floor(sorted.length / 2)];
-
-    // Sticky prediction
-    if (vocalTraceLastPitch > 0) {
-      const drift = Math.abs(midiPitch - vocalTraceLastPitch);
-      if (drift === 0) {
-        vocalTracePitchConfidence = Math.min(8, vocalTracePitchConfidence + 1);
-      } else if (drift <= 2 && vocalTracePitchConfidence >= 4) {
-        midiPitch = vocalTraceLastPitch;
-        vocalTracePitchConfidence--;
-      } else {
-        vocalTracePitchConfidence = 1;
-      }
-    } else {
-      vocalTracePitchConfidence = 1;
-    }
     vocalTraceLastPitch = midiPitch;
 
     // Clamp to vocal range
@@ -4211,7 +4205,7 @@
     if (midiPitch > 84) midiPitch -= 12;
 
     const currentBeat = currentBeatForLog;
-    // console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} timeSec=${timeSec.toFixed(4)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}] windowSize=${vocalTraceRecentPitches.length}`);
+    console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} timeSec=${timeSec.toFixed(4)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}] windowSize=${vocalTraceRecentPitches.length}`);
 
     // Always append — frames ahead of playhead are cleared on play start.
     vocalTraceFrames.push({ beat: currentBeat, pitch: midiPitch });
