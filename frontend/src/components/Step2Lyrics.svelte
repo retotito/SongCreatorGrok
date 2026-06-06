@@ -338,11 +338,13 @@
 </div>
 
 {#if whisperFallbackWarning}
-  <div class="whisper-fallback-warning">
-    <strong>⚠️ WhisperX unavailable — used vanilla Whisper instead.</strong>
-    Alignment quality may be lower: word timestamps are less precise and char-level sync is not available.
-    Check the backend log for details. You can still proceed, but results may need more manual correction.
-    <button class="btn-dismiss" on:click={() => whisperFallbackWarning = false}>✕ Dismiss</button>
+  <div class="warning-modal-overlay" on:click={() => whisperFallbackWarning = false}>
+    <div class="warning-modal" on:click|stopPropagation>
+      <h2>⚠️ WhisperX unavailable</h2>
+      <p class="warning-modal-msg">WhisperX failed and vanilla Whisper was used instead. Word timestamps are less precise and char-level sync is not available — results may need more manual correction in the editor.</p>
+      <p class="warning-modal-hint">Check the backend log for details. You can still proceed.</p>
+      <button on:click={() => whisperFallbackWarning = false}>Dismiss</button>
+    </div>
   </div>
 {/if}
 
@@ -383,29 +385,58 @@
     
   }
 
-  .whisper-fallback-warning {
-    background: #3e2a00;
+  .warning-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+  }
+
+  .warning-modal {
+    background: #1e2330;
     border: 1px solid #f5a623;
-    border-radius: 8px;
-    padding: 0.85rem 1rem;
-    margin-bottom: 1rem;
+    border-radius: 10px;
+    padding: 1.5rem 2rem;
+    max-width: 520px;
+    width: 90%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+
+  .warning-modal h2 {
+    color: #f5a623;
+    margin: 0;
+    font-size: 1.1rem;
+  }
+
+  .warning-modal-msg {
     color: #ffd180;
-    font-size: 0.9rem;
+    font-size: 0.88rem;
     line-height: 1.5;
-    position: relative;
+    margin: 0;
   }
-  .btn-dismiss {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.6rem;
-    background: none;
+
+  .warning-modal-hint {
+    color: #888;
+    font-size: 0.8rem;
+    margin: 0;
+  }
+
+  .warning-modal button {
+    align-self: flex-end;
+    background: #f5a623;
+    color: #1a1a1a;
     border: none;
-    color: #ffd180;
+    border-radius: 6px;
+    padding: 0.4rem 1.2rem;
     cursor: pointer;
-    font-size: 0.85rem;
-    opacity: 0.7;
+    font-size: 0.9rem;
+    font-weight: 600;
   }
-  .btn-dismiss:hover { opacity: 1; }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
   h3 { color: #aaa; margin: 1rem 0 0.5rem; font-size: 0.95rem; }
