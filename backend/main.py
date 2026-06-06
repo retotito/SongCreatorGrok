@@ -277,7 +277,7 @@ def _check_model_status() -> dict:
                     config_ok = os.path.isfile(os.path.join(snap_path, "config.json"))
                     model_bin = os.path.join(snap_path, "model.bin")
                     model_exists = os.path.isfile(model_bin)
-                    model_size = os.path.getsize(model_bin) if model_exists else 0
+                    model_size = _file_size_accurate(model_bin) if model_exists else 0
                     model_ok = model_exists and model_size > 100_000_000
                     log_step("MODEL_STATUS", f"  snapshot {snap[:12]}: config={config_ok} model.bin={model_exists} size={model_size:,} bytes ok={model_ok}")
                     if config_ok and model_ok:
@@ -286,7 +286,7 @@ def _check_model_status() -> dict:
     # Fallback: vanilla whisper medium
     if not whisperx_ok:
         vanilla_path = os.path.expanduser("~/.cache/whisper/medium.pt")
-        vanilla_size = os.path.getsize(vanilla_path) if os.path.isfile(vanilla_path) else 0
+        vanilla_size = _file_size_accurate(vanilla_path) if os.path.isfile(vanilla_path) else 0
         vanilla_ok = vanilla_size > 100_000_000
         log_step("MODEL_STATUS", f"vanilla whisper fallback: exists={os.path.isfile(vanilla_path)} size={vanilla_size:,} ok={vanilla_ok}")
         whisperx_ok = vanilla_ok
@@ -298,7 +298,7 @@ def _check_model_status() -> dict:
     if os.path.isdir(torch_hub):
         for f in os.listdir(torch_hub):
             if f.endswith(".th") and (f.startswith("955717e8") or "htdemucs" in f.lower()):
-                size = os.path.getsize(os.path.join(torch_hub, f))
+                size = _file_size_accurate(os.path.join(torch_hub, f))
                 log_step("MODEL_STATUS", f"  demucs checkpoint: {f} size={size:,} bytes")
                 demucs_ok = True
                 break
@@ -308,7 +308,7 @@ def _check_model_status() -> dict:
     wav2vec2_path = os.path.expanduser(
         "~/.cache/torch/hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth"
     )
-    wav2vec2_size = os.path.getsize(wav2vec2_path) if os.path.isfile(wav2vec2_path) else 0
+    wav2vec2_size = _file_size_accurate(wav2vec2_path) if os.path.isfile(wav2vec2_path) else 0
     wav2vec2_ok = wav2vec2_size > 100_000_000
     log_step("MODEL_STATUS", f"wav2vec2: exists={os.path.isfile(wav2vec2_path)} size={wav2vec2_size:,} bytes ok={wav2vec2_ok}")
 
@@ -402,15 +402,15 @@ async def setup_download():
                             continue
                         for _fname in os.listdir(_snap_path):
                             _fpath = os.path.join(_snap_path, _fname)
-                            if os.path.isfile(_fpath) and os.path.getsize(_fpath) == 0:
+                            if os.path.isfile(_fpath) and _file_size_accurate(_fpath) == 0:
                                 # Find a blob whose size matches what this file should be.
                                 # For model.bin specifically we know it must be > 100 MB.
                                 _candidate = None
                                 if _fname == "model.bin":
                                     # Pick the largest blob (the model weights)
                                     _candidate = max(
-                                        (_p for _p in _blob_by_size.values() if _blob_by_size and os.path.getsize(_p) > 100_000_000),
-                                        key=os.path.getsize, default=None
+                                        (_p for _p in _blob_by_size.values() if _blob_by_size and _file_size_accurate(_p) > 100_000_000),
+                                        key=_file_size_accurate, default=None
                                     )
                                 else:
                                     # For small files, match by checking refs/ pointer
@@ -422,7 +422,7 @@ async def setup_download():
                                 if _candidate:
                                     try:
                                         _shutil.copy2(_candidate, _fpath)
-                                        log_step("DOWNLOAD", f"Repaired 0-byte {_fname} by copying blob ({os.path.getsize(_fpath):,} bytes)")
+                                        log_step("DOWNLOAD", f"Repaired 0-byte {_fname} by copying blob ({_file_size_accurate(_fpath):,} bytes)")
                                     except Exception as _e:
                                         log_step("DOWNLOAD", f"Failed to repair {_fname}: {_e}")
 
@@ -432,7 +432,7 @@ async def setup_download():
                     for _snap in os.listdir(_snap_root):
                         _mb = os.path.join(_snap_root, _snap, "model.bin")
                         if os.path.isfile(_mb):
-                            _model_bin_size = os.path.getsize(_mb)
+                            _model_bin_size = _file_size_accurate(_mb)
                             break
                 log_step("DOWNLOAD", f"whisperx download complete. model.bin size={_model_bin_size:,} bytes")
                 if _model_bin_size < 100_000_000:

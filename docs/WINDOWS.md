@@ -92,6 +92,11 @@ The backend writes logs to:
 notepad "$env:LOCALAPPDATA\com.ultrastar.creator\logs\backend.log"
 ```
 
+**Clear the log** (start fresh before a new test run):
+```powershell
+Clear-Content "$env:LOCALAPPDATA\com.ultrastar.creator\logs\backend.log"
+```
+
 **Simple tail** (fails if the file doesn't exist yet):
 ```powershell
 Get-Content "$env:LOCALAPPDATA\com.ultrastar.creator\logs\backend.log" -Wait -Tail 50
