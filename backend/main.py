@@ -382,8 +382,51 @@ async def setup_download():
                                percent=pct)
                 await fut
 
-                # Integrity check: verify model.bin is present and non-empty
+                # Windows hardlink repair: huggingface_hub stores real content in blobs/
+                # and creates hardlinks in snapshots/. On Windows this can silently fail,
+                # leaving snapshot files as 0 bytes while blobs/ has the full content.
+                # Detect and repair by copying blobs directly to snapshot files.
+                import shutil as _shutil
                 _snap_root = os.path.join(_wx_model_dir, "snapshots")
+                _blobs_dir = os.path.join(_wx_model_dir, "blobs")
+                if os.path.isdir(_snap_root) and os.path.isdir(_blobs_dir):
+                    # Build a size→blob_path lookup from the blobs folder
+                    _blob_by_size = {}
+                    for _blob_name in os.listdir(_blobs_dir):
+                        _blob_path = os.path.join(_blobs_dir, _blob_name)
+                        if os.path.isfile(_blob_path):
+                            _blob_by_size[os.path.getsize(_blob_path)] = _blob_path
+                    for _snap in os.listdir(_snap_root):
+                        _snap_path = os.path.join(_snap_root, _snap)
+                        if not os.path.isdir(_snap_path):
+                            continue
+                        for _fname in os.listdir(_snap_path):
+                            _fpath = os.path.join(_snap_path, _fname)
+                            if os.path.isfile(_fpath) and os.path.getsize(_fpath) == 0:
+                                # Find a blob whose size matches what this file should be.
+                                # For model.bin specifically we know it must be > 100 MB.
+                                _candidate = None
+                                if _fname == "model.bin":
+                                    # Pick the largest blob (the model weights)
+                                    _candidate = max(
+                                        (_p for _p in _blob_by_size.values() if _blob_by_size and os.path.getsize(_p) > 100_000_000),
+                                        key=os.path.getsize, default=None
+                                    )
+                                else:
+                                    # For small files, match by checking refs/ pointer
+                                    _refs_path = os.path.join(_wx_model_dir, "refs")
+                                    # Try to find the blob hash from the pointer file in the snapshot
+                                    # huggingface stores pointer files — the snapshot file IS the blob via hardlink
+                                    # We can't rely on content matching, so skip non-model files
+                                    pass
+                                if _candidate:
+                                    try:
+                                        _shutil.copy2(_candidate, _fpath)
+                                        log_step("DOWNLOAD", f"Repaired 0-byte {_fname} by copying blob ({os.path.getsize(_fpath):,} bytes)")
+                                    except Exception as _e:
+                                        log_step("DOWNLOAD", f"Failed to repair {_fname}: {_e}")
+
+                # Final integrity check
                 _model_bin_size = 0
                 if os.path.isdir(_snap_root):
                     for _snap in os.listdir(_snap_root):
@@ -393,8 +436,8 @@ async def setup_download():
                             break
                 log_step("DOWNLOAD", f"whisperx download complete. model.bin size={_model_bin_size:,} bytes")
                 if _model_bin_size < 100_000_000:
-                    log_step("DOWNLOAD", f"WARNING: model.bin is too small ({_model_bin_size:,} bytes) — download may be corrupted")
-                    yield send("error", "whisperx", f"Download may be incomplete — model.bin is {_model_bin_size:,} bytes (expected ~1.5 GB). Try again.")
+                    log_step("DOWNLOAD", f"WARNING: model.bin still too small ({_model_bin_size:,} bytes) after repair attempt")
+                    yield send("error", "whisperx", f"Download incomplete — model.bin is {_model_bin_size:,} bytes (expected ~1.5 GB). Try again.")
                 else:
                     yield send("done", "whisperx", "WhisperX medium model ready")
             except ImportError as e:
