@@ -103,6 +103,7 @@
   let transcribePhase = '';  // 'loading' | 'transcribing' | 'done' | 'error'
   let transcribeElapsed = 0;
   let transcribeModalOpen = false;
+  let whisperFallbackWarning = false;
   let transcribeAbortController = null;
   let transcribeTicker = null;
 
@@ -185,6 +186,9 @@
       transcribePhase = 'done';
       transcribeStatus = `${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
       processingStatus.set('✅ Transcription complete');
+      if (result.model && !result.model.startsWith('whisperx-')) {
+        whisperFallbackWarning = true;
+      }
       setTimeout(() => { transcribeModalOpen = false; }, 1800);
     } catch (err) {
       stopTranscribeTicker();
@@ -333,6 +337,15 @@
   {/if}
 </div>
 
+{#if whisperFallbackWarning}
+  <div class="whisper-fallback-warning">
+    <strong>⚠️ WhisperX unavailable — used vanilla Whisper instead.</strong>
+    Alignment quality may be lower: word timestamps are less precise and char-level sync is not available.
+    Check the backend log for details. You can still proceed, but results may need more manual correction.
+    <button class="btn-dismiss" on:click={() => whisperFallbackWarning = false}>✕ Dismiss</button>
+  </div>
+{/if}
+
 {#if transcribeModalOpen}
   <div class="transcribe-modal-backdrop">
     <div class="transcribe-modal-box">
@@ -369,6 +382,30 @@
   .step-content {
     
   }
+
+  .whisper-fallback-warning {
+    background: #3e2a00;
+    border: 1px solid #f5a623;
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 1rem;
+    color: #ffd180;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    position: relative;
+  }
+  .btn-dismiss {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.6rem;
+    background: none;
+    border: none;
+    color: #ffd180;
+    cursor: pointer;
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+  .btn-dismiss:hover { opacity: 1; }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
   h3 { color: #aaa; margin: 1rem 0 0.5rem; font-size: 0.95rem; }
