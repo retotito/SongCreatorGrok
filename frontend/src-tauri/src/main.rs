@@ -25,11 +25,16 @@ fn main() {
             // rely on the manually-started FastAPI backend instead.
             #[cfg(not(debug_assertions))]
             {
-                // Kill any stale process already holding port 8001
+                // Kill any stale backend process from a previous version/session.
+                // On Windows, kill by name (reliable) then give the OS a moment to
+                // release the port before we try to bind it again.
                 #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :8001') do taskkill /F /PID %a 2>nul"])
-                    .status();
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/IM", "backend.exe"])
+                        .output(); // output() waits for taskkill to finish
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
                 #[cfg(not(target_os = "windows"))]
                 let _ = std::process::Command::new("sh")
                     .args(["-c", "lsof -ti:8001 | xargs kill -9 2>/dev/null || true"])
@@ -116,6 +121,27 @@ fn main() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                // Kill the managed backend child process
+                if let Ok(mut guard) = window.app_handle().state::<BackendProcess>().0.lock() {
+                    if let Some(mut child) = guard.take() {
+                        let _ = child.kill();
+                        let _ = child.wait(); // reap zombie so OS fully releases the port
+                    }
+                }
+                // Belt-and-suspenders: taskkill by name covers the case where Drop
+                // didn't run (e.g. force-killed by an installer update).
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/IM", "backend.exe"])
+                    .output();
+                #[cfg(not(target_os = "windows"))]
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", "lsof -ti:8001 | xargs kill -9 2>/dev/null || true"])
+                    .status();
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
