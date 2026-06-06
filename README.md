@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v3.0.2** — Vocal trace fully deterministic across all start positions (sticky prediction removed), UI bug fixes (view-only frames, between-note clicks, frame clearing on play/loop). See [Changelog](#changelog) below.
+> **Latest release: v3.1.0** — App renamed to UltrastarCreatorTool, backend killed on window close, WhisperX fallback warning, Windows model integrity fixes. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -220,6 +220,14 @@ npm run dev
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
 ## Changelog
+
+### v3.1.0
+- **App renamed** — product name and window title changed from "Ultrastar Creator" to `UltrastarCreatorTool` for consistency with the GitHub repo name
+- **Kill backend on close** — closing the Tauri window now cleanly kills the backend sidecar process (and releases port 8001) on both macOS and Windows
+- **WhisperX fallback warning** — if WhisperX is unavailable and vanilla Whisper was used instead, a dismissable amber modal warns the user that timestamps are less precise
+- **Windows model integrity fix** — `_file_size_accurate()` used for all model size checks to handle NTFS hardlink edge cases; 0-byte snapshot files from HuggingFace blobs are auto-repaired by copying from the blobs folder
+- **Detailed model status logging** — `log_step()` calls added throughout model status checks and download flow for easier debugging
+- **Version bump to 3.1.0**
 
 ### v3.0.2
 - **Vocal trace determinism** — removed sticky pitch prediction from `sampleVocalTrace`; the vocal trace now produces identical results regardless of where playback starts
