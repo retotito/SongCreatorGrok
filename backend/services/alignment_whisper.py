@@ -597,7 +597,19 @@ def _avg_matched_word_duration(matches: list) -> float:
 def _dump_alignment_debug(word_groups: list, matches: list, whisper_words: list, phase: str):
     """Write a debug dump file showing the match state for each word group."""
     import os
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads")
+    import sys
+    # Write alongside backend.log so there is one place to look for all debug files.
+    # Installed app (frozen): %LOCALAPPDATA%\com.ultrastar.creator\logs\
+    # Dev mode (unfrozen):    backend/downloads/
+    if getattr(sys, 'frozen', False):
+        _localappdata = os.environ.get("LOCALAPPDATA", "")
+        if _localappdata:
+            debug_dir = os.path.join(_localappdata, "com.ultrastar.creator", "logs")
+        else:
+            import tempfile
+            debug_dir = os.path.join(tempfile.gettempdir(), "ultrastar_creator_debug")
+    else:
+        debug_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads")
     os.makedirs(debug_dir, exist_ok=True)
     debug_path = os.path.join(debug_dir, f"alignment_whisper_debug_{phase}.txt")
     

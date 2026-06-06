@@ -256,6 +256,7 @@ def _check_model_status() -> dict:
 
     # ffmpeg
     ffmpeg_ok = shutil.which('ffmpeg') is not None
+    log_step("MODEL_STATUS", f"ffmpeg: {'found at ' + shutil.which('ffmpeg') if ffmpeg_ok else 'NOT FOUND'}")
 
     # WhisperX / faster-whisper medium model
     whisperx_ok = False
@@ -263,7 +264,9 @@ def _check_model_status() -> dict:
         from huggingface_hub.constants import HF_HUB_CACHE as hf_cache
     except ImportError:
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+    log_step("MODEL_STATUS", f"HF cache path: {hf_cache}")
     faster_whisper_dir = os.path.join(hf_cache, "models--Systran--faster-whisper-medium")
+    log_step("MODEL_STATUS", f"faster-whisper dir exists: {os.path.isdir(faster_whisper_dir)} ({faster_whisper_dir})")
     if os.path.isdir(faster_whisper_dir):
         # Check that there's at least one snapshot with the required model files
         snapshots = os.path.join(faster_whisper_dir, "snapshots")
@@ -271,25 +274,32 @@ def _check_model_status() -> dict:
             for snap in os.listdir(snapshots):
                 snap_path = os.path.join(snapshots, snap)
                 if os.path.isdir(snap_path):
-                    # Require both config.json and model.bin to be present and non-empty
                     config_ok = os.path.isfile(os.path.join(snap_path, "config.json"))
-                    model_ok = os.path.isfile(os.path.join(snap_path, "model.bin")) and \
-                               os.path.getsize(os.path.join(snap_path, "model.bin")) > 100_000_000
+                    model_bin = os.path.join(snap_path, "model.bin")
+                    model_exists = os.path.isfile(model_bin)
+                    model_size = os.path.getsize(model_bin) if model_exists else 0
+                    model_ok = model_exists and model_size > 100_000_000
+                    log_step("MODEL_STATUS", f"  snapshot {snap[:12]}: config={config_ok} model.bin={model_exists} size={model_size:,} bytes ok={model_ok}")
                     if config_ok and model_ok:
                         whisperx_ok = True
                         break
     # Fallback: vanilla whisper medium
     if not whisperx_ok:
         vanilla_path = os.path.expanduser("~/.cache/whisper/medium.pt")
-        whisperx_ok = os.path.isfile(vanilla_path) and os.path.getsize(vanilla_path) > 100_000_000
+        vanilla_size = os.path.getsize(vanilla_path) if os.path.isfile(vanilla_path) else 0
+        vanilla_ok = vanilla_size > 100_000_000
+        log_step("MODEL_STATUS", f"vanilla whisper fallback: exists={os.path.isfile(vanilla_path)} size={vanilla_size:,} ok={vanilla_ok}")
+        whisperx_ok = vanilla_ok
 
     # Demucs htdemucs
     demucs_ok = False
     torch_hub = os.path.expanduser("~/.cache/torch/hub/checkpoints")
+    log_step("MODEL_STATUS", f"torch hub dir exists: {os.path.isdir(torch_hub)} ({torch_hub})")
     if os.path.isdir(torch_hub):
         for f in os.listdir(torch_hub):
-            # htdemucs checkpoint has a known name prefix — only match actual .th files
             if f.endswith(".th") and (f.startswith("955717e8") or "htdemucs" in f.lower()):
+                size = os.path.getsize(os.path.join(torch_hub, f))
+                log_step("MODEL_STATUS", f"  demucs checkpoint: {f} size={size:,} bytes")
                 demucs_ok = True
                 break
 
@@ -298,16 +308,19 @@ def _check_model_status() -> dict:
     wav2vec2_path = os.path.expanduser(
         "~/.cache/torch/hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth"
     )
-    if os.path.isfile(wav2vec2_path) and os.path.getsize(wav2vec2_path) > 100_000_000:
-        wav2vec2_ok = True
+    wav2vec2_size = os.path.getsize(wav2vec2_path) if os.path.isfile(wav2vec2_path) else 0
+    wav2vec2_ok = wav2vec2_size > 100_000_000
+    log_step("MODEL_STATUS", f"wav2vec2: exists={os.path.isfile(wav2vec2_path)} size={wav2vec2_size:,} bytes ok={wav2vec2_ok}")
 
-    return {
+    result = {
         "ffmpeg": ffmpeg_ok,
         "whisperx": whisperx_ok,
         "demucs": demucs_ok,
         "wav2vec2": wav2vec2_ok,
         "ready": ffmpeg_ok and whisperx_ok and demucs_ok and wav2vec2_ok,
     }
+    log_step("MODEL_STATUS", f"final: {result}")
+    return result
 
 
 @app.get("/api/setup/status")
@@ -330,8 +343,7 @@ async def setup_download():
             return f"data: {json.dumps(data)}\n\n"
 
         status = _check_model_status()
-
-        # ── ffmpeg ──
+        log_step("DOWNLOAD", f"setup/download triggered. status={status}")
         if not status["ffmpeg"]:
             yield send("progress", "ffmpeg", "ffmpeg not found — please reinstall the app", error=True)
         else:
@@ -370,7 +382,21 @@ async def setup_download():
                                percent=pct)
                 await fut
 
-                yield send("done", "whisperx", "WhisperX medium model ready")
+                # Integrity check: verify model.bin is present and non-empty
+                _snap_root = os.path.join(_wx_model_dir, "snapshots")
+                _model_bin_size = 0
+                if os.path.isdir(_snap_root):
+                    for _snap in os.listdir(_snap_root):
+                        _mb = os.path.join(_snap_root, _snap, "model.bin")
+                        if os.path.isfile(_mb):
+                            _model_bin_size = os.path.getsize(_mb)
+                            break
+                log_step("DOWNLOAD", f"whisperx download complete. model.bin size={_model_bin_size:,} bytes")
+                if _model_bin_size < 100_000_000:
+                    log_step("DOWNLOAD", f"WARNING: model.bin is too small ({_model_bin_size:,} bytes) — download may be corrupted")
+                    yield send("error", "whisperx", f"Download may be incomplete — model.bin is {_model_bin_size:,} bytes (expected ~1.5 GB). Try again.")
+                else:
+                    yield send("done", "whisperx", "WhisperX medium model ready")
             except ImportError as e:
                 yield send("done", "whisperx", f"WhisperX not installed — {e}", error=True)
             except Exception as e:
