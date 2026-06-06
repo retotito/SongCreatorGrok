@@ -26,7 +26,7 @@ open "/Users/retokupfer/projects/SongCreatorGrok/frontend/src-tauri/target/relea
 
 Or mount and install directly:
 ```bash
-open "/Users/retokupfer/projects/SongCreatorGrok/frontend/src-tauri/target/release/bundle/dmg/Ultrastar Creator_2.0.0_aarch64.dmg"
+open "/Users/retokupfer/projects/SongCreatorGrok/frontend/src-tauri/target/release/bundle/dmg/UltrastarCreatorTool_2.0.0_aarch64.dmg"
 ```
 
 ---
@@ -56,7 +56,7 @@ open -a Console ~/Library/Logs/com.ultrastar.creator/backend.log
 Launching from Terminal shows `[backend]` lines directly:
 
 ```bash
-"/Applications/Ultrastar Creator.app/Contents/MacOS/Ultrastar Creator"
+"/Applications/UltrastarCreatorTool.app/Contents/MacOS/UltrastarCreatorTool"
 ```
 
 ---
@@ -65,7 +65,7 @@ Launching from Terminal shows `[backend]` lines directly:
 
 1. **Is the sidecar binary present?**
    ```bash
-   ls -la "/Applications/Ultrastar Creator.app/Contents/MacOS/backend"
+   ls -la "/Applications/UltrastarCreatorTool.app/Contents/MacOS/backend"
    ```
 
 2. **Is port 8001 bound after launch?**
@@ -83,7 +83,7 @@ Launching from Terminal shows `[backend]` lines directly:
    tail -50 ~/Library/Logs/com.ultrastar.creator/backend.log
    ```
 
-5. **System crash logs** — open Console.app and filter by `Ultrastar Creator`
+5. **System crash logs** — open Console.app and filter by `UltrastarCreatorTool`
 
 ---
 

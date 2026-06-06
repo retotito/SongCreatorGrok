@@ -25,9 +25,9 @@ A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you 
 
 Because the app is not yet code-signed, macOS will block it on first launch. To open it:
 
-1. Double-click the `.dmg` and drag **Ultrastar Creator** to your Applications folder.
+1. Double-click the `.dmg` and drag **UltrastarCreatorTool** to your Applications folder.
 2. Try to open it — macOS will show a *"cannot be opened because the developer cannot be verified"* message. Click **Cancel**.
-3. Go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the Ultrastar Creator entry.
+3. Go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the UltrastarCreatorTool entry.
 4. Confirm by clicking **Open** in the dialog that appears.
 
 You only need to do this once.

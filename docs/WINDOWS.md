@@ -62,7 +62,7 @@ npm run tauri build
 > The NSIS `.exe` installer fails with the Python sidecar due to file size limits.
 > On Mac, use `"targets": "all"` (the default in the repo) to produce `.app` + `.dmg`.
 
-Output: `frontend\src-tauri\target\release\bundle\msi\Ultrastar Creator_x.x.x_x64_en-US.msi`
+Output: `frontend\src-tauri\target\release\bundle\msi\UltrastarCreatorTool_x.x.x_x64_en-US.msi`
 
 ---
 
@@ -132,7 +132,7 @@ Stop-Process -Name "backend" -Force -ErrorAction SilentlyContinue
 Stop-Process -Name "ultrastar-creator" -Force -ErrorAction SilentlyContinue
 ```
 
-**2. Uninstall the app** via Windows Settings → Apps → Ultrastar Creator → Uninstall.
+**2. Uninstall the app** via Windows Settings → Apps → UltrastarCreatorTool → Uninstall.
 
 **3. Clean app data** (sessions, logs):
 ```powershell

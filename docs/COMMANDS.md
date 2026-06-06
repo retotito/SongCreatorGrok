@@ -65,7 +65,7 @@ cd /Users/retokupfer/projects/SongCreatorGrok/frontend && npm run dev
 
 **Run the built .app from Terminal** (shows all stdout/stderr live):
 ```bash
-"/Applications/Ultrastar Creator.app/Contents/MacOS/Ultrastar Creator"
+"/Applications/UltrastarCreatorTool.app/Contents/MacOS/UltrastarCreatorTool"
 ```
 
 **Tail the backend sidecar log** (written by the app on each launch):
@@ -86,10 +86,10 @@ lsof -i :8001
 
 **Verify the sidecar binary is present and executable:**
 ```bash
-ls -la "/Applications/Ultrastar Creator.app/Contents/MacOS/backend"
+ls -la "/Applications/UltrastarCreatorTool.app/Contents/MacOS/backend"
 ```
 
-**Open macOS Console.app** and filter by process name `Ultrastar Creator` for system-level crash logs.
+**Open macOS Console.app** and filter by process name `UltrastarCreatorTool` for system-level crash logs.
 
 ---
 
