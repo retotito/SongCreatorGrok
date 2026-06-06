@@ -92,7 +92,7 @@
 
 <div class="setup-overlay">
   <div class="setup-card">
-    <h1>Ultrastar Creator</h1>
+    <h1>UltrastarCreatorTool</h1>
     <p class="subtitle">First-time setup — downloading AI models</p>
 
     <div class="steps">

@@ -229,7 +229,7 @@
 
 <div class="launcher">
   <div class="hero">
-    <h1>🎤 Ultrastar Creator Tool</h1>
+    <h1>🎤 UltrastarCreatorTool</h1>
     <p class="subtitle">Create and edit Ultrastar karaoke songs with AI</p>
     {#if backendStarting}
       <div class="backend-starting">

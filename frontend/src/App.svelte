@@ -106,7 +106,7 @@
 {#if showStartupOverlay}
   <div class="startup-overlay">
     <div class="startup-card">
-      <h1>Ultrastar Creator</h1>
+      <h1>UltrastarCreatorTool</h1>
       <div class="startup-spinner"></div>
       <p class="startup-msg">Backend is starting up…</p>
       <p class="startup-hint">This can take up to 30 seconds.</p>

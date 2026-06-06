@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Ultrastar Creator needs microphone access to record your singing for pitch detection.</string>
+  <string>UltrastarCreatorTool needs microphone access to record your singing for pitch detection.</string>
 </dict>
 </plist>
