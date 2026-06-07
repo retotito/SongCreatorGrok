@@ -3950,11 +3950,16 @@
       }];
     }
 
+    const hasSplit = splitGroups.length > 1;
     return splitGroups.map((group, index) => ({
       startBeat: group.startBeat,
       duration: Math.max(1, group.endBeat - group.startBeat),
       pitch: group.pitch,
-      syllable: index === 0 ? `${wordSpan.word} ` : '',
+      // For split words, the first segment must not end with a space, otherwise
+      // Ultrastar treats it as a finished word before the continuation segment.
+      syllable: index === 0
+        ? (hasSplit ? `${wordSpan.word}-` : `${wordSpan.word} `)
+        : '-',
       analyzeWordIndex: wordIndex,
     }));
   }
