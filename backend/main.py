@@ -1940,6 +1940,97 @@ async def cancel_generation(session_id: str):
     return {"status": "ok", "message": "Cancellation requested"}
 
 
+@app.post("/api/generate-lyrics-only/{session_id}")
+def generate_lyrics_only(session_id: str):
+    """Generate a minimal Ultrastar .txt with metadata only (no notes)."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.get("vocal_audio"):
+        raise ServiceError("No vocal audio", "Upload or extract vocals first")
+    vocal_path = session["vocal_audio"]
+    artist = session.get("artist", "Unknown Artist")
+    title = session.get("title", "Unknown Song")
+    language = session.get("language", "en")
+    original_path = session.get("original_audio")
+
+    session["status"] = "generating"
+    generation_start = time.time()
+
+    try:
+        from services.bpm_detection import detect_bpm, get_audio_duration, detect_beat_phase
+        from services.ultrastar import generate_lyrics_only_txt
+
+        log_step("GENERATE", "Lyrics-only mode: detecting BPM and duration")
+        bpm = detect_bpm(vocal_path, original_audio_path=original_path)
+        audio_duration = get_audio_duration(vocal_path)
+        beat_phase_sec = detect_beat_phase(original_path or vocal_path, bpm)
+
+        _orig_path = session.get("original_audio") or ""
+        _audio_ext = os.path.splitext(_orig_path)[1] or ".mp3"
+        txt_content = generate_lyrics_only_txt(
+            artist=artist,
+            title=title,
+            bpm=bpm,
+            gap_ms=0,
+            language=language,
+            mp3_filename=f"{artist} - {title}{_audio_ext}",
+        )
+
+        timestamp = int(time.time())
+        txt_filename = f"song_{timestamp}.txt"
+        txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(txt_content)
+
+        elapsed = time.time() - generation_start
+        session["status"] = "generated"
+        session.setdefault("generated_files", [])
+        if txt_filename not in session["generated_files"]:
+            session["generated_files"].append(txt_filename)
+
+        session["result"] = {
+            "txt_file": txt_filename,
+            "bpm": bpm,
+            "gap_ms": 0,
+            "beat_phase_sec": beat_phase_sec,
+            "syllable_count": 0,
+            "audio_duration": audio_duration,
+            "pitch_method": "Skipped (lyrics-only)",
+            "alignment_method": "Skipped (lyrics-only)",
+            "elapsed_seconds": elapsed,
+            "syllable_timings": [],
+            "ultrastar_content": txt_content,
+            "pitch_data": {},
+        }
+        save_session(session_id)
+        _update_txt_asset_headers(session)
+        save_session(session_id)
+
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "bpm": bpm,
+            "gap_ms": 0,
+            "syllable_count": 0,
+            "audio_duration": round(audio_duration, 1),
+            "pitch_method": "Skipped (lyrics-only)",
+            "alignment_method": "Skipped (lyrics-only)",
+            "elapsed_seconds": round(elapsed, 1),
+            "files": {
+                "txt": f"/api/download/{session_id}/txt",
+                "vocals": f"/api/preview-audio/{session_id}/vocals",
+            },
+            "ultrastar_preview": txt_content[:2000],
+        }
+    except Exception as e:
+        session["status"] = "generation_failed"
+        session["error"] = str(e)
+        log.error(f"Lyrics-only generation failed for session {session_id}: {e}")
+        raise ServiceError("Lyrics-only generation failed", str(e))
+
+
 @app.post("/api/generate/{session_id}")
 def generate_ultrastar_files(session_id: str):
     """Run the full processing pipeline: BPM → Pitch → Alignment → Ultrastar."""
@@ -1949,8 +2040,6 @@ def generate_ultrastar_files(session_id: str):
     
     if not session.get("vocal_audio"):
         raise ServiceError("No vocal audio", "Upload or extract vocals first")
-    if not session.get("lyrics"):
-        raise ServiceError("No lyrics", "Submit lyrics first")
     
     vocal_path = session["vocal_audio"]
     lyrics = session["lyrics"]

@@ -225,6 +225,10 @@ export async function generateUltrastar(sessionId, signal = null) {
   return request('POST', `/generate/${sessionId}`, null, false, false, signal);
 }
 
+export async function generateLyricsOnly(sessionId, signal = null) {
+  return request('POST', `/generate-lyrics-only/${sessionId}`, null, false, false, signal);
+}
+
 export function streamGenerate(sessionId, onEvent) {
   const url = `${BASE}/generate-stream/${sessionId}`;
   const es = new EventSource(url);
