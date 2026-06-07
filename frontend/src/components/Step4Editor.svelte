@@ -3875,19 +3875,50 @@
   }
 
   function splitWordIntoSyllablesSimple(word) {
-    const cleaned = (word || '').toLowerCase().replace(/[^a-z]/g, '');
-    if (!cleaned) return [word || ''];
+    const lettersOnly = (word || '').replace(/[^A-Za-z]/g, '');
+    if (!lettersOnly) return [word || ''];
 
-    // Conservative heuristic:
-    // split after each vowel-group chunk while keeping trailing consonants.
-    const chunks = [];
-    const vowelGroups = cleaned.match(/[aeiouy]+[^aeiouy]*/g) || [];
-    for (const vg of vowelGroups) {
-      if (vg) chunks.push(vg);
+    const lower = lettersOnly.toLowerCase();
+    const isVowel = ch => /[aeiouy]/.test(ch);
+    const parts = [];
+    let i = 0;
+
+    while (i < lettersOnly.length) {
+      const onsetStart = i;
+
+      // Onset: leading consonants before the vowel nucleus.
+      while (i < lettersOnly.length && !isVowel(lower[i])) i += 1;
+      if (i >= lettersOnly.length) {
+        if (parts.length) parts[parts.length - 1] += lettersOnly.slice(onsetStart);
+        else parts.push(lettersOnly);
+        break;
+      }
+
+      // Nucleus: contiguous vowel group.
+      while (i < lettersOnly.length && isVowel(lower[i])) i += 1;
+
+      // Following consonant cluster before the next vowel.
+      const consonantStart = i;
+      while (i < lettersOnly.length && !isVowel(lower[i])) i += 1;
+      const hasNextVowel = i < lettersOnly.length;
+
+      // If there is another vowel ahead, keep one consonant for next syllable onset
+      // (maximal onset style). Otherwise keep the tail in this final syllable.
+      let syllableEnd = i;
+      if (hasNextVowel) {
+        const clusterLen = i - consonantStart;
+        syllableEnd = clusterLen <= 1 ? consonantStart : i - 1;
+      }
+
+      const piece = lettersOnly.slice(onsetStart, Math.max(onsetStart + 1, syllableEnd));
+      if (piece) parts.push(piece);
+
+      if (hasNextVowel) {
+        i = syllableEnd;
+      }
     }
 
-    if (chunks.length <= 1) return [word];
-    return chunks;
+    return parts.length > 1 ? parts : [word];
   }
 
   function formatSyllablesForSegments(originalWord, segmentCount) {
