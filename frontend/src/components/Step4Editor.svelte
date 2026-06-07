@@ -3814,6 +3814,65 @@
     return merged;
   }
 
+  function trimPlaceholdersAgainstNotes(placeholders, fixedNotes) {
+    if (!placeholders.length) {
+      return { trimmed: [], dropped: 0, split: 0 };
+    }
+    const blockers = fixedNotes
+      .map(note => ({ startBeat: note.startBeat, endBeat: note.startBeat + note.duration }))
+      .sort((a, b) => a.startBeat - b.startBeat);
+
+    let dropped = 0;
+    let split = 0;
+    const trimmed = [];
+
+    for (const note of placeholders) {
+      let segments = [{ startBeat: note.startBeat, endBeat: note.startBeat + note.duration }];
+
+      for (const blocker of blockers) {
+        const nextSegments = [];
+        for (const segment of segments) {
+          if (blocker.endBeat <= segment.startBeat || blocker.startBeat >= segment.endBeat) {
+            nextSegments.push(segment);
+            continue;
+          }
+          if (blocker.startBeat > segment.startBeat) {
+            nextSegments.push({ startBeat: segment.startBeat, endBeat: blocker.startBeat });
+          }
+          if (blocker.endBeat < segment.endBeat) {
+            nextSegments.push({ startBeat: blocker.endBeat, endBeat: segment.endBeat });
+          }
+        }
+        segments = nextSegments;
+        if (!segments.length) break;
+      }
+
+      const keptSegments = segments
+        .map(segment => ({
+          startBeat: Math.round(segment.startBeat),
+          endBeat: Math.round(segment.endBeat),
+        }))
+        .filter(segment => segment.endBeat - segment.startBeat >= 1);
+
+      if (keptSegments.length === 0) {
+        dropped += 1;
+        continue;
+      }
+      if (keptSegments.length > 1) split += 1;
+
+      for (const segment of keptSegments) {
+        trimmed.push({
+          ...note,
+          id: note.id,
+          startBeat: segment.startBeat,
+          duration: segment.endBeat - segment.startBeat,
+        });
+      }
+    }
+
+    return { trimmed, dropped, split };
+  }
+
   function assignWordsToProposals(proposals, wordSpans) {
     if (!proposals.length || !wordSpans.length) return { assigned: 0, unassigned: wordSpans.length };
     let assigned = 0;
@@ -3936,12 +3995,16 @@
     }
 
     const mergedUnknown = mergePlaceholderNotes(unknownProposalNotes);
-    proposalNotes.push(...mergedUnknown);
+    const overlapCleanup = trimPlaceholdersAgainstNotes(mergedUnknown, proposalNotes);
+    proposalNotes.push(...overlapCleanup.trimmed);
     const assignment = assignWordsToProposals(proposalNotes, wordSpans);
     console.log('[Analyze5s] proposal post-process', {
       recognizedWordNotes: wordSpans.length,
       unknownRaw: unknownProposalNotes.length,
       unknownMerged: mergedUnknown.length,
+      unknownTrimmed: overlapCleanup.trimmed.length,
+      unknownDropped: overlapCleanup.dropped,
+      unknownSplit: overlapCleanup.split,
       wordAssignments: assignment,
       totalProposals: proposalNotes.length,
     });
@@ -3958,7 +4021,7 @@
       proposalCount: proposalNotes.length,
       frameCount: framePool.length,
       wordCount: wordSpans.length,
-      unknownMergedCount: mergedUnknown.length,
+      unknownMergedCount: overlapCleanup.trimmed.length,
       assignedWords: assignment.assigned,
     };
   }
