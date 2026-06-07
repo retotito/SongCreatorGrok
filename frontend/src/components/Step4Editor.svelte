@@ -3878,6 +3878,14 @@
     const lettersOnly = (word || '').replace(/[^A-Za-z]/g, '');
     if (!lettersOnly) return [word || ''];
 
+    // Readability-first exceptions for high-frequency words where the
+    // generic onset heuristic often feels unintuitive in karaoke text.
+    const preferred = {
+      another: ['a', 'no', 'ther'],
+    };
+    const preferredSplit = preferred[lettersOnly.toLowerCase()];
+    if (preferredSplit) return preferredSplit;
+
     const lower = lettersOnly.toLowerCase();
     const isVowel = ch => /[aeiouy]/.test(ch);
     const parts = [];
