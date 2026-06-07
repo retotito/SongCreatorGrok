@@ -290,6 +290,16 @@ export async function getEditorData(sessionId) {
   return request('GET', `/editor-data/${sessionId}`);
 }
 
+export async function getLiveWordsWindow(sessionId, startSec, endSec) {
+  const qs = `start_sec=${encodeURIComponent(startSec)}&end_sec=${encodeURIComponent(endSec)}`;
+  return request('GET', `/live-words-window/${sessionId}?${qs}`);
+}
+
+export async function analyzeWindow(sessionId, startSec, endSec, language = 'en') {
+  const qs = `start_sec=${encodeURIComponent(startSec)}&end_sec=${encodeURIComponent(endSec)}&language=${encodeURIComponent(language)}`;
+  return request('GET', `/analyze-window/${sessionId}?${qs}`);
+}
+
 export async function saveCorrections(sessionId, corrections) {
   return request('POST', `/corrections/${sessionId}`, corrections);
 }

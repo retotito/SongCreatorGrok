@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState, getLiveWordsWindow, analyzeWindow } from '../services/api.js';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
 
@@ -313,6 +313,12 @@
   let vocalTraceLastPitch = -1;
   let vocalTracePitchConfidence = 0;
   let vocalTraceRecentPitches = [];
+  let quickTraceActive = false;
+  let quickTraceEndSec = null;
+  const QUICK_TRACE_DURATION_SEC = 5;
+  const ANALYZE_WINDOW_SEC = 5;
+  let liveWordTokens = [];
+  let liveWordsVisible = true;
   // Fixed-grid sampling: sample every fixed number of seconds of audio time so the
   // same audio bytes are always sampled at the same positions regardless of rAF timing.
   const VOCAL_TRACE_STEP_SEC = 0.025;   // sample every 25ms (~0.67 beats at BPM 120)
@@ -1378,10 +1384,26 @@
     if (vocalTraceVisible && vocalTraceFrames.length > 0) {
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
+      const hasDrawableNotes = notes.some(n => n.type !== 'break');
       // Estimate beat gap between frames (for visual continuity)
       const vtBeatGap = vocalTraceFrames.length > 1
         ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5
         : 0.15;
+
+      // Lyrics-only / empty-note mode fallback: draw raw trace so users can still
+      // validate short trace runs before any notes exist.
+      if (!hasDrawableNotes) {
+        ctx.fillStyle = 'rgba(255, 80, 180, 0.7)';
+        const dotH = Math.max(2, noteHeight * 0.55);
+        for (let i = 0; i < vocalTraceFrames.length; i++) {
+          const frame = vocalTraceFrames[i];
+          if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
+          if (isPlaying && vocalTraceEnabled && frame.beat > playbackBeat) break;
+          const x = beatToX(frame.beat);
+          const y = pitchToY(frame.pitch);
+          ctx.fillRect(x, y - dotH / 2, 2, dotH);
+        }
+      }
 
       for (const note of notes) {
         if (note.type === 'break') continue;
@@ -1452,6 +1474,30 @@
           i++;
         }
       }
+    }
+
+    // ── Live word tokens (from analyze-at-cursor) ──
+    if (liveWordsVisible && liveWordTokens.length > 0) {
+      ctx.save();
+      ctx.font = '11px sans-serif';
+      ctx.textBaseline = 'middle';
+      for (const tok of liveWordTokens) {
+        const beat = timeToBeat(tok.start);
+        const x = beatToX(beat);
+        if (x < -60 || x > w + 60) continue;
+        const label = tok.word || '';
+        if (!label) continue;
+        const tw = ctx.measureText(label).width;
+        const padX = 6;
+        const boxW = tw + padX * 2;
+        const boxH = 18;
+        const y = showWaveform ? waveformHeight + 10 : 12;
+        ctx.fillStyle = 'rgba(38, 166, 154, 0.78)';
+        ctx.fillRect(x - boxW / 2, y - boxH / 2, boxW, boxH);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, x - tw / 2, y);
+      }
+      ctx.restore();
     }
 
     // ── USDX-style sung note blocks ──
@@ -3106,6 +3152,8 @@
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
       // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+      quickTraceActive = false;
+      quickTraceEndSec = null;
       audioEl.pause();
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
@@ -3214,6 +3262,8 @@
   function stopPlayback() {
     console.log('[Stop] Resetting to 0');
     // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+    quickTraceActive = false;
+    quickTraceEndSec = null;
     if (audioEl) {
       audioEl.pause();
       audioEl.currentTime = 0;
@@ -3669,7 +3719,349 @@
         vocalTraceNextSampleSec += VOCAL_TRACE_STEP_SEC;
       }
     }
+
+    if (quickTraceActive && quickTraceEndSec !== null && currentTimeSec >= quickTraceEndSec) {
+      quickTraceActive = false;
+      quickTraceEndSec = null;
+      // Pause at the end of the short trace window so users can iterate quickly.
+      togglePlayback();
+      return;
+    }
     animFrame = requestAnimationFrame(updatePlayback);
+  }
+
+  async function runQuickTraceWindow() {
+    console.log('[Trace5s] UI click');
+    if (!audioEl) return;
+    if (!hasVocalsAudio) {
+      handleMissingAudio('vocals');
+      return;
+    }
+    if (vocalTraceLoading) return;
+
+    if (!vocalTraceEnabled) {
+      vocalTraceEnabled = true;
+      if (micEnabled) {
+        micEnabled = false;
+        stopMic();
+      }
+      await toggleVocalTrace();
+    }
+
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      errorMessage.set('Vocal trace is not ready yet. Try again in a second.');
+      return;
+    }
+
+    const maxTime = audioEl.duration || audioDuration || 300;
+    quickTraceEndSec = Math.min(maxTime, currentTimeSec + QUICK_TRACE_DURATION_SEC);
+    quickTraceActive = true;
+
+    vocalTraceFrames = [];
+    vocalTraceNextSampleSec = Math.ceil(currentTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    warmupVocalTrace(currentTimeSec);
+    vocalTraceVisible = true;
+    draw();
+
+    if (!isPlaying) togglePlayback();
+  }
+
+  function medianPitch(values) {
+    if (!values || values.length === 0) return 60;
+    const s = [...values].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  }
+
+  function groupPitchFrames(frames, maxGapBeat = 0.45, maxPitchJump = 2) {
+    if (!frames.length) return [];
+    const sorted = [...frames].sort((a, b) => a.beat - b.beat);
+    const groups = [];
+    let current = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      const beatGap = cur.beat - prev.beat;
+      const pitchJump = Math.abs(cur.pitch - prev.pitch);
+      if (beatGap <= maxGapBeat && pitchJump <= maxPitchJump) {
+        current.push(cur);
+      } else {
+        groups.push(current);
+        current = [cur];
+      }
+    }
+    groups.push(current);
+    return groups;
+  }
+
+  function mergePlaceholderNotes(inputNotes, maxGapBeat = 0.35, maxPitchJump = 3) {
+    if (!inputNotes.length) return [];
+    const sorted = [...inputNotes].sort((a, b) => a.startBeat - b.startBeat);
+    const merged = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = merged[merged.length - 1];
+      const cur = sorted[i];
+      const prevEnd = prev.startBeat + prev.duration;
+      const gap = cur.startBeat - prevEnd;
+      const pitchJump = Math.abs(cur.pitch - prev.pitch);
+      if (gap <= maxGapBeat && pitchJump <= maxPitchJump) {
+        const newEnd = Math.max(prevEnd, cur.startBeat + cur.duration);
+        prev.duration = newEnd - prev.startBeat;
+        prev.pitch = Math.round((prev.pitch + cur.pitch) / 2);
+      } else {
+        merged.push(cur);
+      }
+    }
+    return merged;
+  }
+
+  function assignWordsToProposals(proposals, wordSpans) {
+    if (!proposals.length || !wordSpans.length) return { assigned: 0, unassigned: wordSpans.length };
+    let assigned = 0;
+    for (const w of wordSpans) {
+      let best = null;
+      let bestOverlap = -1;
+      for (const n of proposals) {
+        const nStart = n.startBeat;
+        const nEnd = n.startBeat + n.duration;
+        const overlap = Math.max(0, Math.min(nEnd, w.endBeat) - Math.max(nStart, w.startBeat));
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          best = n;
+        }
+      }
+      if (!best) continue;
+
+      // If no overlap exists, attach to nearest note center.
+      if (bestOverlap <= 0) {
+        const wc = (w.startBeat + w.endBeat) / 2;
+        let nearest = proposals[0];
+        let bestDist = Infinity;
+        for (const n of proposals) {
+          const nc = n.startBeat + n.duration / 2;
+          const d = Math.abs(wc - nc);
+          if (d < bestDist) {
+            bestDist = d;
+            nearest = n;
+          }
+        }
+        best = nearest;
+      }
+
+      if (!best.syllable || best.syllable.trim() === '' || best.syllable.trim() === '...') {
+        best.syllable = `${w.word} `;
+      }
+      assigned += 1;
+    }
+    return { assigned, unassigned: Math.max(0, wordSpans.length - assigned) };
+  }
+
+  function buildNotesFromAnalyzeWindow(startSec, endSec, words) {
+    const startBeat = timeToBeat(startSec);
+    const endBeat = timeToBeat(endSec);
+    const framePool = vocalTraceFrames.filter(f => f.beat >= startBeat && f.beat <= endBeat);
+    const vtBeatGap = (VOCAL_TRACE_STEP_SEC * bpm) / 15;
+
+    const proposalNotes = [];
+    const unknownProposalNotes = [];
+    let nextId = Math.max(0, ...notes.map(n => typeof n.id === 'number' ? n.id : 0));
+
+    const wordSpans = (words || []).map(w => ({
+      ...w,
+      startBeat: timeToBeat(w.start),
+      endBeat: timeToBeat(w.end),
+    }));
+    console.log('[Analyze5s] frame pool', {
+      frameCount: framePool.length,
+      startBeat,
+      endBeat,
+      wordSpans: wordSpans.length,
+    });
+
+    // 1) Recognized words → one note per word span to avoid over-segmentation.
+    for (let wi = 0; wi < wordSpans.length; wi++) {
+      const w = wordSpans[wi];
+      const spanFrames = framePool.filter(f => f.beat >= w.startBeat && f.beat <= w.endBeat);
+      const hasWordFrames = spanFrames.length > 0;
+      const fallbackPool = framePool.filter(f => f.beat >= (w.startBeat - 1.5) && f.beat <= (w.endBeat + 1.5));
+      const pitchSource = hasWordFrames ? spanFrames : (fallbackPool.length > 0 ? fallbackPool : framePool);
+      const gStart = Math.round(Math.max(startBeat, w.startBeat));
+      const gEnd = Math.round(Math.min(endBeat, w.endBeat + vtBeatGap));
+      const dur = Math.max(1, gEnd - gStart);
+      const pitch = medianPitch(pitchSource.map(x => x.pitch));
+      proposalNotes.push({
+        id: ++nextId,
+        startBeat: gStart,
+        duration: dur,
+        pitch,
+        syllable: `${w.word} `,
+        type: ':',
+        isRap: false,
+        isGolden: false,
+      });
+      console.log('[Analyze5s] word note', {
+        idx: wi,
+        word: w.word,
+        startBeat: gStart,
+        endBeat: gEnd,
+        dur,
+        hasWordFrames,
+        spanFrames: spanFrames.length,
+        fallbackFrames: fallbackPool.length,
+        pitch,
+      });
+    }
+
+    // 2) Unrecognized voiced regions → placeholder notes
+    const uncoveredFrames = framePool.filter(f => !wordSpans.some(w => f.beat >= w.startBeat && f.beat <= w.endBeat));
+    const unknownGroups = groupPitchFrames(uncoveredFrames, 0.65, 4);
+    console.log('[Analyze5s] uncovered pitch groups', {
+      uncoveredFrames: uncoveredFrames.length,
+      unknownGroups: unknownGroups.length,
+    });
+    for (const g of unknownGroups) {
+      const gStart = Math.round(Math.max(startBeat, g[0].beat));
+      const gEnd = Math.round(Math.min(endBeat, g[g.length - 1].beat + vtBeatGap));
+      const dur = Math.max(1, gEnd - gStart);
+      const pitch = medianPitch(g.map(x => x.pitch));
+      unknownProposalNotes.push({
+        id: ++nextId,
+        startBeat: gStart,
+        duration: dur,
+        pitch,
+        syllable: '... ',
+        type: ':',
+        isRap: false,
+        isGolden: false,
+      });
+    }
+
+    const mergedUnknown = mergePlaceholderNotes(unknownProposalNotes);
+    proposalNotes.push(...mergedUnknown);
+    const assignment = assignWordsToProposals(proposalNotes, wordSpans);
+    console.log('[Analyze5s] proposal post-process', {
+      recognizedWordNotes: wordSpans.length,
+      unknownRaw: unknownProposalNotes.length,
+      unknownMerged: mergedUnknown.length,
+      wordAssignments: assignment,
+      totalProposals: proposalNotes.length,
+    });
+
+    // Replace non-break notes in analyzed window with proposals.
+    const remaining = notes.filter(n => n.type === 'break' || (n.startBeat + n.duration <= startBeat || n.startBeat >= endBeat));
+    console.log('[Analyze5s] replacement', {
+      existingNotes: notes.length,
+      keptOutsideWindow: remaining.length,
+      inserted: proposalNotes.length,
+    });
+    notes = [...remaining, ...proposalNotes].sort((a, b) => a.startBeat - b.startBeat);
+    return {
+      proposalCount: proposalNotes.length,
+      frameCount: framePool.length,
+      wordCount: wordSpans.length,
+      unknownMergedCount: mergedUnknown.length,
+      assignedWords: assignment.assigned,
+    };
+  }
+
+  async function analyzeWindowAtCursor() {
+    console.group('[Analyze5s] start');
+    console.log('[Analyze5s] prereq snapshot', {
+      hasAudioElement: !!audioEl,
+      hasVocalsAudio,
+      sessionId: $sessionId || null,
+      vocalTraceReady: !!(vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf),
+    });
+
+    if (!audioEl) {
+      errorMessage.set('Analyze failed: audio element is not ready yet.');
+      console.warn('[Analyze5s] abort: missing audio element');
+      console.groupEnd();
+      return;
+    }
+    if (!hasVocalsAudio) {
+      handleMissingAudio('vocals');
+      console.warn('[Analyze5s] abort: no vocals audio available');
+      console.groupEnd();
+      return;
+    }
+    if (!$sessionId) {
+      errorMessage.set('Analyze failed: missing session ID. Go back to Step 1 and load audio again.');
+      console.warn('[Analyze5s] abort: missing session ID');
+      console.groupEnd();
+      return;
+    }
+
+    const maxTime = audioEl.duration || audioDuration || 300;
+    const startSec = Math.max(0, currentTimeSec);
+    const endSec = Math.min(maxTime, startSec + ANALYZE_WINDOW_SEC);
+    console.log('[Analyze5s] window', { startSec, endSec, duration: ANALYZE_WINDOW_SEC, currentTimeSec });
+
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      const wasEnabled = vocalTraceEnabled;
+      vocalTraceEnabled = true;
+      await startVocalTrace();
+      if (!wasEnabled) vocalTraceEnabled = false;
+    }
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      errorMessage.set('Could not initialize vocal trace analyzer.');
+      console.error('[Analyze5s] abort: analyzer could not initialize');
+      console.groupEnd();
+      return;
+    }
+
+    vocalTraceFrames = [];
+    vocalTraceVisible = true;
+    warmupVocalTrace(startSec);
+    let t = Math.ceil(startSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    while (t <= endSec) {
+      sampleVocalTrace(t);
+      t += VOCAL_TRACE_STEP_SEC;
+    }
+
+    try {
+      // Run fresh Whisper on just this window — independent of Step 2
+      const wordsResult = await analyzeWindow($sessionId, startSec, endSec);
+      liveWordTokens = (wordsResult.words || []).map((w, idx) => ({
+        id: `${idx}-${w.start}-${w.end}`,
+        word: w.word,
+        start: w.start,
+        end: w.end,
+        score: w.score ?? 0,
+      }));
+      console.log('[Analyze5s] words result', {
+        method: wordsResult.method,
+        wordsInWindow: liveWordTokens.length,
+        words: liveWordTokens.map(w => w.word),
+      });
+
+      pushUndo();
+      const stats = buildNotesFromAnalyzeWindow(startSec, endSec, liveWordTokens);
+      markUnsaved();
+      updatePitchRange();
+      console.log('[Analyze5s] note generation', stats);
+      if (!stats || stats.proposalCount === 0) {
+        errorMessage.set('Analyze 5s ran, but no note proposals were generated in this window. Try a different cursor position or run Trace first.');
+        console.warn('[Analyze5s] completed with zero proposals');
+      } else {
+        console.log(`[Analyze5s] inserted ${stats.proposalCount} notes in window`);
+      }
+    } catch (err) {
+      errorMessage.set(err.message);
+      liveWordTokens = [];
+      console.error('[Analyze5s] failed', err);
+    }
+
+    draw();
+    console.groupEnd();
+  }
+
+  function onAnalyzeButtonClick() {
+    console.log('[Analyze5s] UI click');
+    errorMessage.set('Analyze 5s started… check console for [Analyze5s] logs.');
+    analyzeWindowAtCursor().catch((err) => {
+      console.error('[Analyze5s] unhandled error', err);
+      errorMessage.set(err?.message || 'Analyze 5s failed unexpectedly.');
+    });
   }
 
   // Set playback speed
@@ -4843,6 +5235,24 @@
         <button class="tool-btn" id="toggle-playback-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
           {isPlaying ? '⏸ Pause' : '▶ Play'}
         </button>
+        <button class="tool-btn btn-trace" class:active={quickTraceActive} class:disabled-audio={!hasVocalsAudio}
+          on:click={runQuickTraceWindow}
+          title={hasVocalsAudio ? `TRACE: Plays ${QUICK_TRACE_DURATION_SEC}s of audio with real-time pink pitch dots` : 'No vocals — go to Step 1 to extract or upload'}>
+          🎙 Trace {QUICK_TRACE_DURATION_SEC}s
+        </button>
+        <button class="tool-btn btn-analyze" class:disabled-audio={!hasVocalsAudio}
+          on:click={onAnalyzeButtonClick}
+          title={hasVocalsAudio ? `ANALYZE: Silently scans ${ANALYZE_WINDOW_SEC}s and inserts note proposals (no playback)` : 'No vocals — go to Step 1 to extract or upload'}>
+          🔬 Analyze {ANALYZE_WINDOW_SEC}s
+        </button>
+        {#if liveWordTokens.length > 0}
+          <button class="tool-btn sm" class:active={liveWordsVisible}
+            on:click={() => { liveWordsVisible = !liveWordsVisible; draw(); }}
+            title={liveWordsVisible ? 'Hide analyzed words' : 'Show analyzed words'}>
+            Words {liveWordsVisible ? '👁' : '🙈'}
+          </button>
+          <button class="tool-btn sm" on:click={() => { liveWordTokens = []; draw(); }} title="Clear analyzed words">🗑W</button>
+        {/if}
         <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); toggleLoop(); }} class:active={loopEnabled} title="Loop (L)">
           <span class="mic-icon-wrap" class:mic-off={!loopEnabled}>🔁</span>
         </button>
@@ -5901,6 +6311,13 @@
   }
 
   .tool-btn:hover { background: #333; }
+  /* Trace = warm pink tint */
+  .tool-btn.btn-trace { background: #3a1a2a; color: #f48fb1; border-color: #c2185b; }
+  .tool-btn.btn-trace:hover { background: #4a2035; }
+  .tool-btn.btn-trace.active { background: #6a1030; border-color: #f06292; }
+  /* Analyze = cool cyan tint */
+  .tool-btn.btn-analyze { background: #0a2a3a; color: #80deea; border-color: #00838f; }
+  .tool-btn.btn-analyze:hover { background: #0f3545; }
 
   .zoom-label {
     color: #888;
