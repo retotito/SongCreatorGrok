@@ -3874,6 +3874,44 @@
     return { trimmed, dropped, split };
   }
 
+  function splitWordIntoSyllablesSimple(word) {
+    const cleaned = (word || '').toLowerCase().replace(/[^a-z]/g, '');
+    if (!cleaned) return [word || ''];
+
+    // Conservative heuristic:
+    // split after each vowel-group chunk while keeping trailing consonants.
+    const chunks = [];
+    const vowelGroups = cleaned.match(/[aeiouy]+[^aeiouy]*/g) || [];
+    for (const vg of vowelGroups) {
+      if (vg) chunks.push(vg);
+    }
+
+    if (chunks.length <= 1) return [word];
+    return chunks;
+  }
+
+  function formatSyllablesForSegments(originalWord, segmentCount) {
+    if (segmentCount <= 1) return [`${originalWord} `];
+
+    const syllables = splitWordIntoSyllablesSimple(originalWord);
+    if (syllables.length <= 1) {
+      // One syllable split by pitch only: continuation marker, no word space break.
+      return Array.from({ length: segmentCount }, (_, idx) => (idx === 0 ? `${originalWord}-` : '-'));
+    }
+
+    // Map syllables onto note segments proportionally and preserve word ending only
+    // on the final segment.
+    const out = [];
+    for (let i = 0; i < segmentCount; i++) {
+      const start = Math.floor((i * syllables.length) / segmentCount);
+      const end = Math.floor(((i + 1) * syllables.length) / segmentCount);
+      const part = syllables.slice(start, Math.max(start + 1, end)).join('');
+      if (i < segmentCount - 1) out.push(`${part}-`);
+      else out.push(`${part} `);
+    }
+    return out;
+  }
+
   function splitRecognizedWordNotes(wordSpan, spanFrames, fallbackFrames, startBeat, endBeat, vtBeatGap, wordIndex) {
     const pitchSource = spanFrames.length > 0 ? spanFrames : fallbackFrames;
     if (!pitchSource.length) return [];
@@ -3941,9 +3979,42 @@
     if (splitGroups.length < 2) {
       const noteStart = Math.round(Math.max(startBeat, wordSpan.startBeat));
       const noteEnd = Math.round(Math.min(endBeat, wordSpan.endBeat + vtBeatGap));
+      const baseDuration = Math.max(1, noteEnd - noteStart);
+      const syllables = splitWordIntoSyllablesSimple(wordSpan.word);
+
+      // Conservative syllable split fallback:
+      // only split long notes when we have multiple syllable candidates.
+      if (syllables.length >= 2 && baseDuration >= 10) {
+        const splitCount = Math.min(syllables.length, 3);
+        const parts = formatSyllablesForSegments(wordSpan.word, splitCount);
+        const notes = [];
+        let cursor = noteStart;
+        for (let i = 0; i < splitCount; i++) {
+          const targetEnd = i === splitCount - 1
+            ? noteEnd
+            : Math.max(cursor + 1, Math.round(noteStart + ((i + 1) * baseDuration) / splitCount));
+          notes.push({
+            startBeat: cursor,
+            duration: Math.max(1, targetEnd - cursor),
+            pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
+            syllable: parts[i] || '-',
+            analyzeWordIndex: wordIndex,
+          });
+          cursor = targetEnd;
+        }
+        console.log('[Analyze5s] syllable fallback split', {
+          word: wordSpan.word,
+          splitCount,
+          syllables,
+          parts,
+          duration: baseDuration,
+        });
+        return notes;
+      }
+
       return [{
         startBeat: noteStart,
-        duration: Math.max(1, noteEnd - noteStart),
+        duration: baseDuration,
         pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
         syllable: `${wordSpan.word} `,
         analyzeWordIndex: wordIndex,
@@ -3951,15 +4022,19 @@
     }
 
     const hasSplit = splitGroups.length > 1;
+    const syllableParts = formatSyllablesForSegments(wordSpan.word, splitGroups.length);
+    console.log('[Analyze5s] syllable map', {
+      word: wordSpan.word,
+      splitCount: splitGroups.length,
+      syllableParts,
+    });
     return splitGroups.map((group, index) => ({
       startBeat: group.startBeat,
       duration: Math.max(1, group.endBeat - group.startBeat),
       pitch: group.pitch,
-      // For split words, the first segment must not end with a space, otherwise
-      // Ultrastar treats it as a finished word before the continuation segment.
-      syllable: index === 0
-        ? (hasSplit ? `${wordSpan.word}-` : `${wordSpan.word} `)
-        : '-',
+      // Use conservative syllable mapping for split words while preserving
+      // old continuation behavior for 1-syllable words.
+      syllable: hasSplit ? (syllableParts[index] || '-') : `${wordSpan.word} `,
       analyzeWordIndex: wordIndex,
     }));
   }
