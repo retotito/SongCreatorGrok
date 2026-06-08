@@ -4083,13 +4083,61 @@
     return parts.length > 1 ? parts : [word];
   }
 
+  function isSyllableSplitLowConfidence(originalWord, parts) {
+    if (!Array.isArray(parts) || parts.length < 2) return true;
+    const lettersOnly = (originalWord || '').replace(/[^A-Za-z]/g, '').toLowerCase();
+    if (!lettersOnly) return true;
+
+    // Guard against clearly unnatural boundaries in consonant clusters.
+    for (let i = 0; i < parts.length - 1; i++) {
+      const left = (parts[i] || '').toLowerCase();
+      const right = (parts[i + 1] || '').toLowerCase();
+      if (!left || !right) return true;
+
+      const leftLast = left[left.length - 1] || '';
+      const rightFirst = right[0] || '';
+      if ((leftLast === 't' && rightFirst === 'h') ||
+          (leftLast === 'c' && rightFirst === 'h') ||
+          (leftLast === 'n' && rightFirst === 'g')) {
+        return true;
+      }
+    }
+
+    // Very short first chunk followed by a long consonant-start chunk is
+    // often a bad split (e.g. ho-meless, ma-keup).
+    if (parts.length === 2) {
+      const left = parts[0];
+      const right = parts[1];
+      const rightStartsWithVowel = /^[aeiouy]/i.test(right);
+      if (left.length <= 2 && right.length >= 4 && !rightStartsWithVowel) return true;
+      if (left.length <= 3 && right.length >= 4 && /^h/i.test(right)) return true;
+    }
+
+    return false;
+  }
+
+  function formatContinuationSegments(originalWord, segmentCount) {
+    if (segmentCount <= 1) return [`${originalWord} `];
+    const out = [];
+    for (let i = 0; i < segmentCount; i++) {
+      if (i === 0) out.push(`${originalWord}`);
+      else if (i === segmentCount - 1) out.push('~ ');
+      else out.push('~');
+    }
+    return out;
+  }
+
   function formatSyllablesForSegments(originalWord, segmentCount) {
     if (segmentCount <= 1) return [`${originalWord} `];
 
     const syllables = splitWordIntoSyllablesSimple(originalWord);
+    if (isSyllableSplitLowConfidence(originalWord, syllables)) {
+      // Keep pitch segmentation, but avoid forcing unreliable text hyphenation.
+      return formatContinuationSegments(originalWord, segmentCount);
+    }
     if (syllables.length <= 1) {
       // One syllable split by pitch only: continuation marker, no word space break.
-      return Array.from({ length: segmentCount }, (_, idx) => (idx === 0 ? `${originalWord}-` : '-'));
+      return formatContinuationSegments(originalWord, segmentCount);
     }
 
     // Map syllables onto note segments proportionally and preserve word ending only
@@ -4200,36 +4248,8 @@
     });
 
     if (splitGroups.length < 2) {
-      // Conservative syllable split fallback:
-      // only split long notes when we have multiple syllable candidates.
-      if (syllables.length >= 2 && baseDuration >= 10) {
-        const splitCount = Math.min(syllables.length, 3);
-        const parts = formatSyllablesForSegments(wordSpan.word, splitCount);
-        const notes = [];
-        let cursor = noteStart;
-        for (let i = 0; i < splitCount; i++) {
-          const targetEnd = i === splitCount - 1
-            ? noteEnd
-            : Math.max(cursor + 1, Math.round(noteStart + ((i + 1) * baseDuration) / splitCount));
-          notes.push({
-            startBeat: cursor,
-            duration: Math.max(1, targetEnd - cursor),
-            pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
-            syllable: parts[i] || '-',
-            analyzeWordIndex: wordIndex,
-          });
-          cursor = targetEnd;
-        }
-        console.log('[Analyze5s] syllable fallback split', {
-          word: wordSpan.word,
-          splitCount,
-          syllables,
-          parts,
-          duration: baseDuration,
-        });
-        return notes;
-      }
-
+      // No stable multi-pitch evidence: keep recognized word as a single note.
+      // This avoids text-only forced splits that can create spelling artifacts.
       return [{
         startBeat: noteStart,
         duration: baseDuration,
