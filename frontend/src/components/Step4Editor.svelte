@@ -1469,6 +1469,14 @@
                 && vocalTraceFrames[i + 1].pitch === missPitch) {
               i++; endBeat = vocalTraceFrames[i].beat;
             }
+            const missDurationBeat = Math.max(0, endBeat - frame.beat);
+            const nearStartEdge = (frame.beat - note.startBeat) <= Math.max(0.5, vtBeatGap);
+            const nearEndEdge = (noteEndBeat - endBeat) <= Math.max(0.5, vtBeatGap);
+            // Ignore tiny edge flicker misses to avoid noisy overlap on otherwise-correct notes.
+            if (missDurationBeat < Math.max(0.7, vtBeatGap) && (nearStartEdge || nearEndEdge)) {
+              i++;
+              continue;
+            }
             const missY  = pitchToY(missPitch);
             const xStart = beatToX(frame.beat);
             const xEnd   = beatToX(endBeat);
@@ -3761,6 +3769,39 @@
     const maxTime = audioEl.duration || audioDuration || 300;
     const traceStartSec = TRACE_SCOPE === 'song' ? 0 : currentTimeSec;
     const traceEndSec = TRACE_SCOPE === 'song' ? maxTime : Math.min(maxTime, traceStartSec + QUICK_TRACE_DURATION_SEC);
+
+    // Song trace runs in a fast offline pass instead of real-time playback.
+    if (TRACE_SCOPE === 'song') {
+      if (isPlaying) togglePlayback();
+      if (currentTimeSec > 0) seekToTime(0);
+
+      vocalTraceFrames = [];
+      vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+      warmupVocalTrace(traceStartSec);
+      vocalTraceVisible = true;
+      draw();
+
+      const totalSamples = Math.max(1, Math.floor((traceEndSec - vocalTraceNextSampleSec) / VOCAL_TRACE_STEP_SEC) + 1);
+      let sampled = 0;
+      for (let t = vocalTraceNextSampleSec; t <= traceEndSec; t += VOCAL_TRACE_STEP_SEC) {
+        sampleVocalTrace(t);
+        sampled += 1;
+        if (sampled % 800 === 0) {
+          const percent = Math.min(100, Math.round((sampled / totalSamples) * 100));
+          errorMessage.set(`Tracing ${TRACE_SCOPE_LABEL}... ${percent}%`);
+          draw();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      quickTraceActive = false;
+      quickTraceEndSec = null;
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${TRACE_SCOPE_LABEL} summary`);
+      errorMessage.set(`Trace ${TRACE_SCOPE_LABEL} complete (${vocalTraceFrames.length} frames).`);
+      draw();
+      return;
+    }
+
     quickTraceEndSec = traceEndSec;
     quickTraceActive = true;
 
@@ -3860,8 +3901,8 @@
 
       const keptSegments = segments
         .map(segment => ({
-          startBeat: Math.round(segment.startBeat),
-          endBeat: Math.round(segment.endBeat),
+          startBeat: Math.floor(segment.startBeat),
+          endBeat: Math.ceil(segment.endBeat),
         }))
         .filter(segment => segment.endBeat - segment.startBeat >= 1);
 
@@ -3910,7 +3951,7 @@
       const runStart = Math.round(Math.max(startBeat, run.frames[0].beat));
       const runEnd = Math.round(Math.min(endBeat, run.frames[run.frames.length - 1].beat + vtBeatGap));
       return {
-        pitch: run.pitch,
+        pitch: medianPitch(run.frames.map(f => f.pitch)),
         frameCount: run.frames.length,
         startBeat: runStart,
         endBeat: runEnd,
@@ -3968,10 +4009,11 @@
       });
 
       for (const group of splitGroups) {
+        const durationWithTail = Math.max(1, (group.endBeat - group.startBeat) + Math.max(0, Math.round(vtBeatGap)));
         splitNotes.push({
           ...note,
           startBeat: group.startBeat,
-          duration: Math.max(1, group.endBeat - group.startBeat),
+          duration: durationWithTail,
           pitch: group.pitch,
           syllable: '... ',
         });
@@ -4058,10 +4100,91 @@
     return out;
   }
 
+  function mergeSplitGroupsToCount(splitGroups, targetCount) {
+    if (!Array.isArray(splitGroups) || splitGroups.length <= targetCount) {
+      return splitGroups || [];
+    }
+    const merged = [];
+    for (let i = 0; i < splitGroups.length; i++) {
+      const bucketStart = Math.floor((i * targetCount) / splitGroups.length);
+      const bucket = Math.min(targetCount - 1, bucketStart);
+      const group = splitGroups[i];
+      const prev = merged[bucket];
+      if (!prev) {
+        merged[bucket] = { ...group };
+        continue;
+      }
+      prev.startBeat = Math.min(prev.startBeat, group.startBeat);
+      const prevEnd = prev.startBeat + prev.duration;
+      const groupEnd = group.startBeat + group.duration;
+      prev.duration = Math.max(1, Math.max(prevEnd, groupEnd) - prev.startBeat);
+      prev.pitch = Math.round((prev.pitch + group.pitch) / 2);
+    }
+    return merged.filter(Boolean);
+  }
+
+  function normalizeWordSegments(segments, noteStart, noteEnd) {
+    if (!Array.isArray(segments) || !segments.length) return [];
+    const sorted = [...segments].sort((a, b) => a.startBeat - b.startBeat);
+    const normalized = [];
+    let cursor = Math.round(noteStart);
+    const finalEnd = Math.round(Math.max(noteStart + 1, noteEnd));
+
+    for (let i = 0; i < sorted.length; i++) {
+      const seg = sorted[i];
+      const rawStart = Math.round(seg.startBeat);
+      const rawEnd = Math.round(seg.startBeat + seg.duration);
+      const nextRawStart = i < sorted.length - 1 ? Math.round(sorted[i + 1].startBeat) : finalEnd;
+
+      let start = Math.max(cursor, rawStart);
+      start = Math.min(start, finalEnd - 1);
+
+      let end;
+      if (i === sorted.length - 1) {
+        end = finalEnd;
+      } else {
+        const cappedByNext = Math.max(start + 1, Math.min(rawEnd, nextRawStart));
+        end = Math.min(finalEnd, cappedByNext);
+      }
+
+      if (end <= start) {
+        if (i === sorted.length - 1) {
+          start = Math.max(noteStart, finalEnd - 1);
+          end = finalEnd;
+        } else {
+          end = Math.min(finalEnd, start + 1);
+        }
+      }
+
+      normalized.push({
+        ...seg,
+        startBeat: start,
+        duration: Math.max(1, end - start),
+      });
+      cursor = end;
+      if (cursor >= finalEnd) break;
+    }
+
+    if (!normalized.length) {
+      return [{ ...segments[0], startBeat: Math.round(noteStart), duration: Math.max(1, Math.round(noteEnd - noteStart)) }];
+    }
+
+    const last = normalized[normalized.length - 1];
+    const lastEnd = last.startBeat + last.duration;
+    if (lastEnd < finalEnd) {
+      last.duration += (finalEnd - lastEnd);
+    }
+    return normalized;
+  }
+
   function splitRecognizedWordNotes(wordSpan, spanFrames, fallbackFrames, startBeat, endBeat, vtBeatGap, wordIndex) {
     const pitchSource = spanFrames.length > 0 ? spanFrames : fallbackFrames;
     if (!pitchSource.length) return [];
     const { runStats, stableRuns, splitGroups } = buildPitchSplitGroups(spanFrames, startBeat, endBeat, vtBeatGap);
+    const noteStart = Math.round(Math.max(startBeat, wordSpan.startBeat));
+    const noteEnd = Math.round(Math.min(endBeat, wordSpan.endBeat + vtBeatGap));
+    const baseDuration = Math.max(1, noteEnd - noteStart);
+    const syllables = splitWordIntoSyllablesSimple(wordSpan.word);
 
     console.log('[Analyze5s] split decision', {
       word: wordSpan.word,
@@ -4072,11 +4195,6 @@
     });
 
     if (splitGroups.length < 2) {
-      const noteStart = Math.round(Math.max(startBeat, wordSpan.startBeat));
-      const noteEnd = Math.round(Math.min(endBeat, wordSpan.endBeat + vtBeatGap));
-      const baseDuration = Math.max(1, noteEnd - noteStart);
-      const syllables = splitWordIntoSyllablesSimple(wordSpan.word);
-
       // Conservative syllable split fallback:
       // only split long notes when we have multiple syllable candidates.
       if (syllables.length >= 2 && baseDuration >= 10) {
@@ -4116,22 +4234,60 @@
       }];
     }
 
-    const hasSplit = splitGroups.length > 1;
-    const syllableParts = formatSyllablesForSegments(wordSpan.word, splitGroups.length);
+    // Keep one-syllable words intact to avoid hyphen-only fragments like "-".
+    if (syllables.length < 2) {
+      return [{
+        startBeat: noteStart,
+        duration: baseDuration,
+        pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
+        syllable: `${wordSpan.word} `,
+        analyzeWordIndex: wordIndex,
+      }];
+    }
+
+    const targetSplitCount = Math.min(3, syllables.length);
+    const compressedGroups = mergeSplitGroupsToCount(splitGroups, targetSplitCount);
+    const normalizedGroups = normalizeWordSegments(compressedGroups, noteStart, noteEnd);
+    const hasSplit = normalizedGroups.length > 1;
+    const syllableParts = formatSyllablesForSegments(wordSpan.word, normalizedGroups.length);
     console.log('[Analyze5s] syllable map', {
       word: wordSpan.word,
-      splitCount: splitGroups.length,
+      splitCount: normalizedGroups.length,
       syllableParts,
     });
-    return splitGroups.map((group, index) => ({
+    return normalizedGroups.map((group, index) => ({
       startBeat: group.startBeat,
-      duration: Math.max(1, group.endBeat - group.startBeat),
+      duration: Math.max(1, group.duration),
       pitch: group.pitch,
       // Use conservative syllable mapping for split words while preserving
       // old continuation behavior for 1-syllable words.
       syllable: hasSplit ? (syllableParts[index] || '-') : `${wordSpan.word} `,
       analyzeWordIndex: wordIndex,
     }));
+  }
+
+  function capRecognizedWordOverlaps(proposals) {
+    // Sort ALL notes by start beat, then by type (recognized words before placeholders for stable ordering)
+    const sorted = proposals
+      .map(n => ({ note: n, isRecognized: Number.isInteger(n.analyzeWordIndex) }))
+      .sort((a, b) => {
+        if (a.note.startBeat !== b.note.startBeat) return a.note.startBeat - b.note.startBeat;
+        // Recognized words before placeholders at same start beat (shouldn't happen, but for stability)
+        return (b.isRecognized ? 1 : 0) - (a.isRecognized ? 1 : 0);
+      });
+
+    // Cap overlaps between all adjacent notes
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const cur = sorted[i].note;
+      const next = sorted[i + 1].note;
+      const curEnd = cur.startBeat + cur.duration;
+
+      // Keep at least a 1-beat gap to avoid touching/overlapping notes.
+      if (curEnd >= next.startBeat) {
+        const newDur = Math.max(1, next.startBeat - cur.startBeat - 1);
+        cur.duration = newDur;
+      }
+    }
   }
 
   function assignWordsToProposals(proposals, wordSpans) {
@@ -4268,6 +4424,7 @@
     }
 
     const mergedUnknown = mergePlaceholderNotes(unknownProposalNotes);
+    capRecognizedWordOverlaps(proposalNotes);
     const overlapCleanup = trimPlaceholdersAgainstNotes(mergedUnknown, proposalNotes);
     const placeholderSplit = splitPlaceholderNotesByPitchRuns(overlapCleanup.trimmed, framePool, startBeat, endBeat, vtBeatGap);
     proposalNotes.push(...placeholderSplit.notes);
@@ -4286,12 +4443,17 @@
 
     // Replace non-break notes in analyzed window with proposals.
     const remaining = notes.filter(n => n.type === 'break' || (n.startBeat + n.duration <= startBeat || n.startBeat >= endBeat));
+    let reassignedId = Math.max(0, ...remaining.map(n => typeof n.id === 'number' ? n.id : 0));
+    const proposalNotesWithUniqueIds = proposalNotes.map(note => ({
+      ...note,
+      id: ++reassignedId,
+    }));
     console.log('[Analyze5s] replacement', {
       existingNotes: notes.length,
       keptOutsideWindow: remaining.length,
-      inserted: proposalNotes.length,
+      inserted: proposalNotesWithUniqueIds.length,
     });
-    notes = [...remaining, ...proposalNotes]
+    notes = [...remaining, ...proposalNotesWithUniqueIds]
       .map(note => {
         const { analyzeWordIndex, ...cleanNote } = note;
         return cleanNote;
