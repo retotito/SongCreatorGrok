@@ -3884,6 +3884,103 @@
     return { trimmed, dropped, split };
   }
 
+  function buildPitchSplitGroups(frames, startBeat, endBeat, vtBeatGap) {
+    const sortedFrames = [...frames].sort((a, b) => a.beat - b.beat);
+    const runs = [];
+    if (sortedFrames.length > 0) {
+      let current = { pitch: sortedFrames[0].pitch, frames: [sortedFrames[0]] };
+      for (let i = 1; i < sortedFrames.length; i++) {
+        const prev = sortedFrames[i - 1];
+        const cur = sortedFrames[i];
+        const beatGap = cur.beat - prev.beat;
+        // Frames are sampled on a coarse beat grid (~0.8 beat spacing at current BPM),
+        // so allow bigger continuity gaps and +/-1 semitone jitter inside a run.
+        const sameRun = Math.abs(cur.pitch - current.pitch) <= 1 && beatGap <= 1.35;
+        if (sameRun) {
+          current.frames.push(cur);
+        } else {
+          runs.push(current);
+          current = { pitch: cur.pitch, frames: [cur] };
+        }
+      }
+      runs.push(current);
+    }
+
+    const runStats = runs.map(run => {
+      const runStart = Math.round(Math.max(startBeat, run.frames[0].beat));
+      const runEnd = Math.round(Math.min(endBeat, run.frames[run.frames.length - 1].beat + vtBeatGap));
+      return {
+        pitch: run.pitch,
+        frameCount: run.frames.length,
+        startBeat: runStart,
+        endBeat: runEnd,
+        duration: Math.max(1, runEnd - runStart),
+      };
+    });
+
+    const stableRuns = runStats.filter(run => run.frameCount >= 2 && run.duration >= 2);
+    const splitGroups = [];
+    for (const run of stableRuns) {
+      const prev = splitGroups[splitGroups.length - 1];
+      if (!prev) {
+        splitGroups.push({ ...run });
+        continue;
+      }
+      const pitchDiff = Math.abs(run.pitch - prev.pitch);
+      const startDiff = run.startBeat - prev.startBeat;
+      if (pitchDiff >= 2 && startDiff >= 3) {
+        splitGroups.push({ ...run });
+      } else {
+        // Merge unstable continuation into previous run.
+        prev.endBeat = Math.max(prev.endBeat, run.endBeat);
+        prev.duration = Math.max(1, prev.endBeat - prev.startBeat);
+      }
+    }
+
+    return { runStats, stableRuns, splitGroups };
+  }
+
+  function splitPlaceholderNotesByPitchRuns(placeholders, framePool, startBeat, endBeat, vtBeatGap) {
+    if (!placeholders.length) return { notes: [], split: 0 };
+
+    const splitNotes = [];
+    let split = 0;
+
+    for (const note of [...placeholders].sort((a, b) => a.startBeat - b.startBeat)) {
+      const noteStart = Math.round(Math.max(startBeat, note.startBeat));
+      const noteEnd = Math.round(Math.min(endBeat, note.startBeat + note.duration));
+      const noteFrames = framePool.filter(f => f.beat >= noteStart && f.beat <= noteEnd);
+      const { runStats, stableRuns, splitGroups } = buildPitchSplitGroups(noteFrames, noteStart, noteEnd, vtBeatGap);
+
+      if (splitGroups.length < 2) {
+        splitNotes.push(note);
+        continue;
+      }
+
+      split += 1;
+      console.log('[Analyze5s] placeholder split', {
+        startBeat: noteStart,
+        endBeat: noteEnd,
+        duration: noteEnd - noteStart,
+        runs: runStats,
+        stableRuns,
+        splitGroups,
+      });
+
+      for (const group of splitGroups) {
+        splitNotes.push({
+          ...note,
+          startBeat: group.startBeat,
+          duration: Math.max(1, group.endBeat - group.startBeat),
+          pitch: group.pitch,
+          syllable: '... ',
+        });
+      }
+    }
+
+    return { notes: splitNotes, split };
+  }
+
   function splitWordIntoSyllablesSimple(word) {
     const lettersOnly = (word || '').replace(/[^A-Za-z]/g, '');
     if (!lettersOnly) return [word || ''];
@@ -3964,58 +4061,7 @@
   function splitRecognizedWordNotes(wordSpan, spanFrames, fallbackFrames, startBeat, endBeat, vtBeatGap, wordIndex) {
     const pitchSource = spanFrames.length > 0 ? spanFrames : fallbackFrames;
     if (!pitchSource.length) return [];
-
-    const sortedFrames = [...spanFrames].sort((a, b) => a.beat - b.beat);
-    const runs = [];
-    if (sortedFrames.length > 0) {
-      let current = { pitch: sortedFrames[0].pitch, frames: [sortedFrames[0]] };
-      for (let i = 1; i < sortedFrames.length; i++) {
-        const prev = sortedFrames[i - 1];
-        const cur = sortedFrames[i];
-        const beatGap = cur.beat - prev.beat;
-        // Frames are sampled on a coarse beat grid (~0.8 beat spacing at current BPM),
-        // so allow bigger continuity gaps and +/-1 semitone jitter inside a run.
-        const sameRun = Math.abs(cur.pitch - current.pitch) <= 1 && beatGap <= 1.35;
-        if (sameRun) {
-          current.frames.push(cur);
-        } else {
-          runs.push(current);
-          current = { pitch: cur.pitch, frames: [cur] };
-        }
-      }
-      runs.push(current);
-    }
-
-    const runStats = runs.map(run => {
-      const runStart = Math.round(Math.max(startBeat, run.frames[0].beat));
-      const runEnd = Math.round(Math.min(endBeat, run.frames[run.frames.length - 1].beat + vtBeatGap));
-      return {
-        pitch: run.pitch,
-        frameCount: run.frames.length,
-        startBeat: runStart,
-        endBeat: runEnd,
-        duration: Math.max(1, runEnd - runStart),
-      };
-    });
-
-    const stableRuns = runStats.filter(run => run.frameCount >= 2 && run.duration >= 2);
-    const splitGroups = [];
-    for (const run of stableRuns) {
-      const prev = splitGroups[splitGroups.length - 1];
-      if (!prev) {
-        splitGroups.push({ ...run });
-        continue;
-      }
-      const pitchDiff = Math.abs(run.pitch - prev.pitch);
-      const startDiff = run.startBeat - prev.startBeat;
-      if (pitchDiff >= 2 && startDiff >= 3) {
-        splitGroups.push({ ...run });
-      } else {
-        // Merge unstable continuation into previous run.
-        prev.endBeat = Math.max(prev.endBeat, run.endBeat);
-        prev.duration = Math.max(1, prev.endBeat - prev.startBeat);
-      }
-    }
+    const { runStats, stableRuns, splitGroups } = buildPitchSplitGroups(spanFrames, startBeat, endBeat, vtBeatGap);
 
     console.log('[Analyze5s] split decision', {
       word: wordSpan.word,
@@ -4223,7 +4269,8 @@
 
     const mergedUnknown = mergePlaceholderNotes(unknownProposalNotes);
     const overlapCleanup = trimPlaceholdersAgainstNotes(mergedUnknown, proposalNotes);
-    proposalNotes.push(...overlapCleanup.trimmed);
+    const placeholderSplit = splitPlaceholderNotesByPitchRuns(overlapCleanup.trimmed, framePool, startBeat, endBeat, vtBeatGap);
+    proposalNotes.push(...placeholderSplit.notes);
     const assignment = assignWordsToProposals(proposalNotes, wordSpans);
     console.log('[Analyze5s] proposal post-process', {
       recognizedWordNotes: wordSpans.length,
@@ -4232,6 +4279,7 @@
       unknownTrimmed: overlapCleanup.trimmed.length,
       unknownDropped: overlapCleanup.dropped,
       unknownSplit: overlapCleanup.split,
+      placeholderSplit: placeholderSplit.split,
       wordAssignments: assignment,
       totalProposals: proposalNotes.length,
     });
