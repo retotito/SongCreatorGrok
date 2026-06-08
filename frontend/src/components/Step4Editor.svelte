@@ -315,8 +315,12 @@
   let vocalTraceRecentPitches = [];
   let quickTraceActive = false;
   let quickTraceEndSec = null;
+  const TRACE_SCOPE = 'song'; // 'window' | 'song'
   const QUICK_TRACE_DURATION_SEC = 5;
+  const TRACE_SCOPE_LABEL = TRACE_SCOPE === 'song' ? 'song' : `${QUICK_TRACE_DURATION_SEC}s`;
+  const ANALYZE_SCOPE = 'song'; // 'window' | 'song'
   const ANALYZE_WINDOW_SEC = 5;
+  const ANALYZE_SCOPE_LABEL = ANALYZE_SCOPE === 'song' ? 'song' : `${ANALYZE_WINDOW_SEC}s`;
   let liveWordTokens = [];
   let liveWordsVisible = true;
   // Fixed-grid sampling: sample every fixed number of seconds of audio time so the
@@ -3723,7 +3727,7 @@
     if (quickTraceActive && quickTraceEndSec !== null && currentTimeSec >= quickTraceEndSec) {
       quickTraceActive = false;
       quickTraceEndSec = null;
-      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${QUICK_TRACE_DURATION_SEC}s summary`);
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${TRACE_SCOPE_LABEL} summary`);
       // Pause at the end of the short trace window so users can iterate quickly.
       togglePlayback();
       return;
@@ -3732,7 +3736,7 @@
   }
 
   async function runQuickTraceWindow() {
-    console.log('[Trace5s] UI click');
+    console.log('[Trace] UI click');
     if (!audioEl) return;
     if (!hasVocalsAudio) {
       handleMissingAudio('vocals');
@@ -3755,12 +3759,18 @@
     }
 
     const maxTime = audioEl.duration || audioDuration || 300;
-    quickTraceEndSec = Math.min(maxTime, currentTimeSec + QUICK_TRACE_DURATION_SEC);
+    const traceStartSec = TRACE_SCOPE === 'song' ? 0 : currentTimeSec;
+    const traceEndSec = TRACE_SCOPE === 'song' ? maxTime : Math.min(maxTime, traceStartSec + QUICK_TRACE_DURATION_SEC);
+    quickTraceEndSec = traceEndSec;
     quickTraceActive = true;
 
+    if (TRACE_SCOPE === 'song' && currentTimeSec > 0) {
+      seekToTime(0);
+    }
+
     vocalTraceFrames = [];
-    vocalTraceNextSampleSec = Math.ceil(currentTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
-    warmupVocalTrace(currentTimeSec);
+    vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    warmupVocalTrace(traceStartSec);
     vocalTraceVisible = true;
     draw();
 
@@ -4249,37 +4259,38 @@
   }
 
   async function analyzeWindowAtCursor() {
-    console.group('[Analyze5s] start');
-    console.log('[Analyze5s] prereq snapshot', {
+    console.group('[Analyze] start');
+    console.log('[Analyze] prereq snapshot', {
       hasAudioElement: !!audioEl,
       hasVocalsAudio,
       sessionId: $sessionId || null,
       vocalTraceReady: !!(vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf),
+      analyzeScope: ANALYZE_SCOPE,
     });
 
     if (!audioEl) {
       errorMessage.set('Analyze failed: audio element is not ready yet.');
-      console.warn('[Analyze5s] abort: missing audio element');
+      console.warn('[Analyze] abort: missing audio element');
       console.groupEnd();
       return;
     }
     if (!hasVocalsAudio) {
       handleMissingAudio('vocals');
-      console.warn('[Analyze5s] abort: no vocals audio available');
+      console.warn('[Analyze] abort: no vocals audio available');
       console.groupEnd();
       return;
     }
     if (!$sessionId) {
       errorMessage.set('Analyze failed: missing session ID. Go back to Step 1 and load audio again.');
-      console.warn('[Analyze5s] abort: missing session ID');
+      console.warn('[Analyze] abort: missing session ID');
       console.groupEnd();
       return;
     }
 
     const maxTime = audioEl.duration || audioDuration || 300;
-    const startSec = Math.max(0, currentTimeSec);
-    const endSec = Math.min(maxTime, startSec + ANALYZE_WINDOW_SEC);
-    console.log('[Analyze5s] window', { startSec, endSec, duration: ANALYZE_WINDOW_SEC, currentTimeSec });
+    const startSec = ANALYZE_SCOPE === 'song' ? 0 : Math.max(0, currentTimeSec);
+    const endSec = ANALYZE_SCOPE === 'song' ? maxTime : Math.min(maxTime, startSec + ANALYZE_WINDOW_SEC);
+    console.log('[Analyze] window', { startSec, endSec, duration: endSec - startSec, currentTimeSec, analyzeScope: ANALYZE_SCOPE });
 
     if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
       const wasEnabled = vocalTraceEnabled;
@@ -4289,7 +4300,7 @@
     }
     if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
       errorMessage.set('Could not initialize vocal trace analyzer.');
-      console.error('[Analyze5s] abort: analyzer could not initialize');
+      console.error('[Analyze] abort: analyzer could not initialize');
       console.groupEnd();
       return;
     }
@@ -4326,18 +4337,18 @@
       const analyzedNotes = notes.filter(n => n.type !== 'break' && n.startBeat < analyzedEndBeat && (n.startBeat + n.duration) > analyzedStartBeat);
       markUnsaved();
       updatePitchRange();
-      console.log('[Analyze5s] note generation', stats);
-      if (vocalTraceFrames.length > 0) logVocalTraceState(`Analyze ${ANALYZE_WINDOW_SEC}s trace vs notes`, analyzedNotes);
+      console.log('[Analyze] note generation', stats);
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Analyze ${ANALYZE_SCOPE_LABEL} trace vs notes`, analyzedNotes);
       if (!stats || stats.proposalCount === 0) {
-        errorMessage.set('Analyze 5s ran, but no note proposals were generated in this window. Try a different cursor position or run Trace first.');
-        console.warn('[Analyze5s] completed with zero proposals');
+        errorMessage.set('Analyze ran, but no note proposals were generated in this range. Try a different section or run Trace first.');
+        console.warn('[Analyze] completed with zero proposals');
       } else {
-        console.log(`[Analyze5s] inserted ${stats.proposalCount} notes in window`);
+        console.log(`[Analyze] inserted ${stats.proposalCount} notes in range`);
       }
     } catch (err) {
       errorMessage.set(err.message);
       liveWordTokens = [];
-      console.error('[Analyze5s] failed', err);
+      console.error('[Analyze] failed', err);
     }
 
     draw();
@@ -4345,11 +4356,11 @@
   }
 
   function onAnalyzeButtonClick() {
-    console.log('[Analyze5s] UI click');
-    errorMessage.set('Analyze 5s started… check console for [Analyze5s] logs.');
+    console.log('[Analyze] UI click');
+    errorMessage.set(`Analyze ${ANALYZE_SCOPE_LABEL} started… check console for [Analyze] logs.`);
     analyzeWindowAtCursor().catch((err) => {
-      console.error('[Analyze5s] unhandled error', err);
-      errorMessage.set(err?.message || 'Analyze 5s failed unexpectedly.');
+      console.error('[Analyze] unhandled error', err);
+      errorMessage.set(err?.message || 'Analyze failed unexpectedly.');
     });
   }
 
@@ -5526,13 +5537,13 @@
         </button>
         <button class="tool-btn btn-trace" class:active={quickTraceActive} class:disabled-audio={!hasVocalsAudio}
           on:click={runQuickTraceWindow}
-          title={hasVocalsAudio ? `TRACE: Plays ${QUICK_TRACE_DURATION_SEC}s of audio with real-time pink pitch dots` : 'No vocals — go to Step 1 to extract or upload'}>
-          🎙 Trace {QUICK_TRACE_DURATION_SEC}s
+          title={hasVocalsAudio ? `TRACE: Plays ${TRACE_SCOPE_LABEL} of audio with real-time pink pitch dots` : 'No vocals — go to Step 1 to extract or upload'}>
+          🎙 Trace {TRACE_SCOPE_LABEL}
         </button>
         <button class="tool-btn btn-analyze" class:disabled-audio={!hasVocalsAudio}
           on:click={onAnalyzeButtonClick}
-          title={hasVocalsAudio ? `ANALYZE: Silently scans ${ANALYZE_WINDOW_SEC}s and inserts note proposals (no playback)` : 'No vocals — go to Step 1 to extract or upload'}>
-          🔬 Analyze {ANALYZE_WINDOW_SEC}s
+          title={hasVocalsAudio ? `ANALYZE: Silently scans ${ANALYZE_SCOPE_LABEL} and inserts note proposals (no playback)` : 'No vocals — go to Step 1 to extract or upload'}>
+          🔬 Analyze {ANALYZE_SCOPE_LABEL}
         </button>
         {#if liveWordTokens.length > 0}
           <button class="tool-btn sm" class:active={liveWordsVisible}
