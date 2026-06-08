@@ -4008,12 +4008,17 @@
         splitGroups,
       });
 
-      for (const group of splitGroups) {
+      for (let gi = 0; gi < splitGroups.length; gi++) {
+        const group = splitGroups[gi];
+        const nextGroup = splitGroups[gi + 1] || null;
         const durationWithTail = Math.max(1, (group.endBeat - group.startBeat) + Math.max(0, Math.round(vtBeatGap)));
+        const rawEnd = group.startBeat + durationWithTail;
+        // Prevent overlap between split placeholder segments.
+        const clippedEnd = nextGroup ? Math.min(rawEnd, nextGroup.startBeat) : rawEnd;
         splitNotes.push({
           ...note,
           startBeat: group.startBeat,
-          duration: durationWithTail,
+          duration: Math.max(1, clippedEnd - group.startBeat),
           pitch: group.pitch,
           syllable: '... ',
         });
@@ -4428,6 +4433,8 @@
     const overlapCleanup = trimPlaceholdersAgainstNotes(mergedUnknown, proposalNotes);
     const placeholderSplit = splitPlaceholderNotesByPitchRuns(overlapCleanup.trimmed, framePool, startBeat, endBeat, vtBeatGap);
     proposalNotes.push(...placeholderSplit.notes);
+    // Split placeholders can reintroduce overlaps (tail extension), so cap again on full proposal set.
+    capRecognizedWordOverlaps(proposalNotes);
     const assignment = assignWordsToProposals(proposalNotes, wordSpans);
     console.log('[Analyze5s] proposal post-process', {
       recognizedWordNotes: wordSpans.length,
