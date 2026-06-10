@@ -145,9 +145,10 @@ export function getAudioUrl(sessionId, type) {
 }
 
 // ─── Step 2: Lyrics ────────────────────────────
-export function transcribeAudio(sessionId, language = 'en', signal = null) {
+export function transcribeAudio(sessionId, language = 'en', signal = null, useCleaned = false) {
   return new Promise((resolve, reject) => {
-    const url = `${BASE}/transcribe-stream/${sessionId}?language=${encodeURIComponent(language)}`;
+    let url = `${BASE}/transcribe-stream/${sessionId}?language=${encodeURIComponent(language)}`;
+    if (useCleaned) url += '&use_cleaned=true';
     console.log(`[API] SSE ${url}`);
     const es = new EventSource(url);
 
@@ -238,13 +239,14 @@ export function streamGenerate(sessionId, onEvent) {
   return es;
 }
 
-export async function startGenerate(sessionId) {
-  return request('POST', `/generate/start/${sessionId}`, null, false, false, null);
+export async function startGenerate(sessionId, useCleaned = false) {
+  const url = useCleaned ? `/generate/start/${sessionId}?use_cleaned=true` : `/generate/start/${sessionId}`;
+  return request('POST', url, null, false, false, null);
 }
 
-export async function pollGenerate(sessionId, onStatus, signal) {
+export async function pollGenerate(sessionId, onStatus, signal, useCleaned = false) {
   // Start generation
-  await startGenerate(sessionId);
+  await startGenerate(sessionId, useCleaned);
   // Poll every 3s until done, error, or cancelled
   return new Promise((resolve, reject) => {
     let interval = setInterval(async () => {

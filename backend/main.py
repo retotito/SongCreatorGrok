@@ -1282,7 +1282,7 @@ async def cancel_transcribe(session_id: str):
 
 
 @app.get("/api/transcribe-stream/{session_id}")
-async def transcribe_stream(session_id: str, language: str = "en"):
+async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: bool = False):
     """SSE stream for transcription — keeps connection alive during long Whisper runs."""
     # Normalize full language names to ISO codes (e.g. "English" -> "en")
     _LANG_MAP = {
@@ -1308,7 +1308,14 @@ async def transcribe_stream(session_id: str, language: str = "en"):
         return f"data: {json.dumps(data)}\n\n"
 
     async def event_generator():
-        audio_path = session.get("vocal_audio") or session.get("original_audio")
+        if use_cleaned:
+            result = session.get("result") or {}
+            audio_path = result.get("cleaned_vocal_path")
+            if not audio_path or not os.path.exists(audio_path):
+                yield _send("error", "No cleaned audio found. Generate a cleaned preview first.")
+                return
+        else:
+            audio_path = session.get("vocal_audio") or session.get("original_audio")
         if not audio_path or not os.path.exists(audio_path):
             yield _send("error", "No audio file found. Upload audio first.")
             return
@@ -2133,6 +2140,10 @@ def generate_ultrastar_files(session_id: str):
         for _fn in (txt_filename, midi_filename, summary_filename):
             if _fn not in session["generated_files"]:
                 session["generated_files"].append(_fn)
+        # Preserve cleanup state across regeneration
+        _old_result = session.get("result") or {}
+        _preserved_cleanup_segments = _old_result.get("cleanup_segments", [])
+        _preserved_cleaned_vocal_path = _old_result.get("cleaned_vocal_path")
         session["result"] = {
             "txt_file": txt_filename,
             "midi_file": midi_filename,
@@ -2148,6 +2159,8 @@ def generate_ultrastar_files(session_id: str):
             "syllable_timings": syllable_timings,
             "ultrastar_content": txt_content,
             "pitch_data": pitch_data,
+            "cleanup_segments": _preserved_cleanup_segments,
+            "cleaned_vocal_path": _preserved_cleaned_vocal_path,
         }
         save_session(session_id)
         _update_txt_asset_headers(session)
@@ -2197,9 +2210,10 @@ def generate_ultrastar_files(session_id: str):
 
 
 @app.post("/api/generate/start/{session_id}", status_code=202)
-async def generate_start(session_id: str):
+async def generate_start(session_id: str, use_cleaned: bool = False):
     """Start generation in a background thread and return immediately (202 Accepted).
-    Poll /api/generate/result/{session_id} to check progress."""
+    Poll /api/generate/result/{session_id} to check progress.
+    If use_cleaned=true, uses the cleaned vocal file as the audio source."""
     import threading
     session = sessions.get(session_id)
     if not session:
@@ -2207,11 +2221,22 @@ async def generate_start(session_id: str):
     # Avoid double-starting if already running
     if session.get("status") == "generating":
         return {"status": "already_running"}
+    if use_cleaned:
+        result = session.get("result") or {}
+        cleaned_path = result.get("cleaned_vocal_path")
+        if not cleaned_path or not os.path.exists(cleaned_path):
+            raise HTTPException(status_code=400, detail="No cleaned audio found. Generate a cleaned preview first.")
     def run_generation():
+        original_vocal = session.get("vocal_audio")
         try:
+            if use_cleaned:
+                session["vocal_audio"] = cleaned_path
             generate_ultrastar_files(session_id)
         except Exception:
             pass
+        finally:
+            if use_cleaned:
+                session["vocal_audio"] = original_vocal
     thread = threading.Thread(target=run_generation, daemon=True)
     thread.start()
     return {"status": "started"}
@@ -2331,6 +2356,7 @@ async def get_editor_data(session_id: str):
         "edit_count": result.get("edit_count", 0),
         "last_saved": result.get("last_saved"),
         "cleanup_segments": result.get("cleanup_segments", []),
+        "cleaned_audio_available": bool(result.get("cleaned_vocal_path")),
     }
 
 
@@ -2434,6 +2460,10 @@ async def save_editor_state(session_id: str, request: Request):
     result["has_edits"] = True
     result["edit_count"] = result.get("edit_count", 0) + 1
     result["last_saved"] = time.time()
+    # Invalidate cleaned audio if cleanup segments changed
+    old_segments = result.get("cleanup_segments", [])
+    if old_segments != normalized_cleanup_segments:
+        result["cleaned_vocal_path"] = None
     result["cleanup_segments"] = normalized_cleanup_segments
 
     # Also write the file to downloads

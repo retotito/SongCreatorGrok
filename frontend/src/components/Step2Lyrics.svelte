@@ -30,7 +30,7 @@
     }
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(useCleaned = false) {
     if (!lyricsText.trim()) {
       errorMessage.set('Please enter lyrics');
       return;
@@ -54,6 +54,7 @@
         preview: result.preview,
       });
       processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
+      generationUseCleaned.set(useCleaned);
       generationModalOpen.set(true);
     } catch (err) {
       errorMessage.set(err.message);
@@ -76,7 +77,7 @@
     }
   }
   import { onDestroy } from 'svelte';
-  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen } from '../stores/appStore.js';
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio } from '../services/api.js';
 
@@ -126,10 +127,50 @@
     if (!$sessionId) return;
     try {
       const editorData = await getEditorData($sessionId);
-      cleanupSegments = editorData.cleanup_segments || [];
+      const newSegments = editorData.cleanup_segments || [];
+      cleanupSegments = newSegments;
+      // Restore cleaned audio state from backend (only reset if segments changed)
+      cleanedAudioAvailable = editorData.cleaned_audio_available || false;
+      if (!cleanedAudioAvailable) cleanedAudioFilename = '';
     } catch (e) {
       console.error('[Step2] Failed to load cleanup segments:', e);
       cleanupSegments = [];
+    }
+  }
+
+  // Handler for "Generate Lyrics from Cleaned Vocals" button
+  async function handleTranscribeFromCleaned() {
+    if (!$sessionId) return;
+    errorMessage.set('');
+    isTranscribing = true;
+    transcribePhase = 'loading';
+    transcribeStatus = 'Loading Whisper model…';
+    transcribeElapsed = 0;
+    transcribeModalOpen = true;
+    transcribeAbortController = new AbortController();
+    try {
+      transcribePhase = 'transcribing';
+      transcribeStatus = 'Transcribing cleaned vocals with Whisper…';
+      startTranscribeTicker();
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, true);
+      stopTranscribeTicker();
+      lyricsText = result.text;
+      transcribeInfo = result;
+      transcribePhase = 'done';
+      transcribeStatus = `${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
+      processingStatus.set('✅ Transcription from cleaned vocals complete');
+      if (result.model && !result.model.startsWith('whisperx-')) {
+        whisperFallbackWarning = true;
+      }
+      setTimeout(() => { transcribeModalOpen = false; }, 1800);
+    } catch (err) {
+      stopTranscribeTicker();
+      if (err.name === 'AbortError') return;
+      transcribePhase = 'error';
+      transcribeStatus = err.message;
+      errorMessage.set(err.message);
+    } finally {
+      isTranscribing = false;
     }
   }
 
@@ -326,6 +367,24 @@
             {/if}
           </div>
         </div>
+        {#if cleanedAudioAvailable && $sessionId}
+          <div class="cleanup-audio-compare">
+            <div class="audio-label">✨ Cleaned Vocals (Preview)</div>
+            <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
+              Your browser does not support the audio element.
+            </audio>
+            <div class="cleanup-transcribe-row">
+              <button
+                class="btn btn-transcribe"
+                on:click={handleTranscribeFromCleaned}
+                disabled={isTranscribing || $isProcessing}
+              >
+                🎙️ Generate Lyrics from Cleaned Vocals
+              </button>
+              <p class="transcribe-hint">Use AI to re-transcribe the cleaned audio. This will replace the current lyrics.</p>
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -359,9 +418,14 @@
       </button>
     </div>
     <div class="generate-row">
-      <button class="btn btn-primary btn-generate" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
+      <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
         🚀 Generate Ultrastar Files
       </button>
+      {#if cleanedAudioAvailable}
+        <button class="btn btn-generate-cleaned btn-generate" on:click={() => handleSubmit(true)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
+          ✨ Generate from Cleaned Vocals
+        </button>
+      {/if}
     </div>
     {#if !$isProcessing}
       {@const missing = [!artist.trim() && 'Artist', !title.trim() && 'Title', !lyricsText.trim() && 'Lyrics'].filter(Boolean)}
@@ -404,19 +468,7 @@
   {/if}
 </div>
 
-      {#if cleanedAudioAvailable && $sessionId}
-        <div class="audio-section">
-          <div class="audio-label">🎵 Original Vocals</div>
-          <audio controls src={audioSrc}>
-            Your browser does not support the audio element.
-          </audio>
-
-          <div class="audio-label">✨ Cleaned Vocals (Preview)</div>
-          <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
-            Your browser does not support the audio element.
-          </audio>
-        </div>
-      {/if}
+      {#if false}{/if}
 
 {#if whisperFallbackWarning}
   <div class="warning-modal-overlay" on:click={() => whisperFallbackWarning = false}>
@@ -600,6 +652,29 @@
     margin-bottom: 0.75rem;
   }
 
+  .cleanup-audio-compare {
+    margin-top: 1rem;
+    border-top: 1px solid #2a4a2a;
+    padding-top: 0.75rem;
+  }
+
+  .cleanup-audio-compare audio {
+    width: 100%;
+    margin-bottom: 0.5rem;
+  }
+
+  .cleanup-transcribe-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .cleanup-transcribe-row .transcribe-hint {
+    margin: 0;
+    padding-top: 0.6rem;
+  }
+
   .transcribe-area {
     display: flex;
     align-items: flex-start;
@@ -714,45 +789,44 @@
     cursor: not-allowed;
   }
 
+  .cleanup-status {
+    display: flex;
+    align-items: center;
+  }
+
+  .cleanup-status-badge {
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .cleanup-status-badge.generating {
+    background: #1a3a1a;
+    color: #4fc3f7;
+    border: 1px solid #2a7a2a;
+  }
+
+  .cleanup-status-badge.ready {
+    background: #1a3a1a;
+    color: #81c784;
+    border: 1px solid #2a7a2a;
+  }
+
+  .audio-label {
+    color: #aaa;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    margin-top: 1rem;
+  }
+
+  .audio-label:first-child {
+    margin-top: 0;
+  }
+
   .action-row {
-      .cleanup-status {
-        display: flex;
-        align-items: center;
-      }
-
-      .cleanup-status-badge {
-        padding: 0.4rem 1rem;
-        border-radius: 6px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        flex-shrink: 0;
-      }
-
-      .cleanup-status-badge.generating {
-        background: #1a3a1a;
-        color: #4fc3f7;
-        border: 1px solid #2a7a2a;
-      }
-
-      .cleanup-status-badge.ready {
-        background: #1a3a1a;
-        color: #81c784;
-        border: 1px solid #2a7a2a;
-      }
-
-      .audio-label {
-        color: #aaa;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin-bottom: 0.4rem;
-        margin-top: 1rem;
-      }
-
-      .audio-label:first-child {
-        margin-top: 0;
-      }
-
-      .action-row {
     display: flex;
     gap: 0.5rem;
     align-items: center;
@@ -762,12 +836,24 @@
   .generate-row {
     display: flex;
     justify-content: flex-end;
+    gap: 0.75rem;
     margin-top: 0.75rem;
+    flex-wrap: wrap;
   }
 
   .btn-generate {
     padding: 0.9rem 2rem;
     font-size: 1rem;
+  }
+
+  .btn-generate-cleaned {
+    background: #1a3a1a;
+    color: #81c784;
+    border: 1px solid #2a7a2a;
+  }
+
+  .btn-generate-cleaned:hover:not(:disabled) {
+    background: #2a4a2a;
   }
 
   .btn {

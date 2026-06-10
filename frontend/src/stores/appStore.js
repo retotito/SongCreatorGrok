@@ -99,6 +99,7 @@ export const errorMessage = writable('');
 
 // Generation modal (Step 3 is a modal, not a navigation step)
 export const generationModalOpen = writable(false);
+export const generationUseCleaned = writable(false);
 
 // Steps definition (Step 3 is a modal overlay, not a tab)
 export const steps = [
