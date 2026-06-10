@@ -2460,7 +2460,79 @@ async def save_editor_state(session_id: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
-# Step 4: Save corrections (legacy)
+# Step 4: Generate cleaned audio preview
+# ────────────────────────────────────────────────────────────
+@app.post("/api/generate-cleaned-audio/{session_id}")
+async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
+    """Generate cleaned audio by muting specified beat ranges.
+    
+    Accepts JSON body with:
+        cleanup_segments: list of {start_beat, end_beat}
+    
+    Mutes the specified ranges in the vocal track while preserving total duration,
+    then saves to session for later use in regeneration.
+    """
+    from services.audio_cleanup import generate_cleaned_audio, merge_overlapping_segments
+    
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise ServiceError("No generation result", "Run generation first")
+
+    body = await request.json()
+    cleanup_segments = body.get("cleanup_segments", [])
+
+    if not cleanup_segments:
+        raise ServiceError("No cleanup segments provided")
+
+    # Get audio and timing info from session
+    vocal_audio_path = session.get("vocal_audio") or result.get("vocal_file")
+    if not vocal_audio_path or not os.path.isfile(vocal_audio_path):
+        raise ServiceError("Vocal audio not found", "No vocal track in session")
+
+    bpm = result.get("bpm")
+    gap_ms = result.get("gap_ms")
+    if bpm is None or gap_ms is None:
+        raise ServiceError("BPM or GAP not found", "Run generation first")
+
+    # Generate cleaned audio
+    timestamp = int(time.time())
+    cleaned_filename = f"cleaned_vocals_{timestamp}.wav"
+    cleaned_path = os.path.join(DOWNLOADS_DIR, cleaned_filename)
+
+    try:
+        cleanup_result = generate_cleaned_audio(
+            vocal_audio_path=vocal_audio_path,
+            cleanup_segments=cleanup_segments,
+            bpm=bpm,
+            gap_ms=gap_ms,
+            output_path=cleaned_path
+        )
+    except Exception as e:
+        raise ServiceError(f"Audio cleanup failed: {str(e)}")
+
+    # Store cleaned audio path in result for later regeneration
+    result["cleaned_vocal_file"] = cleaned_filename
+    result["cleaned_vocal_path"] = cleaned_path
+    result["cleanup_audio_generated_at"] = time.time()
+    save_session(session_id)
+
+    merged_count = len(merge_overlapping_segments(cleanup_segments))
+    log_step("CLEANUP", f"Session {session_id}: Generated cleaned audio ({merged_count} muted ranges)")
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "cleaned_audio_file": cleaned_filename,
+        "sample_rate": cleanup_result["sample_rate"],
+        "num_samples": cleanup_result["num_samples"],
+        "segments_muted": cleanup_result["segments_count"],
+    }
+
+
 # ────────────────────────────────────────────────────────────
 @app.post("/api/corrections/{session_id}")
 async def save_corrections(session_id: str, corrections: dict = None):

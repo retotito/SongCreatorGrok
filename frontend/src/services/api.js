@@ -300,6 +300,12 @@ export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders
   });
 }
 
+export async function generateCleanedAudio(sessionId, cleanupSegments) {
+  return request('POST', `/generate-cleaned-audio/${sessionId}`, {
+    cleanup_segments: cleanupSegments,
+  });
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

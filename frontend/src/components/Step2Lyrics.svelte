@@ -78,7 +78,7 @@
   import { onDestroy } from 'svelte';
   import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata } from '../services/api.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio } from '../services/api.js';
 
   async function syncMetadata() {
     if (!$sessionId || !$lyricsData.syllableCount) return; // only if a result exists
@@ -107,12 +107,49 @@
   let transcribeAbortController = null;
   let transcribeTicker = null;
 
+  // Cleanup segments
+  let cleanupSegments = [];
+  let isGeneratingCleaned = false;
+  let cleanedAudioAvailable = false;
+
   function startTranscribeTicker() {
     transcribeElapsed = 0;
     transcribeTicker = setInterval(() => { transcribeElapsed += 1; }, 1000);
   }
   function stopTranscribeTicker() {
     if (transcribeTicker) { clearInterval(transcribeTicker); transcribeTicker = null; }
+  }
+
+  // Load cleanup segments from editor when entering Step 2
+  async function loadCleanupSegments() {
+    if (!$sessionId) return;
+    try {
+      const editorData = await getEditorData($sessionId);
+      cleanupSegments = editorData.cleanup_segments || [];
+    } catch (e) {
+      console.error('[Step2] Failed to load cleanup segments:', e);
+      cleanupSegments = [];
+    }
+  }
+
+  // Handler for "Generate Cleaned Preview" button
+  async function handleGenerateCleanedAudio() {
+    if (!$sessionId || cleanupSegments.length === 0) {
+      errorMessage.set('No cleanup segments to process');
+      return;
+    }
+    errorMessage.set('');
+    isGeneratingCleaned = true;
+    processingStatus.set('Generating cleaned audio preview...');
+    try {
+      await generateCleanedAudio($sessionId, cleanupSegments);
+      cleanedAudioAvailable = true;
+      processingStatus.set('✅ Cleaned audio preview generated');
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isGeneratingCleaned = false;
+    }
   }
 
   // Keep lyricsData in sync with local fields
@@ -152,6 +189,7 @@
 
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
+    loadCleanupSegments();
   }
 
   onDestroy(() => {
@@ -259,6 +297,31 @@
             Whisper ({transcribeInfo.model}): {transcribeInfo.words} words, {transcribeInfo.lines} lines — review and correct below
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if cleanupSegments.length > 0}
+      <div class="cleanup-banner">
+        <div class="cleanup-banner-content">
+          <span class="cleanup-banner-icon">🧹</span>
+          <div class="cleanup-banner-text">
+            <strong>Cleanup segments detected in Step 4</strong>
+            <p class="cleanup-banner-hint">You've marked {cleanupSegments.length} vocal {cleanupSegments.length === 1 ? 'region' : 'regions'} for cleanup. Generate a cleaned audio preview to hear the effect before regenerating the song.</p>
+          </div>
+          <button
+            class="btn btn-cleanup"
+            on:click={handleGenerateCleanedAudio}
+            disabled={isGeneratingCleaned || $isProcessing}
+          >
+            {#if isGeneratingCleaned}
+              ⏳ Generating...
+            {:else if cleanedAudioAvailable}
+              ✓ Preview Ready
+            {:else}
+              Generate Cleaned Preview
+            {/if}
+          </button>
+        </div>
       </div>
     {/if}
 
@@ -575,6 +638,62 @@
     color: #ce93d8;
     font-size: 0.8rem;
     margin-bottom: 1rem;
+  }
+
+  .cleanup-banner {
+    background: linear-gradient(135deg, #1a3a3a 0%, #1a2e3a 100%);
+    border: 1px solid #2a7a7a;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .cleanup-banner-content {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .cleanup-banner-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .cleanup-banner-text {
+    flex: 1;
+  }
+
+  .cleanup-banner-text strong {
+    display: block;
+    color: #4fc3f7;
+    font-size: 0.95rem;
+    margin-bottom: 0.3rem;
+  }
+
+  .cleanup-banner-hint {
+    color: #aaa;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  .btn-cleanup {
+    background: #00897b;
+    color: white;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .btn-cleanup:hover:not(:disabled) {
+    background: #00a89a;
+  }
+
+  .btn-cleanup:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .action-row {
