@@ -2494,6 +2494,89 @@ async def save_editor_state(session_id: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
+# Step 4: Splice a mic recording into the vocal track
+# ────────────────────────────────────────────────────────────
+@app.post("/api/splice-recording/{session_id}")
+async def splice_recording(session_id: str, recording: UploadFile = File(...), start_ms: float = Form(...), end_ms: float = Form(...)):
+    """Splice a mic recording into the session vocal track at the given ms range.
+    
+    Replaces the audio between start_ms and end_ms in the vocal file with the
+    provided recording clip, then stores the patched file as the new vocal source.
+    """
+    import tempfile, shutil
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    vocal_path = session.get("vocal_audio") or session.get("original_audio")
+    if not vocal_path or not os.path.isfile(vocal_path):
+        raise ServiceError("No vocal audio found", "Upload audio first")
+
+    # Save uploaded recording to a temp file
+    suffix = os.path.splitext(recording.filename or "rec.webm")[1] or ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        shutil.copyfileobj(recording.file, tmp)
+        tmp_path = tmp.name
+
+    try:
+        # Load both files
+        vocal, sr = librosa.load(vocal_path, sr=None, mono=False)
+        if vocal.ndim == 1:
+            vocal = np.expand_dims(vocal, axis=0)
+
+        clip, clip_sr = librosa.load(tmp_path, sr=sr, mono=False)
+        if clip.ndim == 1:
+            clip = np.expand_dims(clip, axis=0)
+
+        # Ensure same channel count
+        if clip.shape[0] < vocal.shape[0]:
+            clip = np.repeat(clip, vocal.shape[0], axis=0)
+        elif clip.shape[0] > vocal.shape[0]:
+            clip = clip[:vocal.shape[0]]
+
+        start_sample = max(0, int(start_ms / 1000.0 * sr))
+        end_sample   = min(vocal.shape[1], int(end_ms   / 1000.0 * sr))
+        region_len   = end_sample - start_sample
+
+        if region_len <= 0:
+            raise ServiceError("Invalid range", "start_ms must be before end_ms")
+
+        # Trim or pad clip to exactly fit the region
+        if clip.shape[1] >= region_len:
+            clip_fit = clip[:, :region_len]
+        else:
+            pad = np.zeros((vocal.shape[0], region_len - clip.shape[1]), dtype=np.float32)
+            clip_fit = np.concatenate([clip, pad], axis=1)
+
+        # Splice in
+        patched = vocal.copy()
+        patched[:, start_sample:end_sample] = clip_fit
+
+        # Save as new vocal file
+        timestamp = int(time.time())
+        patched_filename = f"vocal_patched_{timestamp}.wav"
+        patched_path = os.path.join(SESSIONS_DIR, patched_filename)
+        sf.write(patched_path, patched.T, sr, subtype='PCM_16')
+
+        # Update session to use patched vocal
+        session["vocal_audio"] = patched_path
+        # Invalidate cleaned audio — it was generated from the old vocal
+        result = session.get("result") or {}
+        result["cleaned_vocal_path"] = None
+        save_session(session_id)
+
+        log_step("SPLICE", f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
+
+        return {"status": "ok", "patched_vocal_file": patched_filename}
+    finally:
+        os.unlink(tmp_path)
+
+
+# ────────────────────────────────────────────────────────────
 # Step 4: Generate cleaned audio preview
 # ────────────────────────────────────────────────────────────
 @app.post("/api/generate-cleaned-audio/{session_id}")

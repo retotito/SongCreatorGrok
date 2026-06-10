@@ -443,6 +443,21 @@
   let micNoteHits = new Map();
   let micShowRawTrail = false; // optional raw pitch trail for debugging
 
+  // ── Segment recording ──
+  // phase: 'idle' | 'armed' | 'preroll' | 'recording' | 'review'
+  let segRecPhase = 'idle';
+  let segRecSegmentId = null;       // cleanup segment being recorded
+  let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
+  let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
+  let segRecChunks = [];
+  let segRecBlob = null;            // recorded blob ready for review/upload
+  let segRecObjectUrl = null;       // object URL for review playback
+  let segRecCountdown = 0;          // countdown display during preroll
+  let segRecCountdownTimer = null;
+  let segRecStopTimer = null;       // auto-stop at end of segment
+  let segRecUploading = false;
+  let segRecPatched = new Set();    // segment ids that have been successfully spliced
+
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
   let vocalTraceLoading = false;
@@ -1171,12 +1186,22 @@
         const width = right - left;
         if (right < -8 || left > w + 8) continue;
         const selected = selectedCleanupSegment === seg.id;
+        const patched = segRecPatched.has(seg.id);
+        const isRecordTarget = segRecSegmentId === seg.id && segRecPhase !== 'idle';
 
-        ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.32)' : 'rgba(255, 107, 107, 0.2)';
+        if (isRecordTarget) {
+          ctx.fillStyle = segRecPhase === 'recording'
+            ? 'rgba(255, 60, 60, 0.45)'   // bright red while recording
+            : 'rgba(255, 200, 0, 0.28)';  // yellow while armed/review
+        } else if (patched) {
+          ctx.fillStyle = selected ? 'rgba(100, 220, 100, 0.38)' : 'rgba(100, 220, 100, 0.22)';
+        } else {
+          ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.32)' : 'rgba(255, 107, 107, 0.2)';
+        }
         ctx.fillRect(left, 0, width, wt);
 
         const handleW = 2;
-        ctx.fillStyle = selected ? '#ffd2d2' : '#ff9e9e';
+        ctx.fillStyle = patched ? '#80e080' : (selected ? '#ffd2d2' : '#ff9e9e');
         ctx.fillRect(left - handleW / 2, 0, handleW, wt);
         ctx.fillRect(right - handleW / 2, 0, handleW, wt);
       }
@@ -4333,6 +4358,150 @@
     }
   }
 
+  async function toggleMic() {
+    if (micEnabled) {
+      micShowTrail = true; // always show when activating
+      draw();
+      micStarting = true;
+      await startMic();
+      micStarting = false;
+    } else {
+      stopMic();
+      draw();
+    }
+  }
+
+  // ── Segment recording functions ──
+  async function armSegmentRecording(segId) {
+    const seg = cleanupSegments.find(s => s.id === segId);
+    if (!seg) return;
+
+    // Ensure mic is running
+    if (!micStream) {
+      micStarting = true;
+      await startMic();
+      micStarting = false;
+      if (!micStream) {
+        console.error('[SegRec] Mic failed to start');
+        return;
+      }
+    }
+
+    segRecSegmentId = segId;
+    segRecBlob = null;
+    if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
+    segRecChunks = [];
+
+    // Set loop to segment range so user can practice
+    const startSec = seg.startMs / 1000;
+    const endSec = seg.endMs / 1000;
+    loopStartBeat = timeToBeat(startSec);
+    loopEndBeat = timeToBeat(endSec);
+    loopEnabled = true;
+
+    // Seek to pre-roll start
+    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+
+    segRecPhase = 'armed';
+    closeContextMenu();
+    draw();
+  }
+
+  async function startSegmentRecording() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg || !micStream) return;
+
+    const startSec = seg.startMs / 1000;
+    const endSec = seg.endMs / 1000;
+    const durationSec = endSec - startSec;
+
+    segRecPhase = 'preroll';
+    segRecCountdown = Math.ceil(segRecPrerollSec);
+
+    // Pause loop, seek to pre-roll start, play
+    loopEnabled = false;
+    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+    if (!isPlaying) togglePlayback();
+
+    // Countdown
+    segRecCountdownTimer = setInterval(() => {
+      segRecCountdown--;
+      if (segRecCountdown <= 0) {
+        clearInterval(segRecCountdownTimer);
+        segRecCountdownTimer = null;
+      }
+    }, 1000);
+
+    // Start MediaRecorder at the moment recording begins
+    await new Promise(resolve => setTimeout(resolve, segRecPrerollSec * 1000));
+
+    if (segRecPhase !== 'preroll') return; // was cancelled
+
+    // Start recording
+    segRecChunks = [];
+    const preferredTypes = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus','audio/ogg',''];
+    const mimeType = preferredTypes.find(t => t === '' || MediaRecorder.isTypeSupported(t));
+    segRecRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
+    segRecRecorder.ondataavailable = e => { if (e.data.size > 0) segRecChunks.push(e.data); };
+    segRecRecorder.onstop = () => {
+      segRecBlob = new Blob(segRecChunks, { type: segRecRecorder.mimeType });
+      segRecObjectUrl = URL.createObjectURL(segRecBlob);
+      segRecPhase = 'review';
+      draw();
+    };
+    segRecRecorder.start();
+    segRecPhase = 'recording';
+    draw();
+
+    // Auto-stop after segment duration
+    segRecStopTimer = setTimeout(() => {
+      if (segRecPhase === 'recording') stopSegmentRecording();
+    }, durationSec * 1000);
+  }
+
+  function stopSegmentRecording() {
+    if (segRecStopTimer) { clearTimeout(segRecStopTimer); segRecStopTimer = null; }
+    if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
+    if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
+    if (isPlaying) togglePlayback();
+  }
+
+  function cancelSegmentRecording() {
+    stopSegmentRecording();
+    if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
+    segRecBlob = null;
+    segRecChunks = [];
+    segRecSegmentId = null;
+    segRecPhase = 'idle';
+    draw();
+  }
+
+  async function applySegmentRecording() {
+    if (!segRecBlob || segRecSegmentId === null) return;
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg) return;
+
+    segRecUploading = true;
+    try {
+      const formData = new FormData();
+      const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
+      formData.append('recording', segRecBlob, `segment_recording.${ext}`);
+      formData.append('start_ms', String(seg.startMs));
+      formData.append('end_ms', String(seg.endMs));
+
+      const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
+
+      segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
+      cancelSegmentRecording();
+    } catch (err) {
+      console.error('[SegRec] Splice failed:', err);
+      alert('Failed to splice recording: ' + err.message);
+    } finally {
+      segRecUploading = false;
+    }
+  }
+
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
     if (micEnabled) {
@@ -5096,6 +5265,38 @@
       {/if}
     </div> -->
     <div class="toolbar-toolset-wrapper">
+      {#if segRecPhase !== 'idle'}
+        {@const seg = cleanupSegments.find(s => s.id === segRecSegmentId)}
+        <div class="seg-rec-panel" class:seg-rec-recording={segRecPhase === 'recording'}>
+          <span class="seg-rec-label">
+            {#if segRecPhase === 'armed'}
+              🎙 Ready — {seg ? `${(seg.startMs/1000).toFixed(1)}s → ${(seg.endMs/1000).toFixed(1)}s` : ''}
+            {:else if segRecPhase === 'preroll'}
+              ⏱ Recording in {segRecCountdown}…
+            {:else if segRecPhase === 'recording'}
+              🔴 Recording…
+            {:else if segRecPhase === 'review'}
+              ✅ Review recording
+            {/if}
+          </span>
+          {#if segRecPhase === 'armed'}
+            <button class="tool-btn sm active" on:click={startSegmentRecording}>▶ Start Recording</button>
+            <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
+            <span class="seg-rec-hint">Loop to practice, then hit Start</span>
+          {:else if segRecPhase === 'recording'}
+            <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
+          {:else if segRecPhase === 'review'}
+            {#if segRecObjectUrl}
+              <audio controls src={segRecObjectUrl} style="height:28px;max-width:220px;"></audio>
+            {/if}
+            <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading}>
+              {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
+            </button>
+            <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
+            <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
+          {/if}
+        </div>
+      {/if}
       <div id="mic-controls-wrapper">
         <button class="tool-btn" class:active={micEnabled} on:click={() => {
           micEnabled = !micEnabled;
@@ -5600,6 +5801,9 @@
             <span class="ctx-location-label">🧹 Cleanup {(seg.startMs/1000).toFixed(2)}s → {(seg.endMs/1000).toFixed(2)}s</span>
           </div>
           <div class="ctx-divider"></div>
+          <button class="ctx-item" on:click={() => armSegmentRecording(seg.id)}>
+            🎙 Record over this segment
+          </button>
           <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
             🗑 Delete Cleanup Segment
           </button>
@@ -6269,6 +6473,41 @@
     font-size: 14px;
     font-family: monospace;
     margin-left: 6px;
+  }
+
+  .seg-rec-panel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: #1a2a1a;
+    border: 1px solid #3a7a3a;
+    border-radius: 6px;
+    flex-wrap: wrap;
+  }
+
+  .seg-rec-panel.seg-rec-recording {
+    background: #2a1010;
+    border-color: #c03030;
+    animation: rec-pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes rec-pulse {
+    0%, 100% { border-color: #c03030; }
+    50% { border-color: #ff6060; }
+  }
+
+  .seg-rec-label {
+    color: #ccc;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .seg-rec-hint {
+    color: #888;
+    font-size: 0.78rem;
+    font-style: italic;
   }
 
   #mic-controls-wrapper {
