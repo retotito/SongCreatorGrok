@@ -135,6 +135,12 @@
   let flagIdCounter = 1;
   let selectedFlag = null;
 
+  // Vocal cleanup segments (waveform-only helper ranges)
+  let cleanupSegments = []; // { id, startBeat, endBeat }
+  let cleanupSegmentIdCounter = 1;
+  let selectedCleanupSegment = null;
+  let cleanupDrag = null; // { id, mode, startBeat, endBeat, mouseStartBeat }
+
   function loadFlags() {
     if (!$sessionId) return;
     try {
@@ -167,8 +173,106 @@
     draw();
   }
 
+  function normalizeCleanupSegment(seg) {
+    const a = Number(seg.startBeat);
+    const b = Number(seg.endBeat);
+    const startBeat = Math.min(a, b);
+    const endBeat = Math.max(a, b);
+    if (endBeat - startBeat < 2) {
+      return { ...seg, startBeat, endBeat: startBeat + 2 };
+    }
+    return { ...seg, startBeat, endBeat };
+  }
+
+  function serializeCleanupSegments() {
+    return cleanupSegments
+      .map(s => ({ start_beat: s.startBeat, end_beat: s.endBeat }))
+      .sort((a, b) => a.start_beat - b.start_beat);
+  }
+
+  function setCleanupSegmentsFromApi(segments = []) {
+    const parsed = [];
+    for (const seg of segments) {
+      const start = Number(seg?.start_beat);
+      const end = Number(seg?.end_beat);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      parsed.push(normalizeCleanupSegment({
+        id: cleanupSegmentIdCounter++,
+        startBeat: start,
+        endBeat: end,
+      }));
+    }
+    cleanupSegments = parsed.sort((a, b) => a.startBeat - b.startBeat);
+    selectedCleanupSegment = null;
+    cleanupDrag = null;
+  }
+
+  function addCleanupSegmentAt(beat) {
+    pushUndo();
+    const startBeat = beat;
+    const endBeat = startBeat + Math.max(2, Math.round(BEATS_PER_QUARTER));
+    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startBeat, endBeat });
+    cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startBeat - b.startBeat);
+    selectedCleanupSegment = seg.id;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function deleteCleanupSegment(id) {
+    pushUndo();
+    cleanupSegments = cleanupSegments.filter(s => s.id !== id);
+    if (selectedCleanupSegment === id) selectedCleanupSegment = null;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function nudgeCleanupSegment(id, delta) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
+    pushUndo();
+    seg.startBeat += delta;
+    seg.endBeat += delta;
+    cleanupSegments = [...cleanupSegments].sort((a, b) => a.startBeat - b.startBeat);
+    markUnsaved();
+    draw();
+    closeContextMenu();
+  }
+
+  function hitTestCleanupSegment(mx, my) {
+    if (!showWaveform || my > waveTop()) return null;
+    for (let i = cleanupSegments.length - 1; i >= 0; i--) {
+      const seg = cleanupSegments[i];
+      const sx = beatToX(seg.startBeat);
+      const ex = beatToX(seg.endBeat);
+      const left = Math.min(sx, ex);
+      const right = Math.max(sx, ex);
+      if (Math.abs(mx - left) <= 2) return { id: seg.id, mode: 'start' };
+      if (Math.abs(mx - right) <= 2) return { id: seg.id, mode: 'end' };
+      if (mx >= left && mx <= right) return { id: seg.id, mode: 'move' };
+    }
+    return null;
+  }
+
   // Context menu
-  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+  let contextMenu = {
+    visible: false,
+    x: 0,
+    y: 0,
+    noteId: null,
+    isBreak: false,
+    isEmpty: false,
+    isFlag: false,
+    isPasteMenu: false,
+    isCleanup: false,
+    isWaveformEmpty: false,
+    flagId: null,
+    cleanupId: null,
+    beat: 0,
+    pitch: 0,
+    traceFrame: null,
+  };
   let editingSyllable = '';
   let contextMenuEl;
 
@@ -642,6 +746,7 @@
   function snapshot() {
     return {
       notes: JSON.parse(JSON.stringify(notes)),
+      cleanupSegments: JSON.parse(JSON.stringify(cleanupSegments)),
       bpm,
       gapMs,
       downbeatOffsetMs,
@@ -653,6 +758,11 @@
 
   function restoreSnapshot(snap) {
     notes = snap.notes;
+    if (snap.cleanupSegments !== undefined) {
+      cleanupSegments = snap.cleanupSegments.map(seg => normalizeCleanupSegment(seg));
+      selectedCleanupSegment = null;
+      cleanupDrag = null;
+    }
     if (snap.bpm !== undefined) bpm = snap.bpm;
     if (snap.gapMs !== undefined) gapMs = snap.gapMs;
     if (snap.downbeatOffsetMs !== undefined) downbeatOffsetMs = snap.downbeatOffsetMs;
@@ -714,7 +824,14 @@
       if (downbeatOffsetMs !== 0) {
         headersToSave.push({ key: 'DOWNBEATOFFSET', value: String(Math.round(downbeatOffsetMs)) });
       }
-      const result = await saveEditorState($sessionId, noteData, bpm, gapMs, headersToSave);
+      const result = await saveEditorState(
+        $sessionId,
+        noteData,
+        bpm,
+        gapMs,
+        headersToSave,
+        serializeCleanupSegments()
+      );
       editCount = result.edit_count || editCount + 1;
       lastSaveTime = new Date();
       hasUnsavedChanges = false;
@@ -1036,6 +1153,25 @@
       ctx.moveTo(0, wt);
       ctx.lineTo(w, wt);
       ctx.stroke();
+
+      // Cleanup segments overlay (multiple loop-like ranges for noisy vocal areas)
+      for (const seg of cleanupSegments) {
+        const sx = beatToX(seg.startBeat);
+        const ex = beatToX(seg.endBeat);
+        const left = Math.min(sx, ex);
+        const right = Math.max(sx, ex);
+        const width = right - left;
+        if (right < -8 || left > w + 8) continue;
+        const selected = selectedCleanupSegment === seg.id;
+
+        ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.32)' : 'rgba(255, 107, 107, 0.2)';
+        ctx.fillRect(left, 0, width, wt);
+
+        const handleW = 2;
+        ctx.fillStyle = selected ? '#ffd2d2' : '#ff9e9e';
+        ctx.fillRect(left - handleW / 2, 0, handleW, wt);
+        ctx.fillRect(right - handleW / 2, 0, handleW, wt);
+      }
 
       // Predicted downbeats (red dots) — shown in calibration mode so user can verify grid alignment
       if (beatMarkerMode && bpm > 0) {
@@ -1757,6 +1893,28 @@
     // Ignore right-click — let contextmenu handler deal with it
     if (event.button === 2) return;
 
+    // Waveform cleanup segment drag
+    if (showWaveform && my < waveTop()) {
+      const hit = hitTestCleanupSegment(mx, my);
+      if (hit) {
+        const seg = cleanupSegments.find(s => s.id === hit.id);
+        if (seg) {
+          pushUndo();
+          selectedCleanupSegment = seg.id;
+          cleanupDrag = {
+            id: seg.id,
+            mode: hit.mode,
+            startBeat: seg.startBeat,
+            endBeat: seg.endBeat,
+            mouseStartBeat: xToBeat(mx),
+          };
+          draw();
+          return;
+        }
+      }
+      selectedCleanupSegment = null;
+    }
+
     // ── Beat Marker mode: left-click on waveform places a marker ──
     if (beatMarkerMode && showWaveform && my < waveTop()) {
       const t = beatToTime(xToBeat(mx));
@@ -1876,6 +2034,8 @@
       seekToTime(beatToTime(beat));
       return;
     }
+
+    selectedCleanupSegment = null;
 
     // ── Paste mode: left click seeks normally (use Ctrl+V or right-click to paste) ──
 
@@ -2030,6 +2190,28 @@
     const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
     hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
 
+    if (cleanupDrag) {
+      const seg = cleanupSegments.find(s => s.id === cleanupDrag.id);
+      if (!seg) {
+        cleanupDrag = null;
+        return;
+      }
+      const mouseBeat = xToBeat(mx);
+      const beatDelta = mouseBeat - cleanupDrag.mouseStartBeat;
+      if (cleanupDrag.mode === 'move') {
+        seg.startBeat = cleanupDrag.startBeat + beatDelta;
+        seg.endBeat = cleanupDrag.endBeat + beatDelta;
+      } else if (cleanupDrag.mode === 'start') {
+        seg.startBeat = Math.min(mouseBeat, cleanupDrag.endBeat - 2);
+      } else if (cleanupDrag.mode === 'end') {
+        seg.endBeat = Math.max(mouseBeat, cleanupDrag.startBeat + 2);
+      }
+      cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startBeat - b.startBeat);
+      markUnsaved();
+      draw();
+      return;
+    }
+
     // Flag drag
     if (isDragging && selectedFlag !== null) {
       const flag = flags.find(f => f.id === selectedFlag);
@@ -2117,8 +2299,17 @@
     if (!isDragging && !isSettingLoop && !loopHandleDrag && !playheadDrag) {
       let cursor = '';
 
+      if (showWaveform && my < waveTop()) {
+        const cleanupHit = hitTestCleanupSegment(mx, my);
+        if (cleanupHit?.mode === 'start' || cleanupHit?.mode === 'end') {
+          cursor = 'col-resize';
+        } else if (cleanupHit?.mode === 'move') {
+          cursor = 'move';
+        }
+      }
+
       // Check playhead handle (when paused)
-      if (!isPlaying && currentTimeSec > 0) {
+      if (!cursor && !isPlaying && currentTimeSec > 0) {
         const cx = beatToX(playbackBeat);
         if (Math.abs(mx - cx) <= 10) {
           cursor = 'col-resize';
@@ -2126,7 +2317,7 @@
       }
 
       // Check loop handles
-      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      if (!cursor && loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
         const lsX = beatToX(loopStartBeat);
         const leX = beatToX(loopEndBeat);
         if (Math.abs(mx - lsX) <= 8 || Math.abs(mx - leX) <= 8) {
@@ -2278,6 +2469,12 @@
   }
 
   function handleMouseUp() {
+    if (cleanupDrag) {
+      cleanupDrag = null;
+      draw();
+      return;
+    }
+
     // Finish flag drag
     if (isDragging && selectedFlag !== null) {
       isDragging = false;
@@ -2562,7 +2759,23 @@
       const menuW = 220, menuH = 110;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: true, flagId: null, beat, pitch: 0, traceFrame: null };
+      contextMenu = {
+        visible: true,
+        x: posX,
+        y: posY,
+        noteId: null,
+        isBreak: false,
+        isEmpty: false,
+        isFlag: false,
+        isPasteMenu: true,
+        isCleanup: false,
+        isWaveformEmpty: false,
+        flagId: null,
+        cleanupId: null,
+        beat,
+        pitch: 0,
+        traceFrame: null,
+      };
       return;
     }
     const rect = canvasEl.getBoundingClientRect();
@@ -2579,6 +2792,55 @@
         bpmCalcResult = calcBpmFromMarkers(beatMarkers);
         draw();
       }
+      return;
+    }
+
+    if (showWaveform && my < waveTop()) {
+      const beat = xToBeat(mx);
+      const hit = hitTestCleanupSegment(mx, my);
+      const menuW = 260;
+      const menuH = hit ? 180 : 130;
+      const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
+      const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
+      if (hit) {
+        selectedCleanupSegment = hit.id;
+        contextMenu = {
+          visible: true,
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: true,
+          isWaveformEmpty: false,
+          flagId: null,
+          cleanupId: hit.id,
+          beat,
+          pitch: 0,
+          traceFrame: null,
+        };
+      } else {
+        contextMenu = {
+          visible: true,
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: true,
+          flagId: null,
+          cleanupId: null,
+          beat,
+          pitch: 0,
+          traceFrame: null,
+        };
+      }
+      draw();
       return;
     }
 
@@ -2623,7 +2885,23 @@
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: clickBeat, pitch: 0, traceFrame: null };
+      contextMenu = {
+        visible: true,
+        x: posX,
+        y: posY,
+        noteId: found.id,
+        isBreak,
+        isEmpty: false,
+        isFlag: false,
+        isPasteMenu: false,
+        isCleanup: false,
+        isWaveformEmpty: false,
+        flagId: null,
+        cleanupId: null,
+        beat: clickBeat,
+        pitch: 0,
+        traceFrame: null,
+      };
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -2667,15 +2945,63 @@
         if (Math.abs(beatToX(flag.beat) - mx) <= 8) { flagHit = flag; break; }
       }
       if (flagHit) {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: true, isPasteMenu: false, flagId: flagHit.id, beat: flagHit.beat, pitch: 0, traceFrame: null };
+        contextMenu = {
+          visible: true,
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: true,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: false,
+          flagId: flagHit.id,
+          cleanupId: null,
+          beat: flagHit.beat,
+          pitch: 0,
+          traceFrame: null,
+        };
       } else {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, isFlag: false, isPasteMenu: false, flagId: null, beat, pitch, traceFrame };
+        contextMenu = {
+          visible: true,
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: true,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: false,
+          flagId: null,
+          cleanupId: null,
+          beat,
+          pitch,
+          traceFrame,
+        };
       }
     }
   }
 
   function closeContextMenu() {
-    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+    contextMenu = {
+      visible: false,
+      x: 0,
+      y: 0,
+      noteId: null,
+      isBreak: false,
+      isEmpty: false,
+      isFlag: false,
+      isPasteMenu: false,
+      isCleanup: false,
+      isWaveformEmpty: false,
+      flagId: null,
+      cleanupId: null,
+      beat: 0,
+      pitch: 0,
+      traceFrame: null,
+    };
   }
 
   function handleGlobalClick(e) {
@@ -3586,6 +3912,9 @@
         cancelSetGapMode();
       } else if (pasteMode) {
         cancelPaste();
+      } else if (selectedCleanupSegment !== null) {
+        selectedCleanupSegment = null;
+        draw();
       } else if (selectedNotes.size > 0) {
         selectedNotes = new Set();
         selectedNote = null;
@@ -3593,6 +3922,12 @@
       } else if (loopStartBeat !== null) {
         clearLoop();
       }
+    }
+
+    if ((e.code === 'Delete' || e.code === 'Backspace') && selectedCleanupSegment !== null) {
+      e.preventDefault();
+      deleteCleanupSegment(selectedCleanupSegment);
+      return;
     }
 
     // Note action shortcuts (only when a note is selected and not in an input)
@@ -4585,6 +4920,9 @@
       bpmChanged = false;
       rawTimings = data.syllable_timings || [];
 
+      cleanupSegmentIdCounter = 1;
+      setCleanupSegmentsFromApi(data.cleanup_segments || []);
+
       // Extract pitches from parsed notes (non-break, in order) for re-quantization
       pitchMap = notes.filter(n => n.type !== 'break').map(n => n.pitch);
       console.log('[Step4] Stored', rawTimings.length, 'raw timings,', pitchMap.length, 'pitches for re-quantization');
@@ -5242,6 +5580,37 @@
           ✕ Cancel <span class="ctx-shortcut">Esc</span>
         </button>
       </div>
+    {:else if contextMenu.isCleanup}
+      {@const seg = cleanupSegments.find(s => s.id === contextMenu.cleanupId)}
+      {#if seg}
+        <div
+          class="context-menu"
+          bind:this={contextMenuEl}
+          style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+        >
+          <div class="ctx-header">
+            <span class="ctx-location-label">🧹 Cleanup {seg.startBeat.toFixed(2)} → {seg.endBeat.toFixed(2)}</span>
+          </div>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
+            🗑 Delete Cleanup Segment
+          </button>
+        </div>
+      {/if}
+    {:else if contextMenu.isWaveformEmpty}
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        <div class="ctx-header">
+          <span class="ctx-location-label">Waveform @ beat {contextMenu.beat.toFixed(2)}</span>
+        </div>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => addCleanupSegmentAt(contextMenu.beat)}>
+          🧹 Add Cleanup Segment
+        </button>
+      </div>
     {:else if contextMenu.isFlag}
       <!-- Flag context menu -->
       <div
@@ -5328,6 +5697,7 @@
     <span class="legend-item"><span class="dot orange"></span> Rap note</span>
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
     <span class="legend-item"><span class="dot green-flag"></span> Flag</span>
+    <span class="legend-item"><span class="dot cleanup-range"></span> Cleanup segment</span>
   </div>
 
   <!-- Stats bar for debugging timing -->
@@ -6139,6 +6509,7 @@
   .dot.orange { background: #ff9800; }
   .dot.red-line { background: #c62828; width: 2px; height: 12px; }
   .dot.green-flag { background: #4ade80; width: 2px; height: 12px; }
+  .dot.cleanup-range { background: #ff6b6b; }
 
   .save-controls {
     display: flex;

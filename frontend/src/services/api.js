@@ -290,8 +290,14 @@ export async function saveCorrections(sessionId, corrections) {
   return request('POST', `/corrections/${sessionId}`, corrections);
 }
 
-export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders = []) {
-  return request('POST', `/save-editor/${sessionId}`, { notes, bpm, gap_ms: gapMs, extra_headers: extraHeaders });
+export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders = [], cleanupSegments = []) {
+  return request('POST', `/save-editor/${sessionId}`, {
+    notes,
+    bpm,
+    gap_ms: gapMs,
+    extra_headers: extraHeaders,
+    cleanup_segments: cleanupSegments,
+  });
 }
 
 // ─── Step 5: Export ────────────────────────────

@@ -71,6 +71,7 @@ def _fix_frozen_path():
 
 _fix_frozen_path()
 import time
+import math
 import json
 import uuid
 import shutil
@@ -2325,6 +2326,7 @@ async def get_editor_data(session_id: str):
         "has_edits": result.get("has_edits", False),
         "edit_count": result.get("edit_count", 0),
         "last_saved": result.get("last_saved"),
+        "cleanup_segments": result.get("cleanup_segments", []),
     }
 
 
@@ -2355,11 +2357,33 @@ async def save_editor_state(session_id: str, request: Request):
     editor_bpm = body.get("bpm")
     editor_gap = body.get("gap_ms")
     extra_headers = body.get("extra_headers", [])
+    cleanup_segments = body.get("cleanup_segments", [])
 
     if not editor_notes:
         raise ServiceError("No notes provided")
     if editor_bpm is None or editor_gap is None:
         raise ServiceError("BPM and gap_ms are required")
+
+    normalized_cleanup_segments = []
+    if isinstance(cleanup_segments, list):
+        for seg in cleanup_segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                start_beat = float(seg.get("start_beat"))
+                end_beat = float(seg.get("end_beat"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(start_beat) or not math.isfinite(end_beat):
+                continue
+            if end_beat < start_beat:
+                start_beat, end_beat = end_beat, start_beat
+            if end_beat - start_beat < 1:
+                end_beat = start_beat + 1
+            normalized_cleanup_segments.append({
+                "start_beat": round(start_beat, 3),
+                "end_beat": round(end_beat, 3),
+            })
 
     # Reconstruct Ultrastar .txt content from the editor notes
     lines = []
@@ -2406,6 +2430,7 @@ async def save_editor_state(session_id: str, request: Request):
     result["has_edits"] = True
     result["edit_count"] = result.get("edit_count", 0) + 1
     result["last_saved"] = time.time()
+    result["cleanup_segments"] = normalized_cleanup_segments
 
     # Also write the file to downloads
     timestamp = int(time.time())
