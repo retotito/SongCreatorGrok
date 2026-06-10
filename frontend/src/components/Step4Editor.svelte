@@ -70,6 +70,36 @@
     return Math.min(maxX, Math.max(minX, x));
   }
 
+  // While dragging loop boundaries, auto-scroll only when the pointer is outside the canvas.
+  function autoScrollAtCanvasEdge(mx) {
+    const w = canvasEl?.width || canvasW || 800;
+    const maxStepPx = 28;
+    let deltaPx = 0;
+
+    if (mx < 0) {
+      const overshoot = Math.abs(mx);
+      const strength = Math.min(2, overshoot / 40);
+      deltaPx = -Math.max(3, Math.round(maxStepPx * strength));
+    } else if (mx > w) {
+      const overshoot = mx - w;
+      const strength = Math.min(2, overshoot / 40);
+      deltaPx = Math.max(3, Math.round(maxStepPx * strength));
+    }
+
+    if (!deltaPx) return false;
+
+    const next = clampScrollX(scrollX + deltaPx);
+    if (next === scrollX) return false;
+    scrollX = next;
+    return true;
+  }
+
+  // Keep dragged loop boundaries visually inside the canvas while edge-scrolling.
+  function clampDragXToCanvas(mx) {
+    const w = canvasEl?.width || canvasW || 800;
+    return Math.max(1, Math.min(w - 1, mx));
+  }
+
   // Rubber-band (box) selection
   let isBoxSelecting = false;
   let boxSelectStart = { x: 0, y: 0 };
@@ -2033,7 +2063,8 @@
 
     // Loop handle drag
     if (loopHandleDrag) {
-      const beat = Math.round(xToBeat(mx));
+      autoScrollAtCanvasEdge(mx);
+      const beat = Math.round(xToBeat(clampDragXToCanvas(mx)));
       const minLoopBeats = 2;
       if (loopHandleDrag === 'start') {
         loopStartBeat = Math.min(beat, loopEndBeat - minLoopBeats);
@@ -2046,7 +2077,8 @@
 
     // Loop region drag on time axis
     if (isSettingLoop) {
-      loopEndBeat = Math.round(xToBeat(mx));
+      autoScrollAtCanvasEdge(mx);
+      loopEndBeat = Math.round(xToBeat(clampDragXToCanvas(mx)));
       draw();
       return;
     }
@@ -4606,6 +4638,9 @@
     window.addEventListener('keydown', handleTapperKeydown);
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('click', handleGlobalClick);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('blur', handleMouseUp);
     autosaveInterval = setInterval(() => { if (hasUnsavedChanges) handleSave(); }, 10000);
   });
 
@@ -4624,6 +4659,9 @@
     window.removeEventListener('keydown', handleTapperKeydown);
     window.removeEventListener('resize', resizeCanvas);
     window.removeEventListener('click', handleGlobalClick);
+    window.removeEventListener('mousemove', handleMouseMove);
+    window.removeEventListener('mouseup', handleMouseUp);
+    window.removeEventListener('blur', handleMouseUp);
     stopMic();
   });
 
@@ -4899,9 +4937,6 @@
     <canvas
       bind:this={canvasEl}
       on:mousedown={handleMouseDown}
-      on:mousemove={handleMouseMove}
-      on:mouseup={handleMouseUp}
-      on:mouseleave={handleMouseUp}
       on:wheel|nonpassive={handleWheel}
       on:contextmenu={handleContextMenu}
     ></canvas>
