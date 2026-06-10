@@ -111,6 +111,7 @@
   let cleanupSegments = [];
   let isGeneratingCleaned = false;
   let cleanedAudioAvailable = false;
+  let cleanedAudioFilename = '';
 
   function startTranscribeTicker() {
     transcribeElapsed = 0;
@@ -142,7 +143,8 @@
     isGeneratingCleaned = true;
     processingStatus.set('Generating cleaned audio preview...');
     try {
-      await generateCleanedAudio($sessionId, cleanupSegments);
+      const result = await generateCleanedAudio($sessionId, cleanupSegments);
+      cleanedAudioFilename = result.cleaned_audio_file;
       cleanedAudioAvailable = true;
       processingStatus.set('✅ Cleaned audio preview generated');
     } catch (err) {
@@ -308,19 +310,21 @@
             <strong>Cleanup segments detected in Step 4</strong>
             <p class="cleanup-banner-hint">You've marked {cleanupSegments.length} vocal {cleanupSegments.length === 1 ? 'region' : 'regions'} for cleanup. Generate a cleaned audio preview to hear the effect before regenerating the song.</p>
           </div>
-          <button
-            class="btn btn-cleanup"
-            on:click={handleGenerateCleanedAudio}
-            disabled={isGeneratingCleaned || $isProcessing}
-          >
+          <div class="cleanup-status">
             {#if isGeneratingCleaned}
-              ⏳ Generating...
+              <div class="cleanup-status-badge generating">⏳ Generating...</div>
             {:else if cleanedAudioAvailable}
-              ✓ Preview Ready
+              <div class="cleanup-status-badge ready">✓ Preview Ready</div>
             {:else}
-              Generate Cleaned Preview
+              <button
+                class="btn btn-cleanup"
+                on:click={handleGenerateCleanedAudio}
+                disabled={$isProcessing}
+              >
+                Generate Cleaned Preview
+              </button>
             {/if}
-          </button>
+          </div>
         </div>
       </div>
     {/if}
@@ -399,6 +403,20 @@
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
 </div>
+
+      {#if cleanedAudioAvailable && $sessionId}
+        <div class="audio-section">
+          <div class="audio-label">🎵 Original Vocals</div>
+          <audio controls src={audioSrc}>
+            Your browser does not support the audio element.
+          </audio>
+
+          <div class="audio-label">✨ Cleaned Vocals (Preview)</div>
+          <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
+            Your browser does not support the audio element.
+          </audio>
+        </div>
+      {/if}
 
 {#if whisperFallbackWarning}
   <div class="warning-modal-overlay" on:click={() => whisperFallbackWarning = false}>
@@ -697,6 +715,44 @@
   }
 
   .action-row {
+      .cleanup-status {
+        display: flex;
+        align-items: center;
+      }
+
+      .cleanup-status-badge {
+        padding: 0.4rem 1rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .cleanup-status-badge.generating {
+        background: #1a3a1a;
+        color: #4fc3f7;
+        border: 1px solid #2a7a2a;
+      }
+
+      .cleanup-status-badge.ready {
+        background: #1a3a1a;
+        color: #81c784;
+        border: 1px solid #2a7a2a;
+      }
+
+      .audio-label {
+        color: #aaa;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-bottom: 0.4rem;
+        margin-top: 1rem;
+      }
+
+      .audio-label:first-child {
+        margin-top: 0;
+      }
+
+      .action-row {
     display: flex;
     gap: 0.5rem;
     align-items: center;

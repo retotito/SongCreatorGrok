@@ -1179,6 +1179,10 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
         path = session.get("vocal_audio")
     elif audio_type == "instrumental":
         path = session.get("instrumental_audio")
+    elif audio_type == "cleaned":
+        # Cleaned audio from cleanup segments
+        result = session.get("result")
+        path = result.get("cleaned_vocal_path") if result else None
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type")
     
