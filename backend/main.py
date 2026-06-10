@@ -2140,7 +2140,7 @@ def generate_ultrastar_files(session_id: str):
         for _fn in (txt_filename, midi_filename, summary_filename):
             if _fn not in session["generated_files"]:
                 session["generated_files"].append(_fn)
-        # Preserve cleanup state across regeneration
+        # Preserve cleanup state across regeneration (segments stored in ms — no BPM/GAP conversion needed)
         _old_result = session.get("result") or {}
         _preserved_cleanup_segments = _old_result.get("cleanup_segments", [])
         _preserved_cleaned_vocal_path = _old_result.get("cleaned_vocal_path")
@@ -2400,19 +2400,19 @@ async def save_editor_state(session_id: str, request: Request):
             if not isinstance(seg, dict):
                 continue
             try:
-                start_beat = float(seg.get("start_beat"))
-                end_beat = float(seg.get("end_beat"))
+                start_ms = float(seg.get("start_ms"))
+                end_ms = float(seg.get("end_ms"))
             except (TypeError, ValueError):
                 continue
-            if not math.isfinite(start_beat) or not math.isfinite(end_beat):
+            if not math.isfinite(start_ms) or not math.isfinite(end_ms):
                 continue
-            if end_beat < start_beat:
-                start_beat, end_beat = end_beat, start_beat
-            if end_beat - start_beat < 1:
-                end_beat = start_beat + 1
+            if end_ms < start_ms:
+                start_ms, end_ms = end_ms, start_ms
+            if end_ms - start_ms < 50:
+                end_ms = start_ms + 50
             normalized_cleanup_segments.append({
-                "start_beat": round(start_beat, 3),
-                "end_beat": round(end_beat, 3),
+                "start_ms": round(start_ms, 1),
+                "end_ms": round(end_ms, 1),
             })
 
     # Reconstruct Ultrastar .txt content from the editor notes
@@ -2529,8 +2529,6 @@ async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
 
     bpm = result.get("bpm")
     gap_ms = result.get("gap_ms")
-    if bpm is None or gap_ms is None:
-        raise ServiceError("BPM or GAP not found", "Run generation first")
 
     # Generate cleaned audio
     timestamp = int(time.time())
@@ -2541,8 +2539,6 @@ async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
         cleanup_result = generate_cleaned_audio(
             vocal_audio_path=vocal_audio_path,
             cleanup_segments=cleanup_segments,
-            bpm=bpm,
-            gap_ms=gap_ms,
             output_path=cleaned_path
         )
     except Exception as e:

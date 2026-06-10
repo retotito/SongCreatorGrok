@@ -136,10 +136,10 @@
   let selectedFlag = null;
 
   // Vocal cleanup segments (waveform-only helper ranges)
-  let cleanupSegments = []; // { id, startBeat, endBeat }
+  let cleanupSegments = []; // { id, startMs, endMs }
   let cleanupSegmentIdCounter = 1;
   let selectedCleanupSegment = null;
-  let cleanupDrag = null; // { id, mode, startBeat, endBeat, mouseStartBeat }
+  let cleanupDrag = null; // { id, mode, startMs, endMs, mouseStartMs }
 
   function loadFlags() {
     if (!$sessionId) return;
@@ -174,45 +174,53 @@
   }
 
   function normalizeCleanupSegment(seg) {
-    const a = Number(seg.startBeat);
-    const b = Number(seg.endBeat);
-    const startBeat = Math.min(a, b);
-    const endBeat = Math.max(a, b);
-    if (endBeat - startBeat < 2) {
-      return { ...seg, startBeat, endBeat: startBeat + 2 };
+    const a = Number(seg.startMs);
+    const b = Number(seg.endMs);
+    const startMs = Math.min(a, b);
+    const endMs = Math.max(a, b);
+    if (endMs - startMs < 50) {
+      return { ...seg, startMs, endMs: startMs + 50 };
     }
-    return { ...seg, startBeat, endBeat };
+    return { ...seg, startMs, endMs };
   }
 
   function serializeCleanupSegments() {
     return cleanupSegments
-      .map(s => ({ start_beat: s.startBeat, end_beat: s.endBeat }))
-      .sort((a, b) => a.start_beat - b.start_beat);
+      .map(s => ({ start_ms: s.startMs, end_ms: s.endMs }))
+      .sort((a, b) => a.start_ms - b.start_ms);
   }
 
   function setCleanupSegmentsFromApi(segments = []) {
     const parsed = [];
     for (const seg of segments) {
-      const start = Number(seg?.start_beat);
-      const end = Number(seg?.end_beat);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      // Support both ms format (new) and beat format (legacy)
+      let startMs, endMs;
+      if (seg?.start_ms != null) {
+        startMs = Number(seg.start_ms);
+        endMs = Number(seg.end_ms);
+      } else if (seg?.start_beat != null) {
+        // Legacy: convert beats to ms using current bpm/gapMs
+        startMs = (beatToTime(Number(seg.start_beat))) * 1000;
+        endMs = (beatToTime(Number(seg.end_beat))) * 1000;
+      } else continue;
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
       parsed.push(normalizeCleanupSegment({
         id: cleanupSegmentIdCounter++,
-        startBeat: start,
-        endBeat: end,
+        startMs,
+        endMs,
       }));
     }
-    cleanupSegments = parsed.sort((a, b) => a.startBeat - b.startBeat);
+    cleanupSegments = parsed.sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = null;
     cleanupDrag = null;
   }
 
   function addCleanupSegmentAt(beat) {
     pushUndo();
-    const startBeat = beat;
-    const endBeat = startBeat + Math.max(2, Math.round(BEATS_PER_QUARTER));
-    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startBeat, endBeat });
-    cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startBeat - b.startBeat);
+    const startMs = beatToTime(beat) * 1000;
+    const endMs = startMs + Math.max(500, (15000 / bpm)); // ~1 beat in ms
+    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
+    cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
     markUnsaved();
     closeContextMenu();
@@ -228,13 +236,13 @@
     draw();
   }
 
-  function nudgeCleanupSegment(id, delta) {
+  function nudgeCleanupSegment(id, deltaMs) {
     const seg = cleanupSegments.find(s => s.id === id);
     if (!seg) return;
     pushUndo();
-    seg.startBeat += delta;
-    seg.endBeat += delta;
-    cleanupSegments = [...cleanupSegments].sort((a, b) => a.startBeat - b.startBeat);
+    seg.startMs += deltaMs;
+    seg.endMs += deltaMs;
+    cleanupSegments = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
     markUnsaved();
     draw();
     closeContextMenu();
@@ -244,8 +252,8 @@
     if (!showWaveform || my > waveTop()) return null;
     for (let i = cleanupSegments.length - 1; i >= 0; i--) {
       const seg = cleanupSegments[i];
-      const sx = beatToX(seg.startBeat);
-      const ex = beatToX(seg.endBeat);
+      const sx = beatToX(timeToBeat(seg.startMs / 1000));
+      const ex = beatToX(timeToBeat(seg.endMs / 1000));
       const left = Math.min(sx, ex);
       const right = Math.max(sx, ex);
       if (Math.abs(mx - left) <= 2) return { id: seg.id, mode: 'start' };
@@ -1156,8 +1164,8 @@
 
       // Cleanup segments overlay (multiple loop-like ranges for noisy vocal areas)
       for (const seg of cleanupSegments) {
-        const sx = beatToX(seg.startBeat);
-        const ex = beatToX(seg.endBeat);
+        const sx = beatToX(timeToBeat(seg.startMs / 1000));
+        const ex = beatToX(timeToBeat(seg.endMs / 1000));
         const left = Math.min(sx, ex);
         const right = Math.max(sx, ex);
         const width = right - left;
@@ -1904,9 +1912,9 @@
           cleanupDrag = {
             id: seg.id,
             mode: hit.mode,
-            startBeat: seg.startBeat,
-            endBeat: seg.endBeat,
-            mouseStartBeat: xToBeat(mx),
+            startMs: seg.startMs,
+            endMs: seg.endMs,
+            mouseStartMs: beatToTime(xToBeat(mx)) * 1000,
           };
           draw();
           return;
@@ -2196,17 +2204,17 @@
         cleanupDrag = null;
         return;
       }
-      const mouseBeat = xToBeat(mx);
-      const beatDelta = mouseBeat - cleanupDrag.mouseStartBeat;
+      const mouseMs = beatToTime(xToBeat(mx)) * 1000;
+      const msDelta = mouseMs - cleanupDrag.mouseStartMs;
       if (cleanupDrag.mode === 'move') {
-        seg.startBeat = cleanupDrag.startBeat + beatDelta;
-        seg.endBeat = cleanupDrag.endBeat + beatDelta;
+        seg.startMs = cleanupDrag.startMs + msDelta;
+        seg.endMs = cleanupDrag.endMs + msDelta;
       } else if (cleanupDrag.mode === 'start') {
-        seg.startBeat = Math.min(mouseBeat, cleanupDrag.endBeat - 2);
+        seg.startMs = Math.min(mouseMs, cleanupDrag.endMs - 50);
       } else if (cleanupDrag.mode === 'end') {
-        seg.endBeat = Math.max(mouseBeat, cleanupDrag.startBeat + 2);
+        seg.endMs = Math.max(mouseMs, cleanupDrag.startMs + 50);
       }
-      cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startBeat - b.startBeat);
+      cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
       markUnsaved();
       draw();
       return;
@@ -5589,7 +5597,7 @@
           style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
         >
           <div class="ctx-header">
-            <span class="ctx-location-label">🧹 Cleanup {seg.startBeat.toFixed(2)} → {seg.endBeat.toFixed(2)}</span>
+            <span class="ctx-location-label">🧹 Cleanup {(seg.startMs/1000).toFixed(2)}s → {(seg.endMs/1000).toFixed(2)}s</span>
           </div>
           <div class="ctx-divider"></div>
           <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
