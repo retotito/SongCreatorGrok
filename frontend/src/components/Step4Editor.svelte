@@ -205,6 +205,7 @@
   let isSettingLoop = false; // dragging on time axis to set loop
   let loopDragStartBeat = null; // beat where loop drag began
   let loopHandleDrag = null; // 'start' or 'end' when dragging a loop handle
+  let hoverPasteBeat = null; // live beat under mouse cursor (used by Cmd+V target)
 
   // Playhead drag / scrub
   let playheadDrag = false;
@@ -2025,6 +2026,10 @@
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
 
+    // Track live hover beat for keyboard paste (no click needed).
+    const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
+    hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
+
     // Flag drag
     if (isDragging && selectedFlag !== null) {
       const flag = flags.find(f => f.id === selectedFlag);
@@ -2530,6 +2535,17 @@
     pastePreviewBeat = null;
     console.log('[Clipboard] Paste cancelled');
     draw();
+  }
+
+  function getKeyboardPasteBeat() {
+    if (hoverPasteBeat !== null) {
+      return hoverPasteBeat;
+    }
+    if (selectedFlag !== null) {
+      const flag = flags.find(f => f.id === selectedFlag);
+      if (flag) return Math.round(flag.beat);
+    }
+    return Math.round(playbackBeat || 0);
   }
 
   // ──── Context Menu ──────────────────────────
@@ -3414,13 +3430,14 @@
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
       e.preventDefault();
       if (clipboard) {
+        const targetBeat = getKeyboardPasteBeat();
         // If already in paste mode, paste at playhead position
         if (pasteMode) {
-          finalizePaste(Math.round(playbackBeat));
+          finalizePaste(targetBeat);
         } else {
           // Re-enter paste mode
           pasteMode = true;
-          pastePreviewBeat = null;
+          pastePreviewBeat = targetBeat;
           draw();
         }
       }
