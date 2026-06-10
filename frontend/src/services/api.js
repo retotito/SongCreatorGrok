@@ -225,6 +225,10 @@ export async function generateUltrastar(sessionId, signal = null) {
   return request('POST', `/generate/${sessionId}`, null, false, false, signal);
 }
 
+export async function generateLyricsOnly(sessionId, signal = null) {
+  return request('POST', `/generate-lyrics-only/${sessionId}`, null, false, false, signal);
+}
+
 export function streamGenerate(sessionId, onEvent) {
   const url = `${BASE}/generate-stream/${sessionId}`;
   const es = new EventSource(url);
@@ -284,6 +288,16 @@ export async function getGenerationResult(sessionId) {
 // ─── Step 4: Editor ────────────────────────────
 export async function getEditorData(sessionId) {
   return request('GET', `/editor-data/${sessionId}`);
+}
+
+export async function getLiveWordsWindow(sessionId, startSec, endSec) {
+  const qs = `start_sec=${encodeURIComponent(startSec)}&end_sec=${encodeURIComponent(endSec)}`;
+  return request('GET', `/live-words-window/${sessionId}?${qs}`);
+}
+
+export async function analyzeWindow(sessionId, startSec, endSec, language = 'en') {
+  const qs = `start_sec=${encodeURIComponent(startSec)}&end_sec=${encodeURIComponent(endSec)}&language=${encodeURIComponent(language)}`;
+  return request('GET', `/analyze-window/${sessionId}?${qs}`);
 }
 
 export async function saveCorrections(sessionId, corrections) {

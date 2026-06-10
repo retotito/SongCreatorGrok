@@ -1276,6 +1276,198 @@ async def cancel_transcribe(session_id: str):
     return {"status": "ok", "message": "Transcription cancellation requested"}
 
 
+@app.get("/api/live-words-window/{session_id}")
+async def live_words_window(
+    session_id: str,
+    start_sec: float,
+    end_sec: float,
+):
+    """Return recognized Whisper words within a given absolute time window.
+
+    This endpoint is intentionally lightweight for fast editor iteration:
+    it reuses words already transcribed in Step 2 and filters them to
+    the requested time range.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if end_sec <= start_sec:
+        raise HTTPException(status_code=400, detail="end_sec must be greater than start_sec")
+
+    whisper_words = session.get("whisper_words", []) or []
+    whisper_method = session.get("whisper_method", "unknown")
+    log_step("LIVE_ANALYZE", f"window request session={session_id} start={start_sec:.3f}s end={end_sec:.3f}s method={whisper_method} words_total={len(whisper_words)}")
+
+    # Include words that overlap the requested range.
+    words_in_window = []
+    skipped_missing_time = 0
+    skipped_outside = 0
+    for w in whisper_words:
+        ws = w.get("start")
+        we = w.get("end")
+        if ws is None or we is None:
+            skipped_missing_time += 1
+            continue
+        if we < start_sec or ws > end_sec:
+            skipped_outside += 1
+            continue
+        words_in_window.append({
+            "word": w.get("word", "").strip(),
+            "start": round(float(ws), 4),
+            "end": round(float(we), 4),
+            "score": round(float(w.get("score", 0.0)), 4),
+        })
+
+    log_step(
+        "LIVE_ANALYZE",
+        "window filter summary "
+        f"included={len(words_in_window)} "
+        f"skipped_missing_time={skipped_missing_time} "
+        f"skipped_outside={skipped_outside}"
+    )
+    if words_in_window:
+        preview = ", ".join(
+            [f"{w['word']}[{w['start']:.2f}-{w['end']:.2f}]" for w in words_in_window[:12]]
+        )
+        log_step("LIVE_ANALYZE", f"window words preview {preview}")
+    else:
+        log_step("LIVE_ANALYZE", "window words preview <none>")
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "start_sec": round(start_sec, 3),
+        "end_sec": round(end_sec, 3),
+        "window_sec": round(end_sec - start_sec, 3),
+        "method": whisper_method,
+        "has_transcription": len(whisper_words) > 0,
+        "words": words_in_window,
+        "message": "Run 'Generate Lyrics from Vocals' in Step 2 first to populate word timestamps" if len(whisper_words) == 0 else "",
+    }
+
+
+
+
+@app.get("/api/analyze-window/{session_id}")
+async def analyze_window(
+    session_id: str,
+    start_sec: float,
+    end_sec: float,
+    language: str = "en",
+):
+    """Transcribe a short audio window on-the-fly using Whisper.
+
+    Clips the vocal audio to [start_sec, end_sec], runs Whisper on that
+    clip, and returns word timestamps shifted back to absolute song time.
+    Independent of Step 2 — each call recognizes the window fresh.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if end_sec <= start_sec:
+        raise HTTPException(status_code=400, detail="end_sec must be greater than start_sec")
+
+    audio_path = session.get("vocal_audio") or session.get("original_audio")
+    if not audio_path or not os.path.isfile(audio_path):
+        raise HTTPException(status_code=400, detail="No vocal audio available for this session")
+
+    duration = end_sec - start_sec
+    log_step("ANALYZE_WIN", f"session={session_id} start={start_sec:.3f}s end={end_sec:.3f}s dur={duration:.1f}s lang={language}")
+
+    import tempfile, subprocess
+    tmp_clip = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_clip.close()
+    clip_path = tmp_clip.name
+
+    try:
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-t", str(duration),
+            "-i", audio_path,
+            "-ac", "1",
+            "-ar", "16000",
+            "-f", "wav",
+            clip_path,
+        ]
+        log_step("ANALYZE_WIN", f"clipping audio {start_sec:.2f}s-{end_sec:.2f}s")
+        proc = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=30)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()[:300]}")
+
+        words_absolute = []
+        method_used = "none"
+
+        try:
+            import whisperx
+            device = "cpu"
+            compute_type = "int8"
+            log_step("ANALYZE_WIN", "loading WhisperX model for window...")
+            model = whisperx.load_model("medium", device, compute_type=compute_type)
+            audio = whisperx.load_audio(clip_path)
+            result = model.transcribe(audio, batch_size=4, language=language if language else None)
+            segments = result.get("segments", [])
+            detected_lang = result.get("language", language)
+            try:
+                align_model, align_meta = whisperx.load_align_model(language_code=detected_lang, device=device)
+                aligned = whisperx.align(segments, align_model, align_meta, audio, device, return_char_alignments=False)
+                for w in aligned.get("word_segments", []):
+                    words_absolute.append({
+                        "word": w.get("word", "").strip(),
+                        "start": round(float(w.get("start", 0)) + start_sec, 4),
+                        "end": round(float(w.get("end", 0)) + start_sec, 4),
+                        "score": round(float(w.get("score", 0)), 4),
+                    })
+                method_used = "whisperx"
+            except Exception as align_err:
+                log_step("ANALYZE_WIN", f"alignment failed, using segment words: {align_err}")
+                for seg in segments:
+                    for w in seg.get("words", []):
+                        words_absolute.append({
+                            "word": w.get("word", "").strip(),
+                            "start": round(float(w.get("start", 0)) + start_sec, 4),
+                            "end": round(float(w.get("end", 0)) + start_sec, 4),
+                            "score": 0.0,
+                        })
+                method_used = "whisperx-noalign"
+        except ImportError:
+            log_step("ANALYZE_WIN", "WhisperX not available, falling back to vanilla Whisper")
+            import whisper
+            model = whisper.load_model("medium")
+            result = model.transcribe(clip_path, language=language, word_timestamps=True)
+            for seg in result.get("segments", []):
+                for w in seg.get("words", []):
+                    words_absolute.append({
+                        "word": w.get("word", "").strip(),
+                        "start": round(float(w.get("start", 0)) + start_sec, 4),
+                        "end": round(float(w.get("end", 0)) + start_sec, 4),
+                        "score": 0.0,
+                    })
+            method_used = "whisper"
+        except Exception as e:
+            log_step("ANALYZE_WIN", f"transcription error: {e}")
+            raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {e}")
+
+        preview = ", ".join([f"{w['word']}[{w['start']:.2f}-{w['end']:.2f}]" for w in words_absolute[:12]])
+        log_step("ANALYZE_WIN", f"done method={method_used} words={len(words_absolute)} preview: {preview or '<none>'}")
+
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "start_sec": round(start_sec, 3),
+            "end_sec": round(end_sec, 3),
+            "method": method_used,
+            "words": words_absolute,
+        }
+
+    finally:
+        try:
+            os.unlink(clip_path)
+        except Exception:
+            pass
+
+
 @app.get("/api/transcribe-stream/{session_id}")
 async def transcribe_stream(session_id: str, language: str = "en"):
     """SSE stream for transcription — keeps connection alive during long Whisper runs."""
@@ -1940,6 +2132,97 @@ async def cancel_generation(session_id: str):
     return {"status": "ok", "message": "Cancellation requested"}
 
 
+@app.post("/api/generate-lyrics-only/{session_id}")
+def generate_lyrics_only(session_id: str):
+    """Generate a minimal Ultrastar .txt with metadata only (no notes)."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not session.get("vocal_audio"):
+        raise ServiceError("No vocal audio", "Upload or extract vocals first")
+    vocal_path = session["vocal_audio"]
+    artist = session.get("artist", "Unknown Artist")
+    title = session.get("title", "Unknown Song")
+    language = session.get("language", "en")
+    original_path = session.get("original_audio")
+
+    session["status"] = "generating"
+    generation_start = time.time()
+
+    try:
+        from services.bpm_detection import detect_bpm, get_audio_duration, detect_beat_phase
+        from services.ultrastar import generate_lyrics_only_txt
+
+        log_step("GENERATE", "Lyrics-only mode: detecting BPM and duration")
+        bpm = detect_bpm(vocal_path, original_audio_path=original_path)
+        audio_duration = get_audio_duration(vocal_path)
+        beat_phase_sec = detect_beat_phase(original_path or vocal_path, bpm)
+
+        _orig_path = session.get("original_audio") or ""
+        _audio_ext = os.path.splitext(_orig_path)[1] or ".mp3"
+        txt_content = generate_lyrics_only_txt(
+            artist=artist,
+            title=title,
+            bpm=bpm,
+            gap_ms=0,
+            language=language,
+            mp3_filename=f"{artist} - {title}{_audio_ext}",
+        )
+
+        timestamp = int(time.time())
+        txt_filename = f"song_{timestamp}.txt"
+        txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(txt_content)
+
+        elapsed = time.time() - generation_start
+        session["status"] = "generated"
+        session.setdefault("generated_files", [])
+        if txt_filename not in session["generated_files"]:
+            session["generated_files"].append(txt_filename)
+
+        session["result"] = {
+            "txt_file": txt_filename,
+            "bpm": bpm,
+            "gap_ms": 0,
+            "beat_phase_sec": beat_phase_sec,
+            "syllable_count": 0,
+            "audio_duration": audio_duration,
+            "pitch_method": "Skipped (lyrics-only)",
+            "alignment_method": "Skipped (lyrics-only)",
+            "elapsed_seconds": elapsed,
+            "syllable_timings": [],
+            "ultrastar_content": txt_content,
+            "pitch_data": {},
+        }
+        save_session(session_id)
+        _update_txt_asset_headers(session)
+        save_session(session_id)
+
+        return {
+            "status": "ok",
+            "session_id": session_id,
+            "bpm": bpm,
+            "gap_ms": 0,
+            "syllable_count": 0,
+            "audio_duration": round(audio_duration, 1),
+            "pitch_method": "Skipped (lyrics-only)",
+            "alignment_method": "Skipped (lyrics-only)",
+            "elapsed_seconds": round(elapsed, 1),
+            "files": {
+                "txt": f"/api/download/{session_id}/txt",
+                "vocals": f"/api/preview-audio/{session_id}/vocals",
+            },
+            "ultrastar_preview": txt_content[:2000],
+        }
+    except Exception as e:
+        session["status"] = "generation_failed"
+        session["error"] = str(e)
+        log.error(f"Lyrics-only generation failed for session {session_id}: {e}")
+        raise ServiceError("Lyrics-only generation failed", str(e))
+
+
 @app.post("/api/generate/{session_id}")
 def generate_ultrastar_files(session_id: str):
     """Run the full processing pipeline: BPM → Pitch → Alignment → Ultrastar."""
@@ -1949,8 +2232,6 @@ def generate_ultrastar_files(session_id: str):
     
     if not session.get("vocal_audio"):
         raise ServiceError("No vocal audio", "Upload or extract vocals first")
-    if not session.get("lyrics"):
-        raise ServiceError("No lyrics", "Submit lyrics first")
     
     vocal_path = session["vocal_audio"]
     lyrics = session["lyrics"]

@@ -129,6 +129,34 @@ def generate_ultrastar(
     return content
 
 
+def generate_lyrics_only_txt(
+    artist: str = "Unknown Artist",
+    title: str = "Unknown Song",
+    bpm: float = 120.0,
+    gap_ms: int = 0,
+    language: str = "English",
+    mp3_filename: str = "song.mp3",
+) -> str:
+    """Generate a minimal Ultrastar .txt file with headers only (no notes).
+
+    This is used as a lightweight starting point for manual note creation in
+    the editor while preserving song metadata and timing headers.
+    """
+    language_name = _ISO_TO_LANGUAGE_NAME.get(language.lower(), language) if language else "English"
+
+    header = (
+        f"#ARTIST:{artist}\n"
+        f"#TITLE:{title}\n"
+        f"#BPM:{bpm:.2f}\n"
+        f"#GAP:{gap_ms}\n"
+        f"#LANGUAGE:{language_name}\n"
+        f"#MP3:{mp3_filename}\n"
+    )
+
+    # Valid Ultrastar footer; no note lines yet.
+    return header + "E"
+
+
 def generate_processing_summary(
     syllable_timings: List[dict],
     bpm: float,
