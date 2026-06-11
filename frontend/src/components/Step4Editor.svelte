@@ -233,34 +233,39 @@
 
   function deleteCleanupSegment(id) {
     const seg = cleanupSegments.find(s => s.id === id);
+  async function deleteCleanupSegment(id) {
+    const seg = cleanupSegments.find(s => s.id === id);
     console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1} | wasSpliced=${segRecPatched.has(id)}`);
     pushUndo();
 
-    // If this segment was splice-recorded, restore original audio for that range
+    // If this segment was splice-recorded, restore original audio for that range first
     if (seg && segRecPatched.has(id)) {
-      fetch(`/api/restore-segment/${$sessionId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ start_ms: seg.startMs, end_ms: seg.endMs })
-      }).then(r => r.json()).then(data => {
+      try {
+        const data = await fetch(`/api/restore-segment/${$sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ start_ms: seg.startMs, end_ms: seg.endMs })
+        }).then(r => r.json());
         console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
         const cacheBust = `?v=${Date.now()}`;
         vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
         segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
-        if (audioSource === 'edited') {
-          currentAudioUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
-          if (audioEl) audioEl.load();
-          loadWaveform(currentAudioUrl);
-        }
-      }).catch(e => console.warn('[CleanupSeg] Restore failed:', e));
+      } catch (e) {
+        console.warn('[CleanupSeg] Restore failed:', e);
+      }
     }
 
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
     if (cleanupSegments.length === 0) {
       cleanedAudioAvailable = false;
-      // Auto-switch back to vocals if currently on edited
+      // Auto-switch back to vocals (uses updated vocalUrl after restore above)
       if (audioSource === 'edited') switchAudioSource('vocals');
+    } else if (audioSource === 'edited' && segRecPatched.size > 0) {
+      // Still have spliced segments — refresh edited audio to updated vocalUrl
+      currentAudioUrl = vocalUrl;
+      if (audioEl) audioEl.load();
+      loadWaveform(currentAudioUrl);
     }
     cleanedAudioDirty = true;
     markUnsaved();
