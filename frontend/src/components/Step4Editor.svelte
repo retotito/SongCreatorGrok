@@ -5325,7 +5325,7 @@
         {seg ? `${(seg.startMs/1000).toFixed(1)}s – ${(seg.endMs/1000).toFixed(1)}s  (${((seg.endMs - seg.startMs)/1000).toFixed(1)}s)` : ''}
       </div>
       {#if segRecPhase === 'preroll'}
-        <div class="seg-rec-countdown">{segRecCountdown}</div>
+        <div class="seg-rec-countdown-overlay">{segRecCountdown}</div>
       {/if}
       {#if segRecPhase === 'review' && segRecObjectUrl}
         <audio controls src={segRecObjectUrl} style="width:100%;margin:6px 0;"></audio>
@@ -6596,8 +6596,8 @@
 
   .seg-rec-modal {
     position: fixed;
-    top: 80px;
-    left: 16px;
+    top: 10px;
+    left: 10px;
     z-index: 9000;
     width: 260px;
     background: #1a2a1a;
@@ -6628,15 +6628,21 @@
     font-family: monospace;
   }
 
-  .seg-rec-countdown {
-    font-size: 2.5rem;
+  .seg-rec-countdown-overlay {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9100;
+    font-size: 8rem;
     font-weight: 900;
     color: #f0c040;
-    text-align: center;
+    text-shadow: 0 0 40px rgba(240,192,64,0.8), 0 2px 8px rgba(0,0,0,0.9);
+    pointer-events: none;
     line-height: 1;
   }
 
-  .seg-rec-modal-actions {
+  .seg-rec-hint {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
