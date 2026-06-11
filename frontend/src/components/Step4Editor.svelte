@@ -34,6 +34,8 @@
   let toastTimer = null;
   let uiBusy = false;
   let editedAudioLoading = false;
+  let waveformLoading = false;
+  let waveformLoadToken = 0;
 
   // View state
   let scrollX = 0;
@@ -527,7 +529,7 @@
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
   let isRegeneratingCleaned = false; // blocking modal while regenerating
-  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading || editedAudioLoading;
+  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading || editedAudioLoading || waveformLoading;
 
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
@@ -5240,6 +5242,8 @@
   // Load waveform peaks from audio URL via Web Audio API
   async function loadWaveform(url) {
     console.log('[Waveform] Loading from', url);
+    const token = ++waveformLoadToken;
+    waveformLoading = true;
     try {
       const resp = await fetch(url);
       const arrayBuffer = await resp.arrayBuffer();
@@ -5276,6 +5280,8 @@
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);
       waveformPeaks = [];
+    } finally {
+      if (token === waveformLoadToken) waveformLoading = false;
     }
   }
 
@@ -6398,7 +6404,7 @@
     position: fixed;
     inset: 0;
     z-index: 9800;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(255, 0, 0, 0.33);
     display: flex;
     align-items: center;
     justify-content: center;
