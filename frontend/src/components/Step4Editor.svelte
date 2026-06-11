@@ -2306,27 +2306,34 @@
       }
       const mouseMs = beatToTime(xToBeat(mx)) * 1000;
       const msDelta = mouseMs - cleanupDrag.mouseStartMs;
-      // Non-overlap clamping: find sorted neighbours
+      // Non-overlap clamping: find sorted neighbours once, based on original drag positions
       const CLAMP_GAP = 10; // ms minimum gap between segments
       const sortedOthers = cleanupSegments.filter(s => s.id !== seg.id).sort((a, b) => a.startMs - b.startMs);
+      // Neighbour immediately before (ends before drag origin start) and after (starts after drag origin end)
+      const prevN = [...sortedOthers].reverse().find(s => s.endMs <= cleanupDrag.startMs);
+      const nextN = sortedOthers.find(s => s.startMs >= cleanupDrag.endMs);
+      const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
+      const maxEnd   = nextN ? nextN.startMs - CLAMP_GAP : Infinity;
+
       if (cleanupDrag.mode === 'move') {
-        seg.startMs = cleanupDrag.startMs + msDelta;
-        seg.endMs = cleanupDrag.endMs + msDelta;
         const duration = cleanupDrag.endMs - cleanupDrag.startMs;
-        const prevN = [...sortedOthers].reverse().find(s => s.startMs < seg.startMs);
-        const nextN = sortedOthers.find(s => s.startMs >= seg.startMs);
-        const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
-        const maxStart = nextN ? nextN.startMs - CLAMP_GAP - duration : Infinity;
-        seg.startMs = Math.max(minStart, Math.min(isFinite(maxStart) ? maxStart : seg.startMs, seg.startMs));
-        seg.endMs = seg.startMs + duration;
+        let newStart = cleanupDrag.startMs + msDelta;
+        newStart = Math.max(minStart, newStart);
+        if (isFinite(maxEnd)) newStart = Math.min(maxEnd - duration, newStart);
+        seg.startMs = newStart;
+        seg.endMs = newStart + duration;
       } else if (cleanupDrag.mode === 'start') {
-        seg.startMs = Math.min(mouseMs, cleanupDrag.endMs - 50);
-        const prevN = [...sortedOthers].reverse().find(s => s.endMs <= seg.startMs + CLAMP_GAP + 1);
-        if (prevN) seg.startMs = Math.max(seg.startMs, prevN.endMs + CLAMP_GAP);
+        let newStart = mouseMs;
+        newStart = Math.max(minStart, newStart);          // can't cross prev neighbour
+        newStart = Math.min(cleanupDrag.endMs - 50, newStart); // can't cross own end
+        seg.startMs = newStart;
+        seg.endMs = cleanupDrag.endMs;
       } else if (cleanupDrag.mode === 'end') {
-        seg.endMs = Math.max(mouseMs, cleanupDrag.startMs + 50);
-        const nextN = sortedOthers.find(s => s.startMs >= seg.endMs - CLAMP_GAP - 1);
-        if (nextN) seg.endMs = Math.min(seg.endMs, nextN.startMs - CLAMP_GAP);
+        let newEnd = mouseMs;
+        if (isFinite(maxEnd)) newEnd = Math.min(maxEnd, newEnd); // can't cross next neighbour
+        newEnd = Math.max(cleanupDrag.startMs + 50, newEnd);     // can't cross own start
+        seg.startMs = cleanupDrag.startMs;
+        seg.endMs = newEnd;
       }
       cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
       cleanedAudioDirty = true;
