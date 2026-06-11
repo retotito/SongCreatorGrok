@@ -231,8 +231,6 @@
     handleSave();
   }
 
-  function deleteCleanupSegment(id) {
-    const seg = cleanupSegments.find(s => s.id === id);
   async function deleteCleanupSegment(id) {
     const seg = cleanupSegments.find(s => s.id === id);
     console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1} | wasSpliced=${segRecPatched.has(id)}`);
