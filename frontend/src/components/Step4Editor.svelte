@@ -5297,6 +5297,35 @@
     stopMic();
   });
 
+  // ── Recording modal drag ──
+  let segRecModalX = 10;
+  let segRecModalY = 10;
+  let segRecModalDragging = false;
+  let segRecModalDragOffsetX = 0;
+  let segRecModalDragOffsetY = 0;
+
+  function segRecModalMouseDown(e) {
+    if (e.button !== 0) return;
+    segRecModalDragging = true;
+    segRecModalDragOffsetX = e.clientX - segRecModalX;
+    segRecModalDragOffsetY = e.clientY - segRecModalY;
+    window.addEventListener('mousemove', segRecModalMouseMove);
+    window.addEventListener('mouseup', segRecModalMouseUp);
+    e.preventDefault();
+  }
+
+  function segRecModalMouseMove(e) {
+    if (!segRecModalDragging) return;
+    segRecModalX = Math.max(0, Math.min(window.innerWidth - 270, e.clientX - segRecModalDragOffsetX));
+    segRecModalY = Math.max(0, Math.min(window.innerHeight - 200, e.clientY - segRecModalDragOffsetY));
+  }
+
+  function segRecModalMouseUp() {
+    segRecModalDragging = false;
+    window.removeEventListener('mousemove', segRecModalMouseMove);
+    window.removeEventListener('mouseup', segRecModalMouseUp);
+  }
+
   // Reload when we enter this step (one-shot per session)
   $: if ($generationResult && canvasEl && $sessionId && dataLoadedSession !== $sessionId) {
     loadData();
@@ -5309,7 +5338,9 @@
 <div class="step-content">
   {#if segRecPhase !== 'idle'}
     {@const seg = cleanupSegments.find(s => s.id === segRecSegmentId)}
-    <div class="seg-rec-modal" class:seg-rec-recording={segRecPhase === 'recording'}>
+    <div class="seg-rec-modal" class:seg-rec-recording={segRecPhase === 'recording'}
+      style="left:{segRecModalX}px;top:{segRecModalY}px"
+      on:mousedown={segRecModalMouseDown}>
       <div class="seg-rec-modal-title">
         {#if segRecPhase === 'armed'}
           🎙 Record over segment
@@ -5462,13 +5493,14 @@
       </div>
       <div id="vocal_trace_outer_wrapper">
         <div id="vocal_trace-controls-wrapper">
-          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio} on:click={(e) => {
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || segRecPhase !== 'idle'} on:click={(e) => {
+            if (segRecPhase !== 'idle') return;
             if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
             vocalTraceEnabled = !vocalTraceEnabled;
             if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
             toggleVocalTrace();
             e.currentTarget.blur();
-          }} title={hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
+          }} title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
             Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
           </button>
           {#if vocalTraceLoading}
@@ -6597,10 +6629,9 @@
 
   .seg-rec-modal {
     position: fixed;
-    top: 10px;
-    left: 10px;
     z-index: 9000;
     width: 260px;
+    cursor: grab;
     background: #1a2a1a;
     border: 2px solid #3a7a3a;
     border-radius: 10px;
