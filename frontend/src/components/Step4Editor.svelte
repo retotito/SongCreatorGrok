@@ -237,6 +237,7 @@
     pushUndo();
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
+    if (cleanupSegments.length === 0) cleanedAudioAvailable = false;
     cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
@@ -418,6 +419,7 @@
   let audioSource = 'vocals'; // 'vocals' | 'edited' | 'original'
   let originalUrl = '';
   let originalVocalUrl = ''; // frozen at load — never changed by splices
+  let cleanedAudioAvailable = false; // true when cleaned_vocal_path exists on backend
   let hasVocalsAudio = true;
   let hasOriginalAudio = true;
 
@@ -883,6 +885,7 @@
         isRegeneratingCleaned = true;
         try {
           await generateCleanedAudio($sessionId, serializeCleanupSegments());
+          cleanedAudioAvailable = true;
           console.log('[Step4] Cleaned audio regenerated');
         } catch (e) {
           console.warn('[Step4] Cleaned audio regeneration failed:', e);
@@ -3309,8 +3312,12 @@
   function switchAudioSource(source) {
     const prevSource = audioSource;
     audioSource = source;
-    const url = source === 'original' ? originalUrl : source === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
-    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | segRecPatched.size=${segRecPatched.size} | originalVocalUrl=${originalVocalUrl}`);
+    // 'edited' = splice-patched vocal if splices exist, otherwise cleaned vocal
+    const editedUrl = segRecPatched.size > 0
+      ? vocalUrl
+      : getAudioUrl($sessionId, 'cleaned');
+    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
+    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -5152,6 +5159,7 @@
       // Restore save state
       editCount = data.edit_count || 0;
       lastSaveTime = data.last_saved ? new Date(data.last_saved * 1000) : null;
+      cleanedAudioAvailable = !!data.cleaned_audio_available;
       hasUnsavedChanges = false;
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
@@ -5172,7 +5180,8 @@
         audioSource = 'original';
       }
       // Set the reactive audio URL driving the <audio> element
-      currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
+      const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned');
+      currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
       console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
       computeTotalBeats();
 
@@ -5532,7 +5541,7 @@
       <div id="audio-source-wrapper">
         <div class="audio-source-toggle" title="Audio source">
           <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
-          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || segRecPatched.size === 0} on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'No edits yet — record over a cleanup segment first'}>Edited 🎙</button>
+          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0)} on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
           <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
         </div>
         <div class="volume-control" title="Audio volume">
