@@ -5551,11 +5551,11 @@
           <!-- <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); handleBpmChange(); }}>−</button> -->
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.1)) * 1000) / 1000; handleBpmChange(); }}>−.1</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.01)) * 1000) / 1000; handleBpmChange(); }}>−.01</button> -->
-          <input type="number" class="bpm-input" bind:value={bpm} on:change={() => { if (segRecPhase !== 'idle') return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={segRecPhase !== 'idle'} />
+          <input type="number" class="bpm-input" class:disabled-audio={segRecPhase !== 'idle'} bind:value={bpm} on:change={() => { if (segRecPhase !== 'idle') return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={segRecPhase !== 'idle'} />
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
-          <button class="tool-btn" style="margin-left: 4px;"
+          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} style="margin-left: 4px;"
                 on:click={() => { if (segRecPhase !== 'idle') return; openTapper(); }}
                 disabled={segRecPhase !== 'idle'}
                 title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Tap the beat to calculate BPM (Enter key)'}>
@@ -5571,23 +5571,23 @@
         </div>
         <div id="gap-controls" title="Click to set a new GAP position on the waveform (Ctrl+G)">
           <span class="bpm-label gap-label">GAP</span>
-          <span class="gap-input gap-display" role="button" tabindex="0"
+          <span class="gap-input gap-display" class:disabled-audio={segRecPhase !== 'idle'} role="button" tabindex="0"
             on:click={() => { if (segRecPhase !== 'idle') return; enterSetGapMode(); }}
             on:keydown={(e) => { if (segRecPhase !== 'idle') return; e.key === 'Enter' && enterSetGapMode(); }}
             title={segRecPhase !== 'idle' ? 'Disabled during recording' : `Click to set GAP (Ctrl+G) — ${gapMs}ms`}
-            style={segRecPhase !== 'idle' ? 'opacity:0.4;pointer-events:none;' : ''}>
+            >
             {gapMs} ms
           </span>
         </div>
       </div>
       <div id="edit-controls-wrapper">
-        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; autoFixWordSpaces(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
+          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; autoFixWordSpaces(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
            Fix Spaces&nbsp;🔤
         </button>
-        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; openTextEditor(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Edit raw Ultrastar .txt'}>
+          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; openTextEditor(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Edit raw Ultrastar .txt'}>
            Text&nbsp;📝 
         </button>
-        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; loadSessionNotes(); showNotesModal = true; }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Session notes'}>
+          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; loadSessionNotes(); showNotesModal = true; }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
       </div>
@@ -7656,15 +7656,25 @@
     user-select: none;
   }
 
-  .tool-btn.disabled-audio {
-    opacity: 0.3;
-    cursor: pointer;
-    position: relative;
+  .tool-btn.disabled-audio,
+  .tool-btn:disabled,
+  .bpm-input.disabled-audio,
+  .bpm-input:disabled,
+  .gap-display.disabled-audio {
+    opacity: 0.4;
+    cursor: not-allowed !important;
+    filter: saturate(0.45);
   }
 
-  .tool-btn.disabled-audio:hover {
-    opacity: 0.5;
-    background: #3e2723;
+  .tool-btn.disabled-audio:hover,
+  .tool-btn:disabled:hover {
+    opacity: 0.4;
+    background: #222;
+  }
+
+  .gap-display.disabled-audio:hover {
+    color: #4fc3f7;
+    border-color: #444;
   }
 
   label.disabled-label {
