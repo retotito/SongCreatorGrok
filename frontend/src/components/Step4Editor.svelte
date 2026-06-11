@@ -191,6 +191,14 @@
       .sort((a, b) => a.start_ms - b.start_ms);
   }
 
+  function serializeCleanupSegmentsForCleaning() {
+    // Do not mute regions that were replaced by user recordings.
+    return cleanupSegments
+      .filter(s => !segRecPatched.has(s.id))
+      .map(s => ({ start_ms: s.startMs, end_ms: s.endMs }))
+      .sort((a, b) => a.start_ms - b.start_ms);
+  }
+
   function setCleanupSegmentsFromApi(segments = []) {
     const parsed = [];
     for (const seg of segments) {
@@ -925,7 +933,7 @@
         cleanedAudioDirty = false;
         isRegeneratingCleaned = true;
         try {
-          await generateCleanedAudio($sessionId, serializeCleanupSegments());
+          await generateCleanedAudio($sessionId, serializeCleanupSegmentsForCleaning());
           cleanedAudioAvailable = true;
           cleanedAudioCacheBust = `?v=${Date.now()}`;
           console.log('[Step4] Cleaned audio regenerated');
@@ -5334,7 +5342,6 @@
         audioSource = 'original';
       }
       // Set the reactive audio URL driving the <audio> element
-      const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
       const editedUrl = getEditedAudioUrl();
       currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
       console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
