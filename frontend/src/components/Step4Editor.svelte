@@ -5141,11 +5141,15 @@
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
       vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
-      originalVocalUrl = vocalUrl; // freeze original at load time
+      // If splices exist, original demucs vocal is served at /demucs; else same as vocals
+      originalVocalUrl = (hasVocalsAudio && data.has_vocal_splice)
+        ? getAudioUrl($sessionId, 'demucs')
+        : vocalUrl;
+      if (data.has_vocal_splice) segRecPatched = new Set(['restored']); // mark as having edits
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
       // Default to whichever audio is available
       if (hasVocalsAudio) {
-        audioSource = 'vocals';
+        audioSource = data.has_vocal_splice ? 'edited' : 'vocals';
       } else if (hasOriginalAudio) {
         audioSource = 'original';
       }

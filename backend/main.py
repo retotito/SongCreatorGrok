@@ -1183,6 +1183,9 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
         # Cleaned audio from cleanup segments
         result = session.get("result")
         path = result.get("cleaned_vocal_path") if result else None
+    elif audio_type == "demucs":
+        # Original demucs vocal before any splice edits
+        path = session.get("original_demucs_vocal") or session.get("vocal_audio")
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type")
     
@@ -2357,6 +2360,7 @@ async def get_editor_data(session_id: str):
         "last_saved": result.get("last_saved"),
         "cleanup_segments": result.get("cleanup_segments", []),
         "cleaned_audio_available": bool(result.get("cleaned_vocal_path")),
+        "has_vocal_splice": bool(session.get("original_demucs_vocal")),
     }
 
 
@@ -2562,6 +2566,9 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
         patched_path = os.path.join(SESSIONS_DIR, patched_filename)
         sf.write(patched_path, patched.T, sr, subtype='PCM_16')
 
+        # Preserve original demucs vocal before first splice
+        if not session.get("original_demucs_vocal"):
+            session["original_demucs_vocal"] = session.get("vocal_audio")
         # Update session to use patched vocal
         session["vocal_audio"] = patched_path
         # Invalidate cleaned audio — it was generated from the old vocal
