@@ -2360,7 +2360,10 @@ async def get_editor_data(session_id: str):
         "last_saved": result.get("last_saved"),
         "cleanup_segments": result.get("cleanup_segments", []),
         "cleaned_audio_available": bool(result.get("cleaned_vocal_path")),
-        "has_vocal_splice": bool(session.get("original_demucs_vocal")),
+        "has_vocal_splice": bool(session.get("original_demucs_vocal")) or (
+            vocal is not None and "vocal_patched_" in os.path.basename(vocal)
+        ),
+        "has_original_demucs": bool(session.get("original_demucs_vocal")),
     }
 
 

@@ -5153,10 +5153,10 @@
       hasUnsavedChanges = false;
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
-      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_vocal_splice=${data.has_vocal_splice}`);
+      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_vocal_splice=${data.has_vocal_splice} has_original_demucs=${data.has_original_demucs}`);
       vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
       // If splices exist, original demucs vocal is served at /demucs; else same as vocals
-      originalVocalUrl = (hasVocalsAudio && data.has_vocal_splice)
+      originalVocalUrl = (hasVocalsAudio && data.has_original_demucs)
         ? getAudioUrl($sessionId, 'demucs')
         : vocalUrl;
       if (data.has_vocal_splice) segRecPatched = new Set(['restored']); // mark as having edits
