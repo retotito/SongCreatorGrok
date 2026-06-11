@@ -2468,7 +2468,7 @@ async def save_editor_state(session_id: str, request: Request):
     extra_headers = body.get("extra_headers", [])
     cleanup_segments = body.get("cleanup_segments", [])
 
-    if not editor_notes:
+    if editor_notes is None:
         raise ServiceError("No notes provided")
     if editor_bpm is None or editor_gap is None:
         raise ServiceError("BPM and gap_ms are required")
