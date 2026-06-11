@@ -145,10 +145,11 @@ export function getAudioUrl(sessionId, type) {
 }
 
 // ─── Step 2: Lyrics ────────────────────────────
-export function transcribeAudio(sessionId, language = 'en', signal = null, useCleaned = false) {
+export function transcribeAudio(sessionId, language = 'en', signal = null, useCleaned = false, modelPreset = 'balanced') {
   return new Promise((resolve, reject) => {
     let url = `${BASE}/transcribe-stream/${sessionId}?language=${encodeURIComponent(language)}`;
     if (useCleaned) url += '&use_cleaned=true';
+    url += `&model_preset=${encodeURIComponent(modelPreset)}`;
     console.log(`[API] SSE ${url}`);
     const es = new EventSource(url);
 

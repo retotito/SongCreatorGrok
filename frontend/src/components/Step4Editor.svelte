@@ -523,6 +523,32 @@
   let editingSyllable = '';
   let contextMenuEl;
 
+  // Segment local regenerate modal (prototype)
+  let segRegenModalOpen = false;
+  let segRegenMode = 'lyrics_first'; // 'lyrics_first' | 'one_go'
+  let segRegenRange = {
+    sourceType: 'cleanup', // 'cleanup' | 'loop'
+    cleanupId: null,
+    startMs: 0,
+    endMs: 0,
+  };
+  let segRegenModalX = 28;
+  let segRegenModalY = 84;
+  let segRegenModalDragging = false;
+  let segRegenModalDragOffsetX = 0;
+  let segRegenModalDragOffsetY = 0;
+  let segRegenLanguage = 'auto';
+  let segRegenPreset = 'balanced';
+  let segRegenAudioSource = 'current'; // 'current' | 'vocals' | 'edited'
+  let segRegenPreviewLoading = false;
+  let segRegenPreviewError = '';
+  let segRegenPreviewLines = [];
+  let segRegenPreviewConfidence = null;
+  let segRegenAutoHyphenate = true;
+  let segRegenHyphenateLoading = false;
+  let segRegenPreviewHyphenated = false;
+  let segRegenGenerateLoading = false;
+
   // Undo/Redo history
   let undoStack = [];
   let redoStack = [];
@@ -2355,7 +2381,7 @@
         loopStartBeat = loopDragStartBeat;
         loopEndBeat = loopDragStartBeat;
         loopEnabled = true;
-        console.log(`[Loop] Start drag at beat ${loopDragStartBeat}`);
+        console.log(`[Loop] Start drag at beat ${loopDragStartBeat} | ms ${(beatToTime(loopDragStartBeat) * 1000).toFixed(1)} | sec ${beatToTime(loopDragStartBeat).toFixed(3)}`);
         draw();
         return;
       }
@@ -2928,7 +2954,9 @@
 
     // Finish loop handle drag
     if (loopHandleDrag) {
-      console.log(`[Loop] Handle drag done: ${loopStartBeat} → ${loopEndBeat}`);
+      const a = Math.min(loopStartBeat, loopEndBeat);
+      const b = Math.max(loopStartBeat, loopEndBeat);
+      console.log(`[Loop] Handle drag done: beat ${a} → ${b} | ms ${(beatToTime(a) * 1000).toFixed(1)} → ${(beatToTime(b) * 1000).toFixed(1)} | sec ${beatToTime(a).toFixed(3)} → ${beatToTime(b).toFixed(3)}`);
       loopHandleDrag = null;
       canvasEl.style.cursor = '';
       draw();
@@ -2951,7 +2979,7 @@
         } else {
           loopStartBeat = a;
           loopEndBeat = b;
-          console.log(`[Loop] Set region: beat ${a} → ${b}`);
+          console.log(`[Loop] Set region: beat ${a} → ${b} | ms ${(beatToTime(a) * 1000).toFixed(1)} → ${(beatToTime(b) * 1000).toFixed(1)} | sec ${beatToTime(a).toFixed(3)} → ${beatToTime(b).toFixed(3)}`);
         }
       }
       loopDragStartBeat = null;
@@ -3433,6 +3461,312 @@
       pitch: 0,
       traceFrame: null,
     };
+  }
+
+  function openSegmentRegenerateModal(range) {
+    segRegenRange = {
+      sourceType: range.sourceType,
+      cleanupId: range.cleanupId ?? null,
+      startMs: Math.max(0, Math.round(range.startMs || 0)),
+      endMs: Math.max(0, Math.round(range.endMs || 0)),
+    };
+    if (segRegenRange.endMs <= segRegenRange.startMs) {
+      showToast('Invalid range for segment regenerate');
+      return;
+    }
+    segRegenPreviewLoading = false;
+    segRegenPreviewError = '';
+    segRegenPreviewLines = [];
+    segRegenPreviewConfidence = null;
+    segRegenPreviewHyphenated = false;
+    console.log('[SegmentAI] Modal range applied:', {
+      sourceType: segRegenRange.sourceType,
+      cleanupId: segRegenRange.cleanupId,
+      startMs: segRegenRange.startMs,
+      endMs: segRegenRange.endMs,
+      durationMs: segRegenRange.endMs - segRegenRange.startMs,
+      startSec: Number((segRegenRange.startMs / 1000).toFixed(3)),
+      endSec: Number((segRegenRange.endMs / 1000).toFixed(3)),
+      audioSourceInEditor: audioSource,
+      analysisSourceSetting: segRegenAudioSource,
+    });
+    segRegenModalOpen = true;
+    closeContextMenu();
+  }
+
+  function openSegmentRegenerateFromCleanup(seg) {
+    if (!seg) return;
+    openSegmentRegenerateModal({
+      sourceType: 'cleanup',
+      cleanupId: seg.id,
+      startMs: seg.startMs,
+      endMs: seg.endMs,
+    });
+  }
+
+  function openSegmentRegenerateFromLoop() {
+    if (loopStartBeat === null || loopEndBeat === null || !loopEnabled) {
+      showToast('Create a loop range first');
+      return;
+    }
+    const range = getActiveLoopRangeMs();
+    if (!range) {
+      showToast('Create a loop range first');
+      return;
+    }
+    console.log('[SegmentAI] Loop source before modal:', {
+      loopEnabled,
+      loopStartBeat,
+      loopEndBeat,
+      loopStartMs: range.startMs,
+      loopEndMs: range.endMs,
+      loopDurationMs: range.endMs - range.startMs,
+      loopStartSec: Number((range.startMs / 1000).toFixed(3)),
+      loopEndSec: Number((range.endMs / 1000).toFixed(3)),
+    });
+    openSegmentRegenerateModal({
+      sourceType: 'loop',
+      cleanupId: null,
+      startMs: range.startMs,
+      endMs: range.endMs,
+    });
+  }
+
+  function hasActiveLoopRange() {
+    return loopEnabled && loopStartBeat !== null && loopEndBeat !== null;
+  }
+
+  function isBeatInsideActiveLoop(beat) {
+    if (!hasActiveLoopRange()) return false;
+    const a = Math.min(loopStartBeat, loopEndBeat);
+    const b = Math.max(loopStartBeat, loopEndBeat);
+    return beat >= a && beat <= b;
+  }
+
+  function getActiveLoopRangeMs() {
+    if (!hasActiveLoopRange()) return null;
+    const a = Math.min(loopStartBeat, loopEndBeat);
+    const b = Math.max(loopStartBeat, loopEndBeat);
+    return {
+      startMs: Math.max(0, beatToTime(a) * 1000),
+      endMs: Math.max(0, beatToTime(b) * 1000),
+    };
+  }
+
+  function openSegmentRegenerateFromLoopContext() {
+    openSegmentRegenerateFromLoop();
+  }
+
+  function closeSegmentRegenerateModal() {
+    segRegenModalOpen = false;
+  }
+
+  async function hyphenateSegmentPreviewLines(lines, silent = false) {
+    const raw = (lines || []).map(v => String(v || '').trim()).filter(Boolean);
+    if (raw.length === 0) return [];
+
+    segRegenHyphenateLoading = true;
+    try {
+      const fd = new FormData();
+      fd.append('lyrics', raw.join('\n'));
+      fd.append('language', segRegenLanguage === 'auto' ? 'en' : segRegenLanguage);
+
+      const resp = await fetch('/api/hyphenate', {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Hyphenation failed');
+      }
+
+      let hyphenated = [];
+      if (Array.isArray(data?.lines) && data.lines.length > 0) {
+        hyphenated = data.lines.map(l => String(l?.hyphenated || '').trim()).filter(Boolean);
+      } else if (typeof data?.hyphenated === 'string' && data.hyphenated.trim()) {
+        hyphenated = data.hyphenated.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      }
+
+      if (hyphenated.length === 0) hyphenated = raw;
+      segRegenPreviewHyphenated = true;
+      if (!silent) showToast('Hyphenation applied');
+      return hyphenated;
+    } catch (e) {
+      if (!silent) showToast(String(e?.message || 'Hyphenation failed'));
+      throw e;
+    } finally {
+      segRegenHyphenateLoading = false;
+    }
+  }
+
+  async function generateNotesFromSegmentPreview() {
+    if (segRegenGenerateLoading) return;
+    if (segRegenPreviewLines.length === 0) {
+      showToast('Run Preview Lyrics first');
+      return;
+    }
+    if (!$sessionId) return;
+
+    segRegenGenerateLoading = true;
+    try {
+      // Always hyphenate before generation.
+      if (!segRegenPreviewHyphenated) {
+        segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines, true);
+      }
+
+      const lyricsText = segRegenPreviewLines.join('\n');
+
+      const resp = await fetch(`/api/segment-generate/${$sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: segRegenRange.startMs,
+          end_ms: segRegenRange.endMs,
+          lyrics: lyricsText,
+          language: segRegenLanguage,
+          audio_source: getSegRegenAudioSourceForApi(),
+        }),
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Segment generation failed');
+      }
+
+      const newNotes = Array.isArray(data?.notes) ? data.notes : [];
+      if (newNotes.length === 0) {
+        showToast('No notes returned from segment generation');
+        return;
+      }
+
+      // Convert ms range to beats so we can remove old notes
+      const rangeStartBeat = timeToBeat(segRegenRange.startMs / 1000);
+      const rangeEndBeat   = timeToBeat(segRegenRange.endMs   / 1000);
+
+      // Snapshot for undo before any mutation
+      pushUndo();
+
+      // Remove all existing notes (including breaks) that overlap the beat range
+      const kept = notes.filter(n => {
+        const nEnd = n.type === 'break' ? (n.endBeat ?? n.startBeat + 1) : (n.startBeat + (n.duration ?? 1));
+        return nEnd <= rangeStartBeat || n.startBeat >= rangeEndBeat;
+      });
+
+      // Re-assign IDs on incoming notes so they don't collide with kept notes
+      const maxId = kept.reduce((m, n) => Math.max(m, n.id ?? 0), -1);
+      const merged = [
+        ...kept,
+        ...newNotes.map((n, i) => ({ ...n, id: maxId + 1 + i })),
+      ].sort((a, b) => a.startBeat - b.startBeat);
+
+      notes = merged;
+      selectedNote = null;
+      selectedNotes = new Set();
+      markUnsaved();
+      updatePitchRange();
+      computeTotalBeats();
+      draw();
+
+      closeSegmentRegenerateModal();
+      showToast(`Generated ${newNotes.filter(n => n.type !== 'break').length} notes for segment`);
+    } catch (e) {
+      showToast(String(e?.message || 'Segment generation failed'));
+    } finally {
+      segRegenGenerateLoading = false;
+    }
+  }
+
+  function getSegRegenAudioSourceForApi() {
+    if (segRegenAudioSource === 'current') {
+      // Use whichever source the user is currently auditioning in Step 4.
+      return audioSource;
+    }
+    return segRegenAudioSource;
+  }
+
+  async function previewSegmentLyrics() {
+    if (!$sessionId) return;
+    segRegenPreviewLoading = true;
+    segRegenPreviewError = '';
+    segRegenPreviewLines = [];
+    segRegenPreviewConfidence = null;
+    segRegenPreviewHyphenated = false;
+    try {
+      const resp = await fetch(`/api/segment-preview/${$sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: segRegenRange.startMs,
+          end_ms: segRegenRange.endMs,
+          language: segRegenLanguage,
+          model_preset: segRegenPreset,
+          audio_source: getSegRegenAudioSourceForApi(),
+          source_type: segRegenRange.sourceType,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Preview lyrics failed');
+      }
+
+      if (Array.isArray(data?.lyrics_lines) && data.lyrics_lines.length > 0) {
+        segRegenPreviewLines = data.lyrics_lines.map(v => String(v));
+      } else if (typeof data?.lyrics === 'string' && data.lyrics.trim()) {
+        segRegenPreviewLines = data.lyrics.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else if (typeof data?.text === 'string' && data.text.trim()) {
+        segRegenPreviewLines = data.text.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else {
+        segRegenPreviewLines = ['(No lyrics returned by preview endpoint)'];
+      }
+
+      if (typeof data?.confidence === 'number') {
+        segRegenPreviewConfidence = data.confidence;
+      } else if (typeof data?.confidence_summary?.avg === 'number') {
+        segRegenPreviewConfidence = data.confidence_summary.avg;
+      }
+
+      if (segRegenAutoHyphenate && segRegenPreviewLines.length > 0) {
+        try {
+          segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines, true);
+        } catch {
+          // Keep raw preview lines if hyphenation fails.
+        }
+      }
+      showToast('Lyrics preview loaded');
+    } catch (e) {
+      segRegenPreviewError = String(e?.message || e || 'Preview failed');
+      showToast('Lyrics preview failed');
+    } finally {
+      segRegenPreviewLoading = false;
+    }
+  }
+
+  function runSegmentOneGoRegenerate() {
+    const secs = ((segRegenRange.endMs - segRegenRange.startMs) / 1000).toFixed(2);
+    showToast(`One-go regenerate queued for ${secs}s segment (backend wiring next)`);
+  }
+
+  function segRegenModalMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-regen-modal-title')) return;
+    segRegenModalDragging = true;
+    segRegenModalDragOffsetX = e.clientX - segRegenModalX;
+    segRegenModalDragOffsetY = e.clientY - segRegenModalY;
+    window.addEventListener('mousemove', segRegenModalMouseMove);
+    window.addEventListener('mouseup', segRegenModalMouseUp);
+    e.preventDefault();
+  }
+
+  function segRegenModalMouseMove(e) {
+    if (!segRegenModalDragging) return;
+    segRegenModalX = Math.max(0, Math.min(window.innerWidth - 410, e.clientX - segRegenModalDragOffsetX));
+    segRegenModalY = Math.max(0, Math.min(window.innerHeight - 300, e.clientY - segRegenModalDragOffsetY));
+  }
+
+  function segRegenModalMouseUp() {
+    segRegenModalDragging = false;
+    window.removeEventListener('mousemove', segRegenModalMouseMove);
+    window.removeEventListener('mouseup', segRegenModalMouseUp);
   }
 
   function handleGlobalClick(e) {
@@ -5435,7 +5769,7 @@
     loopStartBeat = startBeat;
     loopEndBeat = startBeat + BEATS_PER_QUARTER;
     loopEnabled = true;
-    console.log(`[Loop] Created loop: beat ${loopStartBeat} → ${loopEndBeat}`);
+    console.log(`[Loop] Created loop: beat ${loopStartBeat} → ${loopEndBeat} | ms ${(beatToTime(loopStartBeat) * 1000).toFixed(1)} → ${(beatToTime(loopEndBeat) * 1000).toFixed(1)} | sec ${beatToTime(loopStartBeat).toFixed(3)} → ${beatToTime(loopEndBeat).toFixed(3)}`);
     draw();
   }
 
@@ -5684,6 +6018,8 @@
     window.removeEventListener('mousemove', handleMouseMove);
     window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('blur', handleMouseUp);
+    window.removeEventListener('mousemove', segRegenModalMouseMove);
+    window.removeEventListener('mouseup', segRegenModalMouseUp);
     stopMic();
   });
 
@@ -6394,6 +6730,9 @@
           <button class="ctx-item" on:click={() => armSegmentRecording(seg.id)}>
             🎙 Record over this segment
           </button>
+          <button class="ctx-item" on:click={() => openSegmentRegenerateFromCleanup(seg)}>
+            🧠 Regenerate Notes In Segment
+          </button>
           {#if isPatchedSeg}
             <button class="ctx-item" on:click={() => emptyRecordedCleanupSegment(seg.id)}>
               🧼 Make Segment Empty
@@ -6434,6 +6773,11 @@
         <button class="ctx-item" on:click={() => addCleanupSegmentAtMs(contextMenu.ms ?? 0)}>
           🧹 Add Cleanup Segment
         </button>
+        {#if isBeatInsideActiveLoop(contextMenu.beat)}
+          <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
+            🧠 Segment AI (Loop Range)
+          </button>
+        {/if}
         {#if joinPair}
           <button class="ctx-item" on:click={() => joinCleanupSegments(joinPair.left.id, joinPair.right.id)}>
             🔗 Join Adjacent Cleanup Segments
@@ -6487,6 +6831,11 @@
         <button class="ctx-item" on:click={() => addFlagAt(contextMenu.beat)}>
           🚩 Add Flag
         </button>
+        {#if isBeatInsideActiveLoop(contextMenu.beat)}
+          <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
+            🧠 Segment AI (Loop Range)
+          </button>
+        {/if}
         {#if clipboard}
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={() => { finalizePaste(contextMenu.beat); closeContextMenu(); }}>
@@ -6652,6 +7001,129 @@
           <button class="btn btn-secondary" on:click={() => showTextEditor = false}>Cancel</button>
           <button class="btn btn-primary" on:click={applyTextEditorContent}>Apply Changes</button>
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if segRegenModalOpen}
+    <div
+      class="seg-regen-modal"
+      style="left:{segRegenModalX}px;top:{segRegenModalY}px"
+      on:mousedown={segRegenModalMouseDown}
+      role="dialog"
+      aria-label="Segment regenerate"
+    >
+      <div class="seg-regen-modal-title">🧠 Segment Regenerate</div>
+      <div class="seg-regen-modal-subtitle">
+        {segRegenRange.sourceType === 'cleanup' ? 'Cleanup Segment' : 'Loop Range'}
+        · {formatTime(segRegenRange.startMs / 1000)} → {formatTime(segRegenRange.endMs / 1000)}
+        ({formatTime((segRegenRange.endMs - segRegenRange.startMs) / 1000)})
+        {#if segRegenRange.sourceType === 'loop' && hasActiveLoopRange()}
+          · beats {Math.min(loopStartBeat, loopEndBeat).toFixed(2)} → {Math.max(loopStartBeat, loopEndBeat).toFixed(2)}
+        {/if}
+      </div>
+
+      <div class="seg-regen-mode-row">
+        <button class="tool-btn sm" class:active={segRegenMode === 'lyrics_first'} on:click={() => segRegenMode = 'lyrics_first'}>
+          Lyrics-first
+        </button>
+        <button class="tool-btn sm" class:active={segRegenMode === 'one_go'} on:click={() => segRegenMode = 'one_go'}>
+          One-go
+        </button>
+      </div>
+
+      <div class="seg-regen-options-grid">
+        <label>
+          Language
+          <select class="mic-select" bind:value={segRegenLanguage}>
+            <option value="auto">Auto</option>
+            <option value="en">English</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+            <option value="it">Italian</option>
+          </select>
+        </label>
+        <label>
+          Preset
+          <select class="mic-select" bind:value={segRegenPreset}>
+            <option value="fast">Fast</option>
+            <option value="balanced">Balanced</option>
+            <option value="accurate">Accurate</option>
+          </select>
+        </label>
+        <label>
+          Audio Source
+          <select class="mic-select" bind:value={segRegenAudioSource}>
+            <option value="current">Current ({audioSource})</option>
+            <option value="vocals">Vocals</option>
+            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited</option>
+          </select>
+        </label>
+      </div>
+
+      {#if segRegenMode === 'lyrics_first'}
+        <div class="seg-regen-mode-help">
+          Step 1: recognize local lyrics on an isolated clip and preview confidence.
+          Step 2: continue to note generation only if text is correct.
+        </div>
+        <label class="seg-regen-toggle">
+          <input type="checkbox" bind:checked={segRegenAutoHyphenate} />
+          Auto-hyphenate after preview
+        </label>
+        <div class="seg-regen-actions">
+          <button class="btn btn-primary" on:click={previewSegmentLyrics} disabled={segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}>Preview Lyrics</button>
+          <button
+            class="btn"
+            disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+            on:click={async () => {
+              if (segRegenPreviewLines.length === 0) {
+                showToast('Run Preview Lyrics first');
+                return;
+              }
+              segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines);
+            }}
+          >Hyphenate</button>
+          <button
+            class="btn"
+            disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+            on:click={generateNotesFromSegmentPreview}
+          >{segRegenGenerateLoading ? 'Generating...' : 'Generate Notes'}</button>
+        </div>
+        <div class="seg-regen-preview">
+          {#if segRegenPreviewLoading}
+            <div class="seg-regen-preview-state">Recognizing lyrics...</div>
+          {:else if segRegenHyphenateLoading}
+            <div class="seg-regen-preview-state">Applying hyphenation...</div>
+          {:else if segRegenPreviewError}
+            <div class="seg-regen-preview-error">{segRegenPreviewError}</div>
+          {:else if segRegenPreviewLines.length > 0}
+            <div class="seg-regen-preview-head">
+              <span>Preview {segRegenPreviewHyphenated ? '(hyphenated)' : '(raw)'}</span>
+              {#if segRegenPreviewConfidence !== null}
+                <span>Conf {(segRegenPreviewConfidence * 100).toFixed(0)}%</span>
+              {/if}
+            </div>
+            <div class="seg-regen-preview-body">
+              {#each segRegenPreviewLines as line}
+                <div class="seg-regen-preview-line">{line}</div>
+              {/each}
+            </div>
+          {:else}
+            <div class="seg-regen-preview-state">No preview yet.</div>
+          {/if}
+        </div>
+      {:else}
+        <div class="seg-regen-mode-help">
+          Runs full local pipeline in one go (replace notes in selected range).
+          Existing notes in range will be replaced after snapshot.
+        </div>
+        <div class="seg-regen-actions">
+          <button class="btn btn-primary" on:click={runSegmentOneGoRegenerate}>Run One-Go Regenerate</button>
+        </div>
+      {/if}
+
+      <div class="seg-regen-footer">
+        <button class="btn" on:click={closeSegmentRegenerateModal}>Close</button>
       </div>
     </div>
   {/if}
@@ -8260,10 +8732,6 @@
     -webkit-appearance: none;
   }
 
-  .mic-select:focus {
-    /* outline: 1px solid #4fc3f7; */
-  }
-
   .mic-opt {
     font-size: 12px;
     color: #ccc;
@@ -8417,6 +8885,129 @@
     justify-content: flex-end;
     gap: 0.75rem;
     margin-top: 1rem;
+  }
+
+  .seg-regen-modal {
+    position: fixed;
+    z-index: 9050;
+    width: 390px;
+    cursor: default;
+    background: #111c22;
+    border: 2px solid #2b7084;
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 22px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .seg-regen-modal-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #b6e8ff;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .seg-regen-modal-subtitle {
+    font-size: 0.78rem;
+    color: #8cc7da;
+    font-family: monospace;
+  }
+
+  .seg-regen-mode-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .seg-regen-options-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .seg-regen-options-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.75rem;
+    color: #8ab8c7;
+  }
+
+  .seg-regen-mode-help {
+    font-size: 0.77rem;
+    color: #9ab5bf;
+    line-height: 1.35;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(139, 197, 214, 0.2);
+    border-radius: 6px;
+    padding: 7px 8px;
+  }
+
+  .seg-regen-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.77rem;
+    color: #9ec1cd;
+    user-select: none;
+  }
+
+  .seg-regen-toggle input {
+    accent-color: #4fc3f7;
+  }
+
+  .seg-regen-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .seg-regen-preview {
+    border: 1px solid rgba(139, 197, 214, 0.25);
+    border-radius: 6px;
+    background: rgba(7, 13, 16, 0.75);
+    padding: 8px;
+    min-height: 82px;
+  }
+
+  .seg-regen-preview-head {
+    display: flex;
+    justify-content: space-between;
+    color: #8cc7da;
+    font-size: 0.74rem;
+    margin-bottom: 6px;
+  }
+
+  .seg-regen-preview-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 120px;
+    overflow: auto;
+  }
+
+  .seg-regen-preview-line {
+    color: #d5e7ee;
+    font-size: 0.8rem;
+    line-height: 1.25;
+  }
+
+  .seg-regen-preview-state {
+    color: #8faab5;
+    font-size: 0.78rem;
+  }
+
+  .seg-regen-preview-error {
+    color: #ff9f9f;
+    font-size: 0.78rem;
+    line-height: 1.25;
+  }
+
+  .seg-regen-footer {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .btn {

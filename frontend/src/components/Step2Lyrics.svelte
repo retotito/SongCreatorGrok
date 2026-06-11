@@ -122,6 +122,7 @@
   let whisperFallbackWarning = false;
   let transcribeAbortController = null;
   let transcribeTicker = null;
+  const transcribeModelPreset = 'balanced';
 
   // Cleanup segments
   let cleanupSegments = [];
@@ -167,7 +168,7 @@
       transcribePhase = 'transcribing';
       transcribeStatus = 'Transcribing cleaned vocals with Whisper…';
       startTranscribeTicker();
-      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, true);
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, true, transcribeModelPreset);
       stopTranscribeTicker();
       lyricsText = result.text;
       transcribeInfo = result;
@@ -274,7 +275,7 @@
       transcribePhase = 'transcribing';
       transcribeStatus = 'Transcribing vocals with Whisper…';
       startTranscribeTicker();
-      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal);
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, false, transcribeModelPreset);
       stopTranscribeTicker();
       console.log('[Step2] Whisper result:', result);
       lyricsText = result.text;

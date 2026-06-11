@@ -173,6 +173,116 @@ def _safe_unlink_download_name(name: str):
     _safe_unlink(os.path.join(DOWNLOADS_DIR, os.path.basename(name)))
 
 
+def _cleanup_session_temp_dir(session_id: str, max_age_sec: int = 3600):
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    if not os.path.isdir(temp_dir):
+        return
+    now = time.time()
+    for name in os.listdir(temp_dir):
+        path = os.path.join(temp_dir, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            age = now - os.path.getmtime(path)
+            if age > max_age_sec:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _resolve_segment_audio_source(session: dict, audio_source: str) -> tuple[str, str]:
+    result = session.get("result") or {}
+    src = (audio_source or "vocals").lower()
+
+    if src == "edited":
+        # Prefer cleaned vocals when present, otherwise use patched vocal timeline.
+        path = result.get("cleaned_vocal_path") or session.get("vocal_audio")
+        return path, "edited"
+
+    if src == "original":
+        return session.get("original_audio"), "original"
+
+    # 'vocals' should reflect the unedited demucs baseline when available.
+    return session.get("original_demucs_vocal") or session.get("vocal_audio"), "vocals"
+
+
+def _extract_segment_clip_to_wav(source_path: str, start_ms: float, end_ms: float, out_path: str):
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    start_sec = max(0.0, float(start_ms) / 1000.0)
+    duration_sec = max(0.05, (float(end_ms) - float(start_ms)) / 1000.0)
+
+    # Load only the requested range to keep memory bounded.
+    clip, sr = librosa.load(source_path, sr=None, mono=False, offset=start_sec, duration=duration_sec)
+    if clip is None:
+        raise ServiceError("Segment extraction failed", "Failed to decode source audio clip")
+    if getattr(clip, "size", 0) == 0:
+        raise ServiceError("Segment extraction failed", "Selected range produced an empty clip")
+    if clip.ndim == 1:
+        clip = np.expand_dims(clip, axis=0)
+
+    sf.write(out_path, clip.T, sr, subtype="PCM_16")
+
+
+def _transcribe_preview_clip(audio_path: str, language: str = "en") -> tuple[list[str], Optional[float], str]:
+    lang = (language or "en").strip().lower()
+    whisper_lang = None if lang in ("", "auto") else lang
+
+    # Try WhisperX first to match the main alignment stack.
+    try:
+        import whisperx
+
+        device = "cpu"
+        compute_type = "int8"
+        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        audio = whisperx.load_audio(audio_path)
+        result = model.transcribe(audio, batch_size=4, language=whisper_lang)
+        segments = result.get("segments", []) or []
+
+        lines = [str(seg.get("text", "")).strip() for seg in segments if str(seg.get("text", "")).strip()]
+        scores = [seg.get("avg_logprob") for seg in segments if isinstance(seg.get("avg_logprob"), (int, float))]
+        confidence = None
+        if scores:
+            # avg_logprob is <= 0 in practice; exp maps to [0, 1].
+            vals = [math.exp(min(0.0, float(v))) for v in scores]
+            confidence = float(sum(vals) / len(vals))
+
+        return lines, confidence, "whisperx"
+    except Exception as wx_err:
+        log_step("SEGMENT_PREVIEW", f"WhisperX preview failed, fallback to Whisper: {wx_err}")
+
+    try:
+        import whisper
+
+        model = whisper.load_model("medium")
+        result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=False)
+        segments = result.get("segments", []) or []
+
+        lines = [str(seg.get("text", "")).strip() for seg in segments if str(seg.get("text", "")).strip()]
+        scores = [seg.get("avg_logprob") for seg in segments if isinstance(seg.get("avg_logprob"), (int, float))]
+        confidence = None
+        if scores:
+            vals = [math.exp(min(0.0, float(v))) for v in scores]
+            confidence = float(sum(vals) / len(vals))
+
+        return lines, confidence, "whisper"
+    except Exception as w_err:
+        raise ServiceError("Lyrics preview failed", f"Transcription unavailable: {w_err}")
+
+
+def _resolve_transcribe_model_name(model_preset: str) -> str:
+    """Map UI preset name to Whisper model size."""
+    preset = (model_preset or "balanced").strip().lower()
+    if preset == "fast":
+        return "small"
+    if preset == "balanced":
+        return "medium"
+    # default and unknown values use highest quality
+    return "large-v3"
+
+
 def safe_json(data):
     """Round-trip through JSON with default=str to sanitize numpy types etc."""
     return json.loads(json.dumps(data, default=str))
@@ -1333,6 +1443,331 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
     return FileResponse(path, filename=download_name, headers={'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store'})
 
 
+@app.post("/api/segment-preview/{session_id}")
+async def segment_preview(session_id: str, request: Request):
+    """Transcribe an isolated local clip for Step4 segment preview.
+
+    Request JSON:
+      - start_ms, end_ms
+      - language (optional, e.g. en/de/auto)
+      - audio_source (optional: vocals|edited|original)
+      - source_type (optional: cleanup|loop)
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    try:
+        start_ms = float(body.get("start_ms"))
+        end_ms = float(body.get("end_ms"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+
+    duration_ms = end_ms - start_ms
+    if duration_ms > 180000:  # safety: 3 minutes max per local preview
+        raise HTTPException(status_code=400, detail="Selected range is too long for preview (max 180s)")
+
+    language = str(body.get("language") or "en")
+    source_type = str(body.get("source_type") or "loop")
+    requested_source = str(body.get("audio_source") or "vocals")
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, requested_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{requested_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"segment_preview_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+        lines, confidence, engine = _transcribe_preview_clip(clip_path, language=language)
+        if not lines:
+            lines = ["(no speech recognized)"]
+
+        log_step(
+            "SEGMENT_PREVIEW",
+            f"Session {session_id}: {source_type} {start_ms:.0f}-{end_ms:.0f}ms src={resolved_source} -> {len(lines)} line(s) via {engine}",
+        )
+
+        return {
+            "status": "ok",
+            "lyrics_lines": lines,
+            "confidence": confidence,
+            "engine": engine,
+            "source_type": source_type,
+            "audio_source": resolved_source,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "duration_ms": round(duration_ms, 1),
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
+def _transcribe_clip_for_alignment(audio_path: str, language: str = "en") -> tuple:
+    """Transcribe a short clip and return word-level (and optionally char-level) timestamps.
+
+    Returns:
+        (whisper_words, whisper_chars)
+        whisper_words: list of {word, start, end, score}  — clip-relative seconds
+        whisper_chars: list of {char, start, end}          — empty if unavailable
+    """
+    lang = (language or "en").strip().lower()
+    whisper_lang = None if lang in ("", "auto") else lang
+
+    try:
+        import whisperx
+
+        device = "cpu"
+        compute_type = "int8"
+        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        audio = whisperx.load_audio(audio_path)
+        result = model.transcribe(audio, batch_size=4, language=whisper_lang)
+        segments = result.get("segments", []) or []
+
+        try:
+            align_model, align_metadata = whisperx.load_align_model(
+                language_code=result.get("language", whisper_lang or "en"),
+                device=device,
+            )
+            aligned = whisperx.align(
+                segments, align_model, align_metadata, audio, device, return_char_alignments=True
+            )
+            whisper_words = [
+                {
+                    "word": w.get("word", "").strip(),
+                    "start": round(w.get("start", 0), 4),
+                    "end": round(w.get("end", 0), 4),
+                    "score": round(w.get("score", 0), 4),
+                }
+                for w in aligned.get("word_segments", [])
+            ]
+            whisper_chars = []
+            for seg in aligned.get("segments", []):
+                for w in seg.get("words", []):
+                    for ch in w.get("chars", []):
+                        if ch.get("start") is not None and ch.get("end") is not None:
+                            whisper_chars.append(
+                                {"char": ch.get("char", ""), "start": round(ch["start"], 4), "end": round(ch["end"], 4)}
+                            )
+            return whisper_words, whisper_chars
+        except Exception as align_err:
+            log_step("SEG_GEN", f"Forced char alignment failed: {align_err}, using word timestamps only")
+            whisper_words = [
+                {
+                    "word": w.get("word", "").strip(),
+                    "start": round(w.get("start", 0), 4),
+                    "end": round(w.get("end", 0), 4),
+                    "score": 0.0,
+                }
+                for seg in segments
+                for w in seg.get("words", [])
+            ]
+            return whisper_words, []
+    except Exception as wx_err:
+        log_step("SEG_GEN", f"WhisperX unavailable ({wx_err}), trying vanilla Whisper")
+
+    try:
+        import whisper
+
+        model = whisper.load_model("medium")
+        result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=True)
+        segments = result.get("segments", []) or []
+        whisper_words = [
+            {
+                "word": (w.get("word") or "").strip(),
+                "start": round(w.get("start", 0), 4),
+                "end": round(w.get("end", 0), 4),
+                "score": round(w.get("probability", 0), 4),
+            }
+            for seg in segments
+            for w in seg.get("words", [])
+        ]
+        return whisper_words, []
+    except Exception as w_err:
+        raise ServiceError("Segment generation failed", f"Transcription unavailable: {w_err}")
+
+
+@app.post("/api/segment-generate/{session_id}")
+async def segment_generate(session_id: str, request: Request):
+    """Generate Ultrastar notes for a local time range from user-confirmed (hyphenated) lyrics.
+
+    Request JSON:
+      - start_ms, end_ms        — time range in the session audio
+      - lyrics                  — hyphenated plain text (newline-separated lines)
+      - language                — ISO code, default "en"
+      - audio_source            — "vocals" | "edited" | "original"
+
+    Returns:
+      - notes                   — array of note objects ready to splice into the editor
+      - syllable_timings        — absolute-time timings for rawTimings sync (optional)
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise HTTPException(status_code=400, detail="No generation result — run generation first")
+
+    body = await request.json()
+    try:
+        start_ms = float(body["start_ms"])
+        end_ms = float(body["end_ms"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+    if (end_ms - start_ms) > 180_000:
+        raise HTTPException(status_code=400, detail="Range too long for segment generate (max 180s)")
+
+    lyrics = str(body.get("lyrics") or "").strip()
+    if not lyrics:
+        raise HTTPException(status_code=400, detail="lyrics is required")
+
+    language = str(body.get("language") or "en")
+    audio_source = str(body.get("audio_source") or "vocals")
+
+    bpm = float(result["bpm"])
+    gap_ms = float(result["gap_ms"])
+    gap_sec = gap_ms / 1000.0
+    offset_sec = start_ms / 1000.0
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, audio_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{audio_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"seg_gen_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+
+        # Transcribe clip to get word/char timestamps (clip-relative, starting at 0)
+        whisper_words, whisper_chars = _transcribe_clip_for_alignment(clip_path, language)
+
+        # Pitch detection on the clip (clip-relative times)
+        from services.pitch_detection import detect_pitches, get_pitch_for_segment
+        pitch_data = detect_pitches(clip_path)
+
+        # Align hyphenated lyrics to ASR word timestamps
+        from services.alignment_whisper import align_whisper
+        from services.alignment import align_lyrics_to_audio
+
+        syllable_timings = None
+        if whisper_words:
+            syllable_timings = align_whisper(
+                lyrics,
+                whisper_words,
+                language,
+                char_timestamps=whisper_chars or None,
+                audio_path=clip_path,
+            )
+
+        if not syllable_timings:
+            log_step("SEG_GEN", "Falling back to energy-based alignment for segment")
+            syllable_timings = align_lyrics_to_audio(clip_path, lyrics, language)
+
+        log_step(
+            "SEG_GEN",
+            f"Session {session_id}: {start_ms:.0f}–{end_ms:.0f}ms → {len(syllable_timings)} syllables, "
+            f"bpm={bpm}, gap={gap_ms}ms, src={resolved_source}",
+        )
+
+        # Build note objects (IDs are 0-based within this batch; frontend re-IDs on merge)
+        notes = []
+        note_id = 0
+        prev_line_index = None
+        last_end_beat = -1
+
+        for timing in syllable_timings:
+            abs_start = timing["start"] + offset_sec
+            abs_end = timing["end"] + offset_sec
+            line_index = timing.get("line_index", 0)
+            is_rap = timing.get("is_rap", False)
+
+            # Insert break between lyric lines
+            if prev_line_index is not None and line_index != prev_line_index:
+                break_start_beat = last_end_beat + 2
+                next_beat = max(break_start_beat + 1, int(((abs_start - gap_sec) * bpm) / 15))
+                break_end_beat = max(break_start_beat + 1, next_beat - 2)
+                notes.append(
+                    {"id": note_id, "type": "break", "startBeat": break_start_beat, "endBeat": break_end_beat}
+                )
+                note_id += 1
+                last_end_beat = break_start_beat
+
+            start_beat = max(0, int(((abs_start - gap_sec) * bpm) / 15))
+            end_beat = max(start_beat + 1, int(((abs_end - gap_sec) * bpm) / 15))
+            duration = max(1, end_beat - start_beat)
+
+            if start_beat <= last_end_beat and notes:
+                start_beat = last_end_beat + 1
+                end_beat = max(start_beat + 1, end_beat)
+                duration = max(1, end_beat - start_beat)
+
+            # Pitch from clip-relative times
+            if is_rap:
+                pitch = 0
+            else:
+                pitch = get_pitch_for_segment(pitch_data, timing["start"], timing["end"])
+                if pitch == 0:
+                    mid = (timing["start"] + timing["end"]) / 2
+                    pitch = get_pitch_for_segment(pitch_data, mid - 0.1, mid + 0.1)
+                if pitch == 0:
+                    pitch = 60  # C4 fallback
+
+            notes.append(
+                {
+                    "id": note_id,
+                    "startBeat": start_beat,
+                    "duration": duration,
+                    "pitch": pitch,
+                    "syllable": timing["syllable"],
+                    "isRap": is_rap,
+                    "confidence": timing.get("confidence", 1.0),
+                    "original": {"startBeat": start_beat, "duration": duration, "pitch": pitch},
+                }
+            )
+            note_id += 1
+            last_end_beat = start_beat + duration
+            prev_line_index = line_index
+
+        # Absolute-time syllable timings for frontend rawTimings sync
+        abs_timings = [
+            {**t, "start": round(t["start"] + offset_sec, 4), "end": round(t["end"] + offset_sec, 4)}
+            for t in syllable_timings
+        ]
+
+        return {
+            "status": "ok",
+            "notes": notes,
+            "syllable_timings": abs_timings,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "audio_source": resolved_source,
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
 # ────────────────────────────────────────────────────────────
 # Step 2a: WhisperX ASR Transcription + Forced Alignment
 # ────────────────────────────────────────────────────────────
@@ -1347,7 +1782,7 @@ async def cancel_transcribe(session_id: str):
 
 
 @app.get("/api/transcribe-stream/{session_id}")
-async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: bool = False):
+async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: bool = False, model_preset: str = "balanced"):
     """SSE stream for transcription — keeps connection alive during long Whisper runs."""
     # Normalize full language names to ISO codes (e.g. "English" -> "en")
     _LANG_MAP = {
@@ -1400,7 +1835,8 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
                 "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
                 "zh": "Chinese",
             }
-            log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
+            model_name = _resolve_transcribe_model_name(model_preset)
+            log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language}, preset={model_preset}, model={model_name})...")
 
             # Try WhisperX first
             try:
@@ -1408,7 +1844,6 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
                 import torch
                 device = "cpu"
                 compute_type = "int8"
-                model_name = "medium"
                 log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
                 model = whisperx.load_model(model_name, device, compute_type=compute_type)
                 log_step("WHISPERX", "Loading audio...")
@@ -1458,7 +1893,6 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
             # Fallback: vanilla Whisper
             try:
                 import whisper
-                model_name = "medium"
                 log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
                 model = whisper.load_model(model_name)
                 log_step("WHISPER", "Running transcription...")
@@ -1518,7 +1952,7 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
 
 
 @app.post("/api/transcribe/{session_id}")
-def transcribe_audio(session_id: str, language: str = Form("en")):
+def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: str = Form("balanced")):
     """Transcribe vocal audio using WhisperX with phoneme-level forced alignment.
     
     WhisperX provides ~50ms word boundaries (vs ~200ms for vanilla Whisper)
@@ -1544,7 +1978,8 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
         "zh": "Chinese",
     }
     
-    log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
+    model_name = _resolve_transcribe_model_name(model_preset)
+    log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language}, preset={model_preset}, model={model_name})...")
     
     # --- Try WhisperX first (phoneme-level forced alignment) ---
     try:
@@ -1553,8 +1988,6 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
         
         device = "cpu"  # MPS has limited WhisperX support
         compute_type = "int8"  # Efficient for CPU
-        model_name = "medium"
-        
         log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
         model = whisperx.load_model(model_name, device, compute_type=compute_type)
         
@@ -1688,7 +2121,6 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
     try:
         import whisper
         
-        model_name = "medium"
         log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
         model = whisper.load_model(model_name)
         
