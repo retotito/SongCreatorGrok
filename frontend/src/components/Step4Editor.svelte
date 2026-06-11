@@ -5307,6 +5307,48 @@
 </script>
 
 <div class="step-content">
+  {#if segRecPhase !== 'idle'}
+    {@const seg = cleanupSegments.find(s => s.id === segRecSegmentId)}
+    <div class="seg-rec-modal" class:seg-rec-recording={segRecPhase === 'recording'}>
+      <div class="seg-rec-modal-title">
+        {#if segRecPhase === 'armed'}
+          🎙 Record over segment
+        {:else if segRecPhase === 'preroll'}
+          ⏱ Get ready…
+        {:else if segRecPhase === 'recording'}
+          🔴 Recording
+        {:else if segRecPhase === 'review'}
+          ✅ Review
+        {/if}
+      </div>
+      <div class="seg-rec-modal-info">
+        {seg ? `${(seg.startMs/1000).toFixed(1)}s – ${(seg.endMs/1000).toFixed(1)}s  (${((seg.endMs - seg.startMs)/1000).toFixed(1)}s)` : ''}
+      </div>
+      {#if segRecPhase === 'preroll'}
+        <div class="seg-rec-countdown">{segRecCountdown}</div>
+      {/if}
+      {#if segRecPhase === 'review' && segRecObjectUrl}
+        <audio controls src={segRecObjectUrl} style="width:100%;margin:6px 0;"></audio>
+      {/if}
+      <div class="seg-rec-modal-actions">
+        {#if segRecPhase === 'armed'}
+          <button class="tool-btn sm active" on:click={startSegmentRecording}>▶ Start</button>
+          <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
+        {:else if segRecPhase === 'recording'}
+          <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
+        {:else if segRecPhase === 'review'}
+          <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading}>
+            {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
+          </button>
+          <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
+          <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
+        {/if}
+      </div>
+      {#if segRecPhase === 'armed'}
+        <div class="seg-rec-hint">Loop is set — practice, then hit Start when ready.</div>
+      {/if}
+    </div>
+  {/if}
   {#if isRegeneratingCleaned}
     <div class="loading-modal-overlay" style="z-index:9999">
       <div class="loading-modal">
@@ -5373,38 +5415,6 @@
       {/if}
     </div> -->
     <div class="toolbar-toolset-wrapper">
-      {#if segRecPhase !== 'idle'}
-        {@const seg = cleanupSegments.find(s => s.id === segRecSegmentId)}
-        <div class="seg-rec-panel" class:seg-rec-recording={segRecPhase === 'recording'}>
-          <span class="seg-rec-label">
-            {#if segRecPhase === 'armed'}
-              🎙 Ready — {seg ? `${(seg.startMs/1000).toFixed(1)}s → ${(seg.endMs/1000).toFixed(1)}s` : ''}
-            {:else if segRecPhase === 'preroll'}
-              ⏱ Recording in {segRecCountdown}…
-            {:else if segRecPhase === 'recording'}
-              🔴 Recording…
-            {:else if segRecPhase === 'review'}
-              ✅ Review recording
-            {/if}
-          </span>
-          {#if segRecPhase === 'armed'}
-            <button class="tool-btn sm active" on:click={startSegmentRecording}>▶ Start Recording</button>
-            <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
-            <span class="seg-rec-hint">Loop to practice, then hit Start</span>
-          {:else if segRecPhase === 'recording'}
-            <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
-          {:else if segRecPhase === 'review'}
-            {#if segRecObjectUrl}
-              <audio controls src={segRecObjectUrl} style="height:28px;max-width:220px;"></audio>
-            {/if}
-            <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading}>
-              {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
-            </button>
-            <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
-            <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
-          {/if}
-        </div>
-      {/if}
       <div id="mic-controls-wrapper">
         <button class="tool-btn" class:active={micEnabled} on:click={() => {
           micEnabled = !micEnabled;
@@ -6584,21 +6594,62 @@
     margin-left: 6px;
   }
 
-  .seg-rec-panel {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
+  .seg-rec-modal {
+    position: fixed;
+    top: 80px;
+    left: 16px;
+    z-index: 9000;
+    width: 260px;
     background: #1a2a1a;
-    border: 1px solid #3a7a3a;
-    border-radius: 6px;
-    flex-wrap: wrap;
+    border: 2px solid #3a7a3a;
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
-  .seg-rec-panel.seg-rec-recording {
+  .seg-rec-modal.seg-rec-recording {
     background: #2a1010;
     border-color: #c03030;
     animation: rec-pulse 1s ease-in-out infinite;
+  }
+
+  .seg-rec-modal-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #e0e0e0;
+  }
+
+  .seg-rec-modal-info {
+    font-size: 0.8rem;
+    color: #9cba9c;
+    font-family: monospace;
+  }
+
+  .seg-rec-countdown {
+    font-size: 2.5rem;
+    font-weight: 900;
+    color: #f0c040;
+    text-align: center;
+    line-height: 1;
+  }
+
+  .seg-rec-modal-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .seg-rec-hint {
+    font-size: 0.75rem;
+    color: #778;
+    font-style: italic;
+  }
+
+  .seg-rec-panel {
+    display: none; /* legacy — replaced by modal */
   }
 
   @keyframes rec-pulse {
