@@ -5332,6 +5332,13 @@
       const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
       currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
       console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
+      // Explicitly reload the audio element — Svelte reactive src binding updates the
+      // attribute but the browser does not re-fetch/re-buffer unless load() is called.
+      await tick();
+      if (audioEl && currentAudioUrl) {
+        if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
+        audioEl.load();
+      }
       computeTotalBeats();
 
       // Position playhead and scroll at GAP (song start) — unless we have a saved scroll position
@@ -5356,9 +5363,8 @@
       loadFlags();
 
       // Load waveform for the active audio source
-      const activeAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
-      if (activeAudioUrl) {
-        loadWaveform(activeAudioUrl);
+      if (currentAudioUrl) {
+        loadWaveform(currentAudioUrl);
       }
 
       updatePitchRange();
