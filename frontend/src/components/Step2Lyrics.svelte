@@ -139,7 +139,7 @@
 
   // Load cleanup segments from editor when entering Step 2
   async function loadCleanupSegments() {
-    if (!$sessionId) return;
+    if (!$sessionId || !$generationResult) return; // no result yet — nothing to load
     try {
       const editorData = await getEditorData($sessionId);
       const newSegments = editorData.cleanup_segments || [];
