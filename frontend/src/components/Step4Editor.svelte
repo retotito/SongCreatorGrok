@@ -145,6 +145,8 @@
   let cleanupSegmentIdCounter = 1;
   let selectedCleanupSegment = null;
   let cleanupDrag = null; // { id, mode, startMs, endMs, mouseStartMs }
+  const cleanupJoinMaxGapMs = 150;
+  let cleanupSegmentsHavePatchedMetadata = false;
 
   function loadFlags() {
     if (!$sessionId) return;
@@ -189,9 +191,22 @@
     return { ...seg, startMs, endMs };
   }
 
+  function findCleanupOverlap(startMs, endMs, excludeId = null) {
+    const rangeStart = Math.min(startMs, endMs);
+    const rangeEnd = Math.max(startMs, endMs);
+    return cleanupSegments.find(seg => {
+      if (excludeId !== null && seg.id === excludeId) return false;
+      return rangeStart < seg.endMs && rangeEnd > seg.startMs;
+    }) || null;
+  }
+
   function serializeCleanupSegments() {
     return cleanupSegments
-      .map(s => ({ start_ms: s.startMs, end_ms: s.endMs }))
+      .map(s => ({
+        start_ms: s.startMs,
+        end_ms: s.endMs,
+        patched: segRecPatched.has(s.id),
+      }))
       .sort((a, b) => a.start_ms - b.start_ms);
   }
 
@@ -205,6 +220,8 @@
 
   function setCleanupSegmentsFromApi(segments = []) {
     const parsed = [];
+    let hasPatchedField = false;
+    const patchedIds = new Set();
     for (const seg of segments) {
       // Support both ms format (new) and beat format (legacy)
       let startMs, endMs;
@@ -217,22 +234,33 @@
         endMs = (beatToTime(Number(seg.end_beat))) * 1000;
       } else continue;
       if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
-      parsed.push(normalizeCleanupSegment({
+      const parsedSeg = normalizeCleanupSegment({
         id: cleanupSegmentIdCounter++,
         startMs,
         endMs,
-      }));
+      });
+      parsed.push(parsedSeg);
+      if (Object.prototype.hasOwnProperty.call(seg || {}, 'patched')) {
+        hasPatchedField = true;
+        if (seg?.patched) patchedIds.add(parsedSeg.id);
+      }
     }
     cleanupSegments = parsed.sort((a, b) => a.startMs - b.startMs);
+    cleanupSegmentsHavePatchedMetadata = hasPatchedField;
+    segRecPatched = hasPatchedField ? patchedIds : new Set();
     selectedCleanupSegment = null;
     cleanupDrag = null;
   }
 
-  function addCleanupSegmentAt(beat) {
+  function addCleanupSegmentAtMs(startMs) {
     pushUndo();
-    const startMs = beatToTime(beat) * 1000;
     const endMs = startMs + Math.max(500, (15000 / bpm));
     const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
+    const overlap = findCleanupOverlap(seg.startMs, seg.endMs);
+    if (overlap) {
+      showToast('Cleanup segments cannot overlap');
+      return;
+    }
     console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${startMs.toFixed(0)} endMs=${endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
     cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
@@ -243,26 +271,45 @@
     handleSave();
   }
 
+  async function restoreSegmentRangeFromSource(startMs, endMs) {
+    const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_ms: startMs, end_ms: endMs })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data?.detail || data?.message || 'Restore request failed');
+    }
+    if (data?.note === 'no original vocal to restore from') {
+      throw new Error('This session has no vocals source baseline to restore from.');
+    }
+    const cacheBust = `?v=${Date.now()}`;
+    vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+    return data;
+  }
+
   async function deleteCleanupSegment(id) {
     const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
     console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1} | wasSpliced=${segRecPatched.has(id)}`);
     pushUndo();
 
-    // If this segment was splice-recorded, restore original audio for that range first
-    if (seg && segRecPatched.has(id)) {
-      try {
-        const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start_ms: seg.startMs, end_ms: seg.endMs })
-        });
-        const data = await resp.json();
-        console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
-        const cacheBust = `?v=${Date.now()}`;
-        vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
-        segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
-      } catch (e) {
-        console.warn('[CleanupSeg] Restore failed:', e);
+    // Always restore source-truth audio for the deleted segment range.
+    try {
+      const data = await restoreSegmentRangeFromSource(seg.startMs, seg.endMs);
+      console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+    } catch (e) {
+      console.warn('[CleanupSeg] Restore failed:', e);
+      const msg = String(e?.message || '');
+      // Fresh/unspliced sessions may not have a saved demucs baseline.
+      // For non-recorded segments, deleting is still safe because no splice was applied.
+      if (!(segRecPatched.has(id) === false && msg.includes('no saved original demucs vocal'))) {
+        showToast(e?.message || 'Failed to restore source audio for this segment');
+        return;
       }
     }
 
@@ -287,10 +334,30 @@
     handleSave();
   }
 
-  function splitCleanupSegment(id, beat) {
+  async function emptyRecordedCleanupSegment(id) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg || !segRecPatched.has(id)) return;
+    pushUndo();
+    try {
+      const data = await restoreSegmentRangeFromSource(seg.startMs, seg.endMs);
+      console.log(`[CleanupSeg] Emptied recorded segment id=${id}:`, data);
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+      cleanedAudioDirty = true;
+      markUnsaved();
+      closeContextMenu();
+      draw();
+      handleSave();
+    } catch (e) {
+      console.warn('[CleanupSeg] Empty recorded segment failed:', e);
+      showToast(e?.message || 'Failed to empty recorded segment');
+    }
+  }
+
+  function splitCleanupSegmentAtMs(id, splitMs) {
     const seg = cleanupSegments.find(s => s.id === id);
     if (!seg) return;
-    const splitMs = beatToTime(beat) * 1000;
     if (splitMs <= seg.startMs + 50 || splitMs >= seg.endMs - 50) {
       showToast('Split point too close to segment edge');
       return;
@@ -320,13 +387,15 @@
     handleSave();
   }
 
-  function getJoinableCleanupPairAtBeat(beat) {
-    const beatMs = beatToTime(beat) * 1000;
+  function getJoinableCleanupPairAtMs(splitMs) {
+    if (!Number.isFinite(splitMs)) return null;
     const sorted = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
     for (let i = 0; i < sorted.length - 1; i++) {
       const left = sorted[i];
       const right = sorted[i + 1];
-      if (beatMs <= left.endMs || beatMs >= right.startMs) continue;
+      if (splitMs <= left.endMs || splitMs >= right.startMs) continue;
+      const gapMs = Math.max(0, right.startMs - left.endMs);
+      if (gapMs > cleanupJoinMaxGapMs) continue;
       const leftPatched = segRecPatched.has(left.id);
       const rightPatched = segRecPatched.has(right.id);
       if (leftPatched !== rightPatched) return null;
@@ -335,10 +404,36 @@
     return null;
   }
 
+  function getJoinableCleanupNeighborsForSegment(id) {
+    const sorted = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
+    const idx = sorted.findIndex(s => s.id === id);
+    if (idx === -1) return { left: null, right: null };
+
+    const curr = sorted[idx];
+    const leftSeg = idx > 0 ? sorted[idx - 1] : null;
+    const rightSeg = idx < sorted.length - 1 ? sorted[idx + 1] : null;
+    const leftGapMs = leftSeg ? Math.max(0, curr.startMs - leftSeg.endMs) : Infinity;
+    const rightGapMs = rightSeg ? Math.max(0, rightSeg.startMs - curr.endMs) : Infinity;
+
+    const left = leftSeg && leftGapMs <= cleanupJoinMaxGapMs && segRecPatched.has(leftSeg.id) === segRecPatched.has(curr.id)
+      ? { left: leftSeg, right: curr }
+      : null;
+    const right = rightSeg && rightGapMs <= cleanupJoinMaxGapMs && segRecPatched.has(rightSeg.id) === segRecPatched.has(curr.id)
+      ? { left: curr, right: rightSeg }
+      : null;
+
+    return { left, right };
+  }
+
   function joinCleanupSegments(leftId, rightId) {
     const left = cleanupSegments.find(s => s.id === leftId);
     const right = cleanupSegments.find(s => s.id === rightId);
     if (!left || !right) return;
+    const gapMs = Math.max(0, right.startMs - left.endMs);
+    if (gapMs > cleanupJoinMaxGapMs) {
+      showToast(`Segments must be touching or within ${cleanupJoinMaxGapMs}ms to join`);
+      return;
+    }
     const leftPatched = segRecPatched.has(left.id);
     const rightPatched = segRecPatched.has(right.id);
     if (leftPatched !== rightPatched) {
@@ -369,16 +464,22 @@
     if (cleanedAudioAvailable) return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
     // Fallback to patched vocal when no cleaned file exists yet.
     if (segRecPatched.size > 0) return vocalUrl;
-    // Last fallback for fresh sessions before first cleaned generation.
-    return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+    // Last fallback should still be a real vocals source, never /cleaned.
+    return originalVocalUrl || vocalUrl;
   }
 
   function nudgeCleanupSegment(id, deltaMs) {
     const seg = cleanupSegments.find(s => s.id === id);
     if (!seg) return;
     pushUndo();
-    seg.startMs += deltaMs;
-    seg.endMs += deltaMs;
+    const nextStartMs = seg.startMs + deltaMs;
+    const nextEndMs = seg.endMs + deltaMs;
+    if (findCleanupOverlap(nextStartMs, nextEndMs, id)) {
+      showToast('Cleanup segments cannot overlap');
+      return;
+    }
+    seg.startMs = nextStartMs;
+    seg.endMs = nextEndMs;
     cleanupSegments = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
     markUnsaved();
     draw();
@@ -415,6 +516,7 @@
     flagId: null,
     cleanupId: null,
     beat: 0,
+    ms: null,
     pitch: 0,
     traceFrame: null,
   };
@@ -772,6 +874,10 @@
     return gapSec + (beat * 15) / bpm;
   }
 
+  function xToAudioMs(x) {
+    return Math.max(0, beatToTime(xToBeat(x)) * 1000);
+  }
+
   // Time to beat conversion
   function timeToBeat(timeSec) {
     const gapSec = gapMs / 1000;
@@ -1036,6 +1142,11 @@
             loadWaveform(newUrl);
           }
         } catch (e) {
+          cleanedAudioAvailable = false;
+          cleanedAudioCacheBust = '';
+          if (audioSource === 'edited') {
+            switchAudioSource('vocals');
+          }
           console.warn('[Step4] Cleaned audio regeneration failed:', e);
         } finally {
           isRegeneratingCleaned = false;
@@ -2136,7 +2247,7 @@
             mode: hit.mode,
             startMs: seg.startMs,
             endMs: seg.endMs,
-            mouseStartMs: beatToTime(xToBeat(mx)) * 1000,
+            mouseStartMs: xToAudioMs(mx),
           };
           draw();
           return;
@@ -2426,7 +2537,7 @@
         cleanupDrag = null;
         return;
       }
-      const mouseMs = beatToTime(xToBeat(mx)) * 1000;
+      const mouseMs = xToAudioMs(mx);
       const msDelta = mouseMs - cleanupDrag.mouseStartMs;
       // Non-overlap clamping: find sorted neighbours once, based on original drag positions
       const CLAMP_GAP = 10; // ms minimum gap between segments
@@ -2724,11 +2835,33 @@
     if (cleanupDrag) {
       const drag = { ...cleanupDrag };
       cleanupDrag = null;
-      draw();
-      // If the dragged segment was spliced and a handle moved inward, restore
-      // the freed audio region from the original demucs vocal before saving.
       const seg = cleanupSegments.find(s => s.id === drag.id);
       if (seg && segRecPatched.has(drag.id)) {
+        const movedSegment = drag.mode === 'move' && (
+          Math.abs(seg.startMs - drag.startMs) > 10 ||
+          Math.abs(seg.endMs - drag.endMs) > 10
+        );
+        const expandedStartOutward = drag.mode === 'start' && seg.startMs < drag.startMs - 10;
+        const expandedEndOutward = drag.mode === 'end' && seg.endMs > drag.endMs + 10;
+
+        if (movedSegment || expandedStartOutward || expandedEndOutward) {
+          console.warn('[SegResize] Reverting unsupported recorded segment transform', {
+            id: drag.id,
+            mode: drag.mode,
+            from: { startMs: drag.startMs, endMs: drag.endMs },
+            to: { startMs: seg.startMs, endMs: seg.endMs },
+          });
+          seg.startMs = drag.startMs;
+          seg.endMs = drag.endMs;
+          cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+          draw();
+          showToast('Recorded segments can only be shrunk inward. Use re-record or make empty to change position.');
+          return;
+        }
+
+        draw();
+        // If the dragged segment was spliced and a handle moved inward, restore
+        // the freed audio region from the original demucs vocal before saving.
         let freedStart = null, freedEnd = null;
         if (drag.mode === 'start' && seg.startMs > drag.startMs + 10) {
           freedStart = drag.startMs;
@@ -2760,6 +2893,7 @@
           return;
         }
       }
+      draw();
       if (cleanedAudioDirty) handleSave();
       return;
     }
@@ -3062,6 +3196,7 @@
         flagId: null,
         cleanupId: null,
         beat,
+        ms: null,
         pitch: 0,
         traceFrame: null,
       };
@@ -3086,6 +3221,7 @@
 
     if (showWaveform && my < waveTop()) {
       const beat = xToBeat(mx);
+      const clickMs = xToAudioMs(mx);
       const hit = hitTestCleanupSegment(mx, my);
       const menuW = 260;
       const menuH = hit ? 180 : 130;
@@ -3107,6 +3243,7 @@
           flagId: null,
           cleanupId: hit.id,
           beat,
+          ms: clickMs,
           pitch: 0,
           traceFrame: null,
         };
@@ -3125,6 +3262,7 @@
           flagId: null,
           cleanupId: null,
           beat,
+          ms: clickMs,
           pitch: 0,
           traceFrame: null,
         };
@@ -3188,6 +3326,7 @@
         flagId: null,
         cleanupId: null,
         beat: clickBeat,
+        ms: null,
         pitch: 0,
         traceFrame: null,
       };
@@ -3248,6 +3387,7 @@
           flagId: flagHit.id,
           cleanupId: null,
           beat: flagHit.beat,
+          ms: null,
           pitch: 0,
           traceFrame: null,
         };
@@ -3266,6 +3406,7 @@
           flagId: null,
           cleanupId: null,
           beat,
+          ms: null,
           pitch,
           traceFrame,
         };
@@ -3288,6 +3429,7 @@
       flagId: null,
       cleanupId: null,
       beat: 0,
+      ms: null,
       pitch: 0,
       traceFrame: null,
     };
@@ -5443,7 +5585,11 @@
       originalVocalUrl = (hasVocalsAudio && data.has_original_demucs)
         ? getAudioUrl($sessionId, 'demucs')
         : vocalUrl;
-      if (data.has_vocal_splice) segRecPatched = new Set(['restored']); // mark as having edits
+      if (data.has_vocal_splice && cleanupSegments.length > 0 && segRecPatched.size === 0 && !cleanupSegmentsHavePatchedMetadata) {
+        // Legacy sessions may not contain per-segment patched flags.
+        // Favor preserving recorded audio by treating existing segments as patched.
+        segRecPatched = new Set(cleanupSegments.map(s => s.id));
+      }
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
       console.log(`[Step4] URLs: vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | originalUrl=${originalUrl}`);
       console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | initial audioSource will be: ${data.has_vocal_splice ? 'edited' : (hasVocalsAudio ? 'vocals' : 'original')}`);
@@ -6233,6 +6379,8 @@
       </div>
     {:else if contextMenu.isCleanup}
       {@const seg = cleanupSegments.find(s => s.id === contextMenu.cleanupId)}
+      {@const isPatchedSeg = seg ? segRecPatched.has(seg.id) : false}
+      {@const joinNeighbors = seg ? getJoinableCleanupNeighborsForSegment(seg.id) : { left: null, right: null }}
       {#if seg}
         <div
           class="context-menu"
@@ -6246,26 +6394,44 @@
           <button class="ctx-item" on:click={() => armSegmentRecording(seg.id)}>
             🎙 Record over this segment
           </button>
-          <button class="ctx-item" on:click={() => splitCleanupSegment(seg.id, contextMenu.beat)}>
+          {#if isPatchedSeg}
+            <button class="ctx-item" on:click={() => emptyRecordedCleanupSegment(seg.id)}>
+              🧼 Make Segment Empty
+            </button>
+          {/if}
+          <button class="ctx-item" on:click={() => splitCleanupSegmentAtMs(seg.id, contextMenu.ms)}>
             ✂️ Split Cleanup Segment
           </button>
+          {#if joinNeighbors.left || joinNeighbors.right}
+            <div class="ctx-divider"></div>
+          {/if}
+          {#if joinNeighbors.left}
+            <button class="ctx-item" on:click={() => joinCleanupSegments(joinNeighbors.left.left.id, joinNeighbors.left.right.id)}>
+              🔗 Join with Previous Segment
+            </button>
+          {/if}
+          {#if joinNeighbors.right}
+            <button class="ctx-item" on:click={() => joinCleanupSegments(joinNeighbors.right.left.id, joinNeighbors.right.right.id)}>
+              🔗 Join with Next Segment
+            </button>
+          {/if}
           <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
             🗑 Delete Cleanup Segment
           </button>
         </div>
       {/if}
     {:else if contextMenu.isWaveformEmpty}
-      {@const joinPair = getJoinableCleanupPairAtBeat(contextMenu.beat)}
+      {@const joinPair = getJoinableCleanupPairAtMs(contextMenu.ms)}
       <div
         class="context-menu"
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
         <div class="ctx-header">
-          <span class="ctx-location-label">Waveform @ beat {contextMenu.beat.toFixed(2)}</span>
+          <span class="ctx-location-label">Waveform @ {((contextMenu.ms ?? 0) / 1000).toFixed(3)}s</span>
         </div>
         <div class="ctx-divider"></div>
-        <button class="ctx-item" on:click={() => addCleanupSegmentAt(contextMenu.beat)}>
+        <button class="ctx-item" on:click={() => addCleanupSegmentAtMs(contextMenu.ms ?? 0)}>
           🧹 Add Cleanup Segment
         </button>
         {#if joinPair}
@@ -6341,6 +6507,18 @@
       bind:this={scrollTrackEl}
       on:pointerdown={onScrollTrackPointerDown}
     >
+      <div class="scrollbar-cleanup-lane" aria-hidden="true">
+        {#each cleanupSegments as seg (seg.id)}
+          {@const startPct = ((timeToBeat(seg.startMs / 1000) - getMinBeat()) / scrollBeatRange * 100)}
+          {@const endPct = ((timeToBeat(seg.endMs / 1000) - getMinBeat()) / scrollBeatRange * 100)}
+          {@const widthPct = Math.max(0.2, endPct - startPct)}
+          <div
+            class="scrollbar-cleanup-seg"
+            class:patched={segRecPatched.has(seg.id)}
+            style="left: {startPct.toFixed(3)}%; width: {widthPct.toFixed(3)}%;"
+          ></div>
+        {/each}
+      </div>
       <!-- playhead tick -->
       {#if !isPlaying}
         <div class="scrollbar-playhead" style="left: {playheadPct}%"></div>
@@ -7284,7 +7462,7 @@
   }
 
   .scrollbar-container {
-    padding: 0;
+    padding: 0 0 3px 0;
     background: #12121e;
     border: 1px solid #333;
     border-top: none;
@@ -7292,21 +7470,42 @@
 
   .scrollbar-track {
     position: relative;
-    height: 18px;
+    height: 38px;
     cursor: pointer;
     /* visible rail in the vertical center */
     background: linear-gradient(
       to bottom,
-      transparent 5px,
-      #1a1a2e      5px,
-      #1a1a2e      11px,
-      transparent  11px
+      transparent 6px,
+      #1a1a2e      6px,
+      #1a1a2e      13px,
+      transparent  13px
     );
+  }
+
+  .scrollbar-cleanup-lane {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 1px;
+    height: 8px;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .scrollbar-cleanup-seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(255, 107, 107, 0.2);
+  }
+
+  .scrollbar-cleanup-seg.patched {
+    background: rgba(100, 220, 100, 0.22);
   }
 
   .scrollbar-handle {
     position: absolute;
-    top: 50%;
+    top: 38%;
     width: 14px;
     height: 14px;
     background: #4fc3f7;
@@ -7315,28 +7514,31 @@
     cursor: grab;
     box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
     pointer-events: none; /* track handles the pointer events */
+    z-index: 4;
   }
 
   .scrollbar-playhead {
     position: absolute;
     top: 0;
-    bottom: 0;
+    bottom: 10px;
     width: 2px;
     background: #ff4444;
     pointer-events: none;
     transform: translateX(-50%);
     opacity: 0.85;
+    z-index: 3;
   }
 
   .scrollbar-flag {
     position: absolute;
     top: 0;
-    bottom: 0;
+    bottom: 10px;
     width: 2px;
     background: #4ade80;
     pointer-events: none;
     transform: translateX(-50%);
     opacity: 0.75;
+    z-index: 2;
   }
 
   .legend {

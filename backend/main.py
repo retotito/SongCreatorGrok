@@ -157,6 +157,22 @@ def save_session(session_id: str):
         log_step("PERSIST", f"Failed to save session {session_id}: {e}")
 
 
+def _safe_unlink(path: str):
+    if not path:
+        return
+    try:
+        if os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _safe_unlink_download_name(name: str):
+    if not name:
+        return
+    _safe_unlink(os.path.join(DOWNLOADS_DIR, os.path.basename(name)))
+
+
 def safe_json(data):
     """Round-trip through JSON with default=str to sanitize numpy types etc."""
     return json.loads(json.dumps(data, default=str))
@@ -574,10 +590,14 @@ async def delete_session_endpoint(session_id: str):
     # Remove generated files tracked in result
     result = session.get("result", {})
     tracked = set()
-    for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+    for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file", "cleaned_vocal_file"):
         fname = result.get(key) if isinstance(result, dict) else None
         if fname:
             tracked.add(fname)
+    # cleaned_vocal_path may be absolute; remove by basename from downloads
+    cleaned_path = result.get("cleaned_vocal_path") if isinstance(result, dict) else None
+    if cleaned_path:
+        tracked.add(os.path.basename(cleaned_path))
     # Also remove all filenames accumulated across multiple generation runs
     for fname in session.get("generated_files", []):
         tracked.add(fname)
@@ -585,6 +605,25 @@ async def delete_session_endpoint(session_id: str):
         fpath = os.path.join(DOWNLOADS_DIR, fname)
         if os.path.exists(fpath):
             os.remove(fpath)
+
+    # Remove session-owned patched vocal files living under backend/sessions
+    # (current vocal_audio plus any historical patched files tracked on session)
+    audio_candidates = [
+        session.get("vocal_audio"),
+        session.get("original_demucs_vocal"),
+    ]
+    for fpath in session.get("patched_vocal_files", []):
+        audio_candidates.append(fpath)
+
+    for fpath in audio_candidates:
+        if not fpath:
+            continue
+        try:
+            abs_path = os.path.abspath(fpath)
+            if abs_path.startswith(os.path.abspath(SESSIONS_DIR) + os.sep) and os.path.exists(abs_path):
+                os.remove(abs_path)
+        except OSError:
+            pass
 
     # Remove orphaned downloads: files prefixed with session_id or session_id[:8]
     # Covers mic_trail_*, mic_audio_* (prefixed with session_id[:8])
@@ -603,6 +642,29 @@ async def delete_session_endpoint(session_id: str):
                 pass
 
     del sessions[session_id]
+
+    # Sweep orphaned patched vocals from previous versions that did not track them.
+    referenced = set()
+    for s in sessions.values():
+        for key in ("vocal_audio", "original_demucs_vocal"):
+            p = s.get(key)
+            if p:
+                referenced.add(os.path.abspath(p))
+        for p in s.get("patched_vocal_files", []):
+            if p:
+                referenced.add(os.path.abspath(p))
+
+    for name in os.listdir(SESSIONS_DIR):
+        if not name.startswith("vocal_patched_"):
+            continue
+        p = os.path.abspath(os.path.join(SESSIONS_DIR, name))
+        if p in referenced:
+            continue
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
     log_step("SESSION", f"Deleted session {session_id}")
     return {"status": "ok"}
 
@@ -2138,13 +2200,14 @@ def generate_ultrastar_files(session_id: str):
         
         # Store result in session
         session["status"] = "generated"
-        # Track all generated filenames for cleanup on session delete
-        session.setdefault("generated_files", [])
-        for _fn in (txt_filename, midi_filename, summary_filename):
-            if _fn not in session["generated_files"]:
-                session["generated_files"].append(_fn)
         # Preserve cleanup state across regeneration (segments stored in ms — no BPM/GAP conversion needed)
         _old_result = session.get("result") or {}
+        # Aggressive cleanup: remove superseded generation artifacts immediately.
+        for _k in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            _safe_unlink_download_name(_old_result.get(_k))
+        for _fn in session.get("generated_files", []):
+            _safe_unlink_download_name(_fn)
+
         _preserved_cleanup_segments = _old_result.get("cleanup_segments", [])
         _preserved_cleaned_vocal_path = _old_result.get("cleaned_vocal_path")
         session["result"] = {
@@ -2165,6 +2228,8 @@ def generate_ultrastar_files(session_id: str):
             "cleanup_segments": _preserved_cleanup_segments,
             "cleaned_vocal_path": _preserved_cleaned_vocal_path,
         }
+        # Track only latest generation artifacts.
+        session["generated_files"] = [txt_filename, midi_filename, summary_filename]
         save_session(session_id)
         _update_txt_asset_headers(session)
         save_session(session_id)
@@ -2489,9 +2554,11 @@ async def save_editor_state(session_id: str, request: Request):
                 start_ms, end_ms = end_ms, start_ms
             if end_ms - start_ms < 50:
                 end_ms = start_ms + 50
+            patched = bool(seg.get("patched", False))
             normalized_cleanup_segments.append({
                 "start_ms": round(start_ms, 1),
                 "end_ms": round(end_ms, 1),
+                "patched": patched,
             })
 
     # Reconstruct Ultrastar .txt content from the editor notes
@@ -2542,15 +2609,26 @@ async def save_editor_state(session_id: str, request: Request):
     # Invalidate cleaned audio if cleanup segments changed
     old_segments = result.get("cleanup_segments", [])
     if old_segments != normalized_cleanup_segments:
+        _safe_unlink(result.get("cleaned_vocal_path"))
+        _safe_unlink_download_name(result.get("cleaned_vocal_file"))
         result["cleaned_vocal_path"] = None
+        result["cleaned_vocal_file"] = None
     result["cleanup_segments"] = normalized_cleanup_segments
 
     # Also write the file to downloads
+    old_txt = result.get("txt_file")
+    old_corrected = result.get("corrected_txt_file")
     timestamp = int(time.time())
     txt_filename = f"song_{timestamp}.txt"
     txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(ultrastar_content)
+
+    if old_txt and old_txt != txt_filename:
+        _safe_unlink_download_name(old_txt)
+    if old_corrected and old_corrected != txt_filename:
+        _safe_unlink_download_name(old_corrected)
+
     result["txt_file"] = txt_filename
     result["corrected_txt_file"] = txt_filename  # ensure downloads always use latest saved file
 
@@ -2646,9 +2724,13 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
             session["original_demucs_vocal"] = session.get("vocal_audio")
         # Update session to use patched vocal
         session["vocal_audio"] = patched_path
+        session.setdefault("patched_vocal_files", []).append(patched_path)
         # Invalidate cleaned audio — it was generated from the old vocal
         result = session.get("result") or {}
+        _safe_unlink(result.get("cleaned_vocal_path"))
+        _safe_unlink_download_name(result.get("cleaned_vocal_file"))
         result["cleaned_vocal_path"] = None
+        result["cleaned_vocal_file"] = None
         save_session(session_id)
 
         log_step("SPLICE", f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
@@ -2685,8 +2767,10 @@ async def restore_segment(session_id: str, request: Request):
     vocal_path = session.get("vocal_audio")
 
     if not original_path or not os.path.isfile(original_path):
-        # No original saved — nothing to restore, return ok silently
-        return {"status": "ok", "note": "no original vocal to restore from"}
+        raise ServiceError(
+            "No original vocal baseline to restore from",
+            "This session has no saved original demucs vocal. Regenerate vocals or start a fresh session."
+        )
 
     if not vocal_path or not os.path.isfile(vocal_path):
         raise ServiceError("No vocal audio found", "Upload audio first")
@@ -2712,8 +2796,12 @@ async def restore_segment(session_id: str, request: Request):
     sf.write(patched_path, patched.T, sr, subtype='PCM_16')
 
     session["vocal_audio"] = patched_path
+    session.setdefault("patched_vocal_files", []).append(patched_path)
     result = session.get("result") or {}
+    _safe_unlink(result.get("cleaned_vocal_path"))
+    _safe_unlink_download_name(result.get("cleaned_vocal_file"))
     result["cleaned_vocal_path"] = None
+    result["cleaned_vocal_file"] = None
     save_session(session_id)
 
     log_step("RESTORE", f"Session {session_id}: restored original @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
@@ -2758,6 +2846,8 @@ async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
     gap_ms = result.get("gap_ms")
 
     # Generate cleaned audio
+    _safe_unlink(result.get("cleaned_vocal_path"))
+    _safe_unlink_download_name(result.get("cleaned_vocal_file"))
     timestamp = int(time.time())
     cleaned_filename = f"cleaned_vocals_{timestamp}.wav"
     cleaned_path = os.path.join(DOWNLOADS_DIR, cleaned_filename)
@@ -2844,12 +2934,16 @@ async def export_with_corrections(
     
     if corrected_content:
         # Save corrected version
+        old_corrected = result.get("corrected_txt_file")
         timestamp = int(time.time())
         corrected_filename = f"song_corrected_{timestamp}.txt"
         corrected_path = os.path.join(DOWNLOADS_DIR, corrected_filename)
         
         with open(corrected_path, "w", encoding="utf-8") as f:
             f.write(corrected_content)
+
+        if old_corrected and old_corrected != corrected_filename:
+            _safe_unlink_download_name(old_corrected)
         
         result["corrected_txt_file"] = corrected_filename
         log_step("EXPORT", f"Saved corrected file: {corrected_filename}")

@@ -7,6 +7,23 @@ import soundfile as sf
 from utils.logger import log_step
 
 
+def _load_audio_any_format(path: str):
+    """Load audio while being tolerant of formats unsupported by libsndfile.
+
+    librosa prefers soundfile first; on some systems MP3 may raise a generic
+    "System error". Fall back to audioread/ffmpeg explicitly for those files.
+    """
+    try:
+        return librosa.load(path, sr=None, mono=False)
+    except Exception as primary_err:
+        try:
+            import audioread
+            with audioread.audio_open(path) as stream:
+                return librosa.load(stream, sr=None, mono=False)
+        except Exception:
+            raise primary_err
+
+
 def merge_overlapping_segments(segments: list) -> list:
     """Merge overlapping cleanup segments into non-overlapping ranges.
     
@@ -67,7 +84,7 @@ def generate_cleaned_audio(
         raise ValueError("No cleanup segments provided")
     
     log_step("CLEANUP", f"Loading audio: {vocal_audio_path}")
-    audio, sr = librosa.load(vocal_audio_path, sr=None, mono=False)
+    audio, sr = _load_audio_any_format(vocal_audio_path)
     
     if audio.ndim == 1:
         audio = np.expand_dims(audio, axis=0)
