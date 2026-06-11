@@ -4459,6 +4459,16 @@
     console.log(`[SegRec] Arm segment id=${segId} | startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} dur=${seg ? (seg.endMs - seg.startMs).toFixed(0) : '?'}ms`);
     if (!seg) return;
 
+    // Segment recording has exclusive control: disable interactive tracing/singalong modes first.
+    if (vocalTraceEnabled) {
+      vocalTraceEnabled = false;
+      stopVocalTrace();
+    }
+    if (micEnabled) {
+      micEnabled = false;
+      stopMic();
+    }
+
     // Ensure mic is running
     if (!micStream) {
       micStarting = true;
