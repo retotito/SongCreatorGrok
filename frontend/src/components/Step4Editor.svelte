@@ -257,7 +257,11 @@
 
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
-    if (cleanupSegments.length === 0) cleanedAudioAvailable = false;
+    if (cleanupSegments.length === 0) {
+      cleanedAudioAvailable = false;
+      // Auto-switch back to vocals if currently on edited
+      if (audioSource === 'edited') switchAudioSource('vocals');
+    }
     cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
