@@ -216,14 +216,68 @@
     cleanupDrag = null;
   }
 
+  /**
+   * Insert a new segment [newStart, newEnd], carving any existing segments that overlap:
+   *   - existing fully inside new → removed
+   *   - existing partially overlapping left edge → trimmed on right
+   *   - existing partially overlapping right edge → trimmed on left
+   *   - existing fully containing new → split into left + right remainder
+   * segRecPatched is NOT changed here; spliced IDs keep their ID across a trim.
+   * Returns the new segment object.
+   */
+  function insertSegmentCarving(newStart, newEnd) {
+    const MIN_MS = 50; // don't keep slivers smaller than this
+    const survivors = [];
+    for (const s of cleanupSegments) {
+      // No overlap — keep as-is
+      if (s.endMs <= newStart || s.startMs >= newEnd) {
+        survivors.push(s);
+        continue;
+      }
+      // Existing fully inside new → drop it (its audio will be overwritten)
+      if (s.startMs >= newStart && s.endMs <= newEnd) {
+        segRecPatched = new Set([...segRecPatched].filter(x => x !== s.id));
+        continue;
+      }
+      // Existing straddles left edge (starts before, ends inside)
+      if (s.startMs < newStart && s.endMs > newStart && s.endMs <= newEnd) {
+        const trimmed = { ...s, endMs: newStart };
+        if (trimmed.endMs - trimmed.startMs >= MIN_MS) survivors.push(normalizeCleanupSegment(trimmed));
+        else segRecPatched = new Set([...segRecPatched].filter(x => x !== s.id));
+        continue;
+      }
+      // Existing straddles right edge (starts inside, ends after)
+      if (s.startMs >= newStart && s.startMs < newEnd && s.endMs > newEnd) {
+        const trimmed = { ...s, startMs: newEnd };
+        if (trimmed.endMs - trimmed.startMs >= MIN_MS) survivors.push(normalizeCleanupSegment(trimmed));
+        else segRecPatched = new Set([...segRecPatched].filter(x => x !== s.id));
+        continue;
+      }
+      // Existing fully contains new → split into left + right
+      if (s.startMs < newStart && s.endMs > newEnd) {
+        const left  = { ...s, endMs: newStart };
+        const right = { ...s, id: cleanupSegmentIdCounter++, startMs: newEnd };
+        // Spliced state: left keeps original id (and splice), right gets a new id (no splice yet)
+        if (left.endMs - left.startMs >= MIN_MS)  survivors.push(normalizeCleanupSegment(left));
+        else segRecPatched = new Set([...segRecPatched].filter(x => x !== s.id));
+        if (right.endMs - right.startMs >= MIN_MS) survivors.push(normalizeCleanupSegment(right));
+        continue;
+      }
+      // Fallback: keep unchanged
+      survivors.push(s);
+    }
+    const newSeg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs: newStart, endMs: newEnd });
+    return { segments: [...survivors, newSeg].sort((a, b) => a.startMs - b.startMs), newSeg };
+  }
+
   function addCleanupSegmentAt(beat) {
     pushUndo();
     const startMs = beatToTime(beat) * 1000;
     const endMs = startMs + Math.max(500, (15000 / bpm));
-    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
-    console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${startMs.toFixed(0)} endMs=${endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
-    cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
-    selectedCleanupSegment = seg.id;
+    console.log(`[CleanupSeg] Add at ${startMs.toFixed(0)}–${endMs.toFixed(0)}ms (carving overlaps)`);
+    const { segments, newSeg } = insertSegmentCarving(startMs, endMs);
+    cleanupSegments = segments;
+    selectedCleanupSegment = newSeg.id;
     cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
