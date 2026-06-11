@@ -260,17 +260,25 @@
       cleanedAudioAvailable = false;
       // Auto-switch back to vocals (uses updated vocalUrl after restore above)
       if (audioSource === 'edited') switchAudioSource('vocals');
-    } else if (audioSource === 'edited' && segRecPatched.size > 0) {
-      // Still have spliced segments — refresh edited audio to updated vocalUrl
-      currentAudioUrl = vocalUrl;
-      if (audioEl) audioEl.load();
-      loadWaveform(currentAudioUrl);
+    } else if (audioSource === 'edited') {
+      // Refresh edited source using canonical resolver (cleaned preferred).
+      switchAudioSource('edited');
     }
     cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
     draw();
     handleSave();
+  }
+
+  function getEditedAudioUrl() {
+    // Prefer cleaned audio whenever it exists (it includes latest cleanup muting,
+    // and on backend it is generated from the current vocal source, including splices).
+    if (cleanedAudioAvailable) return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+    // Fallback to patched vocal when no cleaned file exists yet.
+    if (segRecPatched.size > 0) return vocalUrl;
+    // Last fallback for fresh sessions before first cleaned generation.
+    return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
   }
 
   function nudgeCleanupSegment(id, deltaMs) {
@@ -296,6 +304,9 @@
       if (Math.abs(mx - left) <= 2) return { id: seg.id, mode: 'start' };
       if (Math.abs(mx - right) <= 2) return { id: seg.id, mode: 'end' };
       if (mx >= left && mx <= right) return { id: seg.id, mode: 'move' };
+    } else if (audioSource === 'edited') {
+      // Refresh edited source using the canonical resolver (cleaned preferred).
+      switchAudioSource('edited');
     }
     return null;
   }
@@ -921,9 +932,9 @@
           cleanedAudioAvailable = true;
           cleanedAudioCacheBust = `?v=${Date.now()}`;
           console.log('[Step4] Cleaned audio regenerated');
-          // If currently listening to edited (cleaned) source, refresh it
-          if (audioSource === 'edited' && segRecPatched.size === 0) {
-            const newUrl = getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+          // If currently listening to edited source, refresh it.
+          if (audioSource === 'edited') {
+            const newUrl = getEditedAudioUrl();
             currentAudioUrl = newUrl;
             if (audioEl) { audioEl.load(); }
             loadWaveform(newUrl);
@@ -3411,10 +3422,7 @@
   function switchAudioSource(source) {
     const prevSource = audioSource;
     audioSource = source;
-    // 'edited' = splice-patched vocal if splices exist, otherwise cleaned vocal
-    const editedUrl = segRecPatched.size > 0
-      ? vocalUrl
-      : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+    const editedUrl = getEditedAudioUrl();
     const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
     console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
@@ -5330,6 +5338,7 @@
       }
       // Set the reactive audio URL driving the <audio> element
       const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+      const editedUrl = getEditedAudioUrl();
       currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
       console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
       // Explicitly reload the audio element — Svelte reactive src binding updates the
