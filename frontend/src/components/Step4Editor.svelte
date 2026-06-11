@@ -241,11 +241,12 @@
     // If this segment was splice-recorded, restore original audio for that range first
     if (seg && segRecPatched.has(id)) {
       try {
-        const data = await fetch(`/api/restore-segment/${$sessionId}`, {
+        const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ start_ms: seg.startMs, end_ms: seg.endMs })
-        }).then(r => r.json());
+        });
+        const data = await resp.json();
         console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
         const cacheBust = `?v=${Date.now()}`;
         vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
