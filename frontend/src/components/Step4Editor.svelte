@@ -233,8 +233,28 @@
 
   function deleteCleanupSegment(id) {
     const seg = cleanupSegments.find(s => s.id === id);
-    console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1}`);
+    console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1} | wasSpliced=${segRecPatched.has(id)}`);
     pushUndo();
+
+    // If this segment was splice-recorded, restore original audio for that range
+    if (seg && segRecPatched.has(id)) {
+      fetch(`/api/restore-segment/${$sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start_ms: seg.startMs, end_ms: seg.endMs })
+      }).then(r => r.json()).then(data => {
+        console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
+        const cacheBust = `?v=${Date.now()}`;
+        vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+        segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
+        if (audioSource === 'edited') {
+          currentAudioUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+          if (audioEl) audioEl.load();
+          loadWaveform(currentAudioUrl);
+        }
+      }).catch(e => console.warn('[CleanupSeg] Restore failed:', e));
+    }
+
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
     if (cleanupSegments.length === 0) cleanedAudioAvailable = false;
@@ -420,6 +440,7 @@
   let originalUrl = '';
   let originalVocalUrl = ''; // frozen at load — never changed by splices
   let cleanedAudioAvailable = false; // true when cleaned_vocal_path exists on backend
+  let cleanedAudioCacheBust = ''; // appended to /cleaned URL to force browser reload
   let hasVocalsAudio = true;
   let hasOriginalAudio = true;
 
@@ -886,7 +907,15 @@
         try {
           await generateCleanedAudio($sessionId, serializeCleanupSegments());
           cleanedAudioAvailable = true;
+          cleanedAudioCacheBust = `?v=${Date.now()}`;
           console.log('[Step4] Cleaned audio regenerated');
+          // If currently listening to edited (cleaned) source, refresh it
+          if (audioSource === 'edited' && segRecPatched.size === 0) {
+            const newUrl = getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+            currentAudioUrl = newUrl;
+            if (audioEl) { audioEl.load(); }
+            loadWaveform(newUrl);
+          }
         } catch (e) {
           console.warn('[Step4] Cleaned audio regeneration failed:', e);
         } finally {
@@ -3315,7 +3344,7 @@
     // 'edited' = splice-patched vocal if splices exist, otherwise cleaned vocal
     const editedUrl = segRecPatched.size > 0
       ? vocalUrl
-      : getAudioUrl($sessionId, 'cleaned');
+      : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
     const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
     console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
@@ -5180,7 +5209,7 @@
         audioSource = 'original';
       }
       // Set the reactive audio URL driving the <audio> element
-      const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned');
+      const editedUrl = segRecPatched.size > 0 ? vocalUrl : getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
       currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
       console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
       computeTotalBeats();

@@ -2587,6 +2587,68 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
 
 
 # ────────────────────────────────────────────────────────────
+# Step 4: Restore a segment from original vocal
+# ────────────────────────────────────────────────────────────
+@app.post("/api/restore-segment/{session_id}")
+async def restore_segment(session_id: str, request: Request):
+    """Restore a time range in the current vocal from the original demucs vocal.
+
+    Accepts JSON body:
+        start_ms: float
+        end_ms: float
+    """
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    start_ms = float(body.get("start_ms", 0))
+    end_ms = float(body.get("end_ms", 0))
+
+    original_path = session.get("original_demucs_vocal")
+    vocal_path = session.get("vocal_audio")
+
+    if not original_path or not os.path.isfile(original_path):
+        # No original saved — nothing to restore, return ok silently
+        return {"status": "ok", "note": "no original vocal to restore from"}
+
+    if not vocal_path or not os.path.isfile(vocal_path):
+        raise ServiceError("No vocal audio found", "Upload audio first")
+
+    original, sr = librosa.load(original_path, sr=None, mono=False)
+    if original.ndim == 1:
+        original = np.expand_dims(original, axis=0)
+
+    vocal, _ = librosa.load(vocal_path, sr=sr, mono=False)
+    if vocal.ndim == 1:
+        vocal = np.expand_dims(vocal, axis=0)
+
+    start_sample = max(0, int(start_ms / 1000.0 * sr))
+    end_sample = min(vocal.shape[1], int(end_ms / 1000.0 * sr))
+    orig_end = min(original.shape[1], end_sample)
+
+    patched = vocal.copy()
+    patched[:, start_sample:orig_end] = original[:, start_sample:orig_end]
+
+    timestamp = int(time.time())
+    patched_filename = f"vocal_patched_{timestamp}.wav"
+    patched_path = os.path.join(SESSIONS_DIR, patched_filename)
+    sf.write(patched_path, patched.T, sr, subtype='PCM_16')
+
+    session["vocal_audio"] = patched_path
+    result = session.get("result") or {}
+    result["cleaned_vocal_path"] = None
+    save_session(session_id)
+
+    log_step("RESTORE", f"Session {session_id}: restored original @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
+    return {"status": "ok", "patched_vocal_file": patched_filename}
+
+
+# ────────────────────────────────────────────────────────────
 # Step 4: Generate cleaned audio preview
 # ────────────────────────────────────────────────────────────
 @app.post("/api/generate-cleaned-audio/{session_id}")
