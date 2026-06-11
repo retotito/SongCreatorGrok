@@ -308,6 +308,10 @@ export async function generateCleanedAudio(sessionId, cleanupSegments) {
   });
 }
 
+export async function generateEmptyUltrastar(sessionId) {
+  return request('POST', `/generate/empty/${sessionId}`);
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

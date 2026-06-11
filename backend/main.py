@@ -2317,6 +2317,78 @@ async def get_generation_result(session_id: str):
 
 
 # ────────────────────────────────────────────────────────────
+# Step 3: Generate empty Ultrastar file (no notes, just header)
+# ────────────────────────────────────────────────────────────
+@app.post("/api/generate/empty/{session_id}")
+async def generate_empty(session_id: str):
+    """Generate a minimal Ultrastar result with header only and no notes.
+    Useful for skipping straight to the editor when note generation is not needed."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    info = session.get("song_info") or {}
+    vocal = session.get("vocal_audio") or session.get("original_audio")
+    original = session.get("original_audio")
+
+    import librosa as _librosa
+    audio_duration = 0.0
+    bpm = 120.0
+    gap_ms = 0
+
+    if vocal and os.path.exists(vocal):
+        try:
+            y, sr = _librosa.load(vocal, sr=None, mono=True, duration=60)
+            audio_duration_full = _librosa.get_duration(path=vocal)
+            audio_duration = audio_duration_full
+        except Exception:
+            pass
+
+    mp3_filename = os.path.basename(original or vocal or "audio.mp3")
+    vocals_filename = os.path.basename(vocal or "")
+
+    header = (
+        f"#TITLE:{info.get('title', 'Unknown')}\n"
+        f"#ARTIST:{info.get('artist', 'Unknown')}\n"
+        f"#LANGUAGE:{info.get('language', '')}\n"
+        f"#MP3:{mp3_filename}\n"
+        f"#VOCALS:{vocals_filename}\n"
+        f"#BPM:{bpm:.2f}\n"
+        f"#GAP:{gap_ms}\n"
+        f"#YEAR:{info.get('year', '')}\n"
+    )
+    ultrastar_content = header + "E\n"
+
+    result = {
+        "bpm": bpm,
+        "gap_ms": gap_ms,
+        "beat_phase_sec": 0.0,
+        "audio_duration": audio_duration,
+        "syllable_timings": [],
+        "ultrastar_content": ultrastar_content,
+        "notes": [],
+        "pitch_data": [],
+        "has_edits": False,
+        "edit_count": 0,
+        "cleanup_segments": [],
+        "cleaned_vocal_path": None,
+    }
+    session["result"] = result
+    session["status"] = "generated"
+    save_session(session_id)
+
+    log_step("EMPTY_GEN", f"Session {session_id}: generated empty Ultrastar file")
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "bpm": bpm,
+        "gap_ms": gap_ms,
+        "audio_duration": audio_duration,
+        "ultrastar_preview": ultrastar_content,
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # Step 4: Editor data
 # ────────────────────────────────────────────────────────────
 @app.get("/api/editor-data/{session_id}")

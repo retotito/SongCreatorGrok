@@ -30,6 +30,21 @@
     }
   }
 
+  async function handleGenerateEmpty() {
+    if (!$sessionId) { errorMessage.set('No session. Please upload audio first.'); return; }
+    isProcessing.set(true);
+    processingStatus.set('Creating empty Ultrastar file…');
+    try {
+      const result = await generateEmptyUltrastar($sessionId);
+      generationResult.set(result);
+      currentStep.set(4);
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isProcessing.set(false);
+    }
+  }
+
   async function handleSubmit(useCleaned = false) {
     if (!lyricsText.trim()) {
       errorMessage.set('Please enter lyrics');
@@ -77,9 +92,9 @@
     }
   }
   import { onDestroy } from 'svelte';
-  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned } from '../stores/appStore.js';
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned, generationResult } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio } from '../services/api.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar } from '../services/api.js';
 
   async function syncMetadata() {
     if (!$sessionId || !$lyricsData.syllableCount) return; // only if a result exists
@@ -420,6 +435,9 @@
     <div class="generate-row">
       <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
         🚀 Generate Ultrastar Files
+      </button>
+      <button class="btn btn-secondary btn-generate" on:click={handleGenerateEmpty} disabled={$isProcessing || !$sessionId} title="Skip note alignment — open editor with empty file">
+        📄 Generate Empty File
       </button>
       {#if cleanedAudioAvailable}
         <button class="btn btn-generate-cleaned btn-generate" on:click={() => handleSubmit(true)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
