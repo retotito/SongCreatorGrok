@@ -473,6 +473,9 @@
   let micGainNode = null;   // GainNode for mic volume control
   let pitchTolerance = 1;   // semitone hit tolerance: 1=hard, 2=medium, 3=easy
   let micLevel = 0;         // current mic input level (0-1) for indicator
+  let micPeakLevel = 0;     // peak-hold level for visibility
+  let micOversteering = false;
+  let micOversteerTimer = null;
   let micLevelTimer = null; // interval for level polling
   // Sticky prediction state for smoothing
   let micLastPitch = -1;
@@ -4391,7 +4394,17 @@
           const v = Math.abs(buf[i]);
           if (v > maxVal) maxVal = v;
         }
-        micLevel = Math.min(1, maxVal * 3); // amplify for visibility
+        const nextLevel = Math.min(1, maxVal * 3); // amplify for visibility
+        micLevel = nextLevel;
+        micPeakLevel = Math.max(nextLevel, micPeakLevel * 0.92);
+        if (maxVal >= 0.98) {
+          micOversteering = true;
+          if (micOversteerTimer) clearTimeout(micOversteerTimer);
+          micOversteerTimer = setTimeout(() => {
+            micOversteering = false;
+            micOversteerTimer = null;
+          }, 900);
+        }
       }, 50);
 
       console.log('[Mic] Started — sampleRate:', micAudioCtx.sampleRate);
@@ -4404,6 +4417,9 @@
   function stopMic() {
     if (micLevelTimer) { clearInterval(micLevelTimer); micLevelTimer = null; }
     micLevel = 0;
+    micPeakLevel = 0;
+    micOversteering = false;
+    if (micOversteerTimer) { clearTimeout(micOversteerTimer); micOversteerTimer = null; }
     if (micRecorder && micRecorder.state !== 'inactive') {
       micRecorder.stop();
       console.log('[Mic] MediaRecorder stopped,', micRecordedChunks.length, 'chunks');
@@ -4597,6 +4613,13 @@
       stopMic();
       await startMic();
     }
+  }
+
+  function handleMicGainInput(e) {
+    const value = Number(e.target.value);
+    const nextGain = Math.max(0, Math.min(2, value / 100));
+    micGain = nextGain;
+    if (micGainNode) micGainNode.gain.value = micGain;
   }
 
   function sampleMicPitch(timeSec) {
@@ -5307,6 +5330,7 @@
 
   function segRecModalMouseDown(e) {
     if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-rec-modal-title')) return;
     segRecModalDragging = true;
     segRecModalDragOffsetX = e.clientX - segRecModalX;
     segRecModalDragOffsetY = e.clientY - segRecModalY;
@@ -5356,6 +5380,41 @@
       <div class="seg-rec-modal-info">
         {seg ? `${(seg.startMs/1000).toFixed(1)}s – ${(seg.endMs/1000).toFixed(1)}s  (${((seg.endMs - seg.startMs)/1000).toFixed(1)}s)` : ''}
       </div>
+      {#if segRecPhase === 'armed' || segRecPhase === 'preroll' || segRecPhase === 'recording'}
+        <div class="seg-rec-mic-panel">
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Mic</span>
+            <select class="mic-select seg-rec-mic-select" value={micDeviceId} on:change={changeMicDevice} title="Select recording microphone">
+              {#if micDevices.length === 0}
+                <option value="">Default microphone</option>
+              {:else}
+                {#each micDevices as device}
+                  <option value={device.deviceId}>{device.label || `Mic ${micDevices.indexOf(device) + 1}`}</option>
+                {/each}
+              {/if}
+            </select>
+          </div>
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Input</span>
+            <div class="seg-rec-mic-meter" title="Mic input level">
+              <div class="seg-rec-mic-meter-fill" style="width:{Math.round(Math.min(1, micPeakLevel) * 100)}%" class:seg-rec-mic-meter-warm={micPeakLevel > 0.65} class:seg-rec-mic-meter-hot={micPeakLevel > 0.85 || micOversteering}></div>
+              <div class="seg-rec-mic-meter-live" style="left:{Math.round(Math.min(1, micLevel) * 100)}%"></div>
+            </div>
+            <span class="seg-rec-mic-status" class:seg-rec-mic-status-hot={micOversteering}>{micOversteering ? 'CLIP' : 'OK'}</span>
+          </div>
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Gain</span>
+            <input type="range" class="mic-gain-slider seg-rec-mic-slider" min="0" max="200" step="1"
+                   value={Math.round(micGain * 100)}
+                   on:input={handleMicGainInput}
+                   title={`Mic gain: ${Math.round(micGain * 100)}%`} />
+            <span class="seg-rec-mic-gain-readout">{Math.round(micGain * 100)}%</span>
+          </div>
+          {#if micOversteering}
+            <div class="seg-rec-mic-warning">Input is clipping. Reduce gain or increase distance from the mic.</div>
+          {/if}
+        </div>
+      {/if}
       {#if segRecPhase === 'preroll'}
         <div class="seg-rec-countdown-overlay">{segRecCountdown}</div>
       {/if}
@@ -5462,9 +5521,9 @@
                class:mic-level-hot={micLevel > 0.8}
                class:mic-level-warm={micLevel > 0.3 && micLevel <= 0.8}></div>
         </div>
-        <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
-               value={Math.round(micGain * 100)}
-               on:input={(e) => { micGain = parseInt(e.target.value) / 100; if (micGainNode) micGainNode.gain.value = micGain; }}
+         <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
+           value={Math.round(micGain * 100)}
+           on:input={handleMicGainInput}
                title="Mic volume: {Math.round(micGain * 100)}%" />
         <select class="mic-select" bind:value={pitchTolerance} on:change={() => draw()} title="Pitch tolerance (difficulty)">
           <option value={1}>Hard (±1)</option>
@@ -6634,7 +6693,7 @@
     position: fixed;
     z-index: 9000;
     width: 260px;
-    cursor: grab;
+    cursor: default;
     background: #1a2a1a;
     border: 2px solid #3a7a3a;
     border-radius: 10px;
@@ -6655,12 +6714,116 @@
     font-size: 0.95rem;
     font-weight: 700;
     color: #e0e0e0;
+    cursor: grab;
+    user-select: none;
   }
 
   .seg-rec-modal-info {
     font-size: 0.8rem;
     color: #9cba9c;
     font-family: monospace;
+  }
+
+  .seg-rec-mic-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(8, 14, 8, 0.45);
+    border: 1px solid #315531;
+    border-radius: 8px;
+    padding: 8px;
+  }
+
+  .seg-rec-mic-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .seg-rec-mic-label {
+    min-width: 36px;
+    font-size: 0.75rem;
+    color: #b6d0b6;
+    font-weight: 600;
+  }
+
+  .seg-rec-mic-select {
+    flex: 1;
+    max-width: none;
+  }
+
+  .seg-rec-mic-meter {
+    position: relative;
+    flex: 1;
+    height: 10px;
+    border-radius: 6px;
+    border: 1px solid #506050;
+    background: linear-gradient(90deg, #1b5e20 0 65%, #ef6c00 65% 85%, #b71c1c 85% 100%);
+    overflow: hidden;
+  }
+
+  .seg-rec-mic-meter-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: rgba(180, 220, 180, 0.45);
+    transition: width 80ms linear;
+  }
+
+  .seg-rec-mic-meter-fill.seg-rec-mic-meter-warm {
+    background: rgba(255, 214, 118, 0.5);
+  }
+
+  .seg-rec-mic-meter-fill.seg-rec-mic-meter-hot {
+    background: rgba(255, 105, 97, 0.58);
+  }
+
+  .seg-rec-mic-meter-live {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 2px;
+    background: #fff;
+    box-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+    transform: translateX(-1px);
+  }
+
+  .seg-rec-mic-status {
+    width: 32px;
+    text-align: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #9dd69d;
+    letter-spacing: 0.03em;
+  }
+
+  .seg-rec-mic-status.seg-rec-mic-status-hot {
+    color: #ff6b6b;
+  }
+
+  .seg-rec-mic-slider {
+    flex: 1;
+    width: auto;
+  }
+
+  .seg-rec-mic-gain-readout {
+    width: 36px;
+    text-align: right;
+    font-size: 0.72rem;
+    color: #d5e5d5;
+    font-family: monospace;
+  }
+
+  .seg-rec-mic-warning {
+    color: #ff9696;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    background: rgba(120, 0, 0, 0.2);
+    border: 1px solid rgba(255, 120, 120, 0.35);
+    border-radius: 5px;
+    padding: 4px 6px;
   }
 
   .seg-rec-countdown-overlay {
