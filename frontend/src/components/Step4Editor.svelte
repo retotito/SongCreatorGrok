@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
@@ -4600,15 +4600,33 @@
       vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
       if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
       console.log(`[SegRec] Updated vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | audioSource: ${audioSource} → edited`);
-      audioSource = 'edited';
-      currentAudioUrl = vocalUrl; // edited source = new patched vocal — Svelte binding updates <audio src>
-      if (audioEl) {
-        const wasPlaying = isPlaying;
-        if (wasPlaying) { audioEl.pause(); isPlaying = false; cancelAnimationFrame(animFrame); }
-        // src updated via currentAudioUrl binding; just reload
-        audioEl.load();
-        if (wasPlaying) audioEl.play().catch(() => {});
+      const wasPlaying = isPlaying;
+      const resumeTime = currentTimeSec || audioEl?.currentTime || 0;
+      if (wasPlaying) {
+        audioEl?.pause();
+        isPlaying = false;
+        cancelAnimationFrame(animFrame);
       }
+
+      // Force edited source immediately and wait one microtask so the bound <audio src>
+      // is updated before calling load()/seek/play.
+      audioSource = 'edited';
+      currentAudioUrl = vocalUrl;
+      await tick();
+
+      if (audioEl) {
+        // Defensive: set src directly as well (in case DOM binding is delayed).
+        if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
+        audioEl.load();
+        audioEl.onloadedmetadata = () => {
+          audioEl.currentTime = Math.max(0, Math.min(resumeTime, audioEl.duration || resumeTime));
+          audioEl.onloadedmetadata = null;
+          if (wasPlaying) audioEl.play().catch(() => {});
+        };
+      }
+
+      // Keep waveform in sync with the patched vocal immediately.
+      loadWaveform(currentAudioUrl);
       cleanedAudioDirty = true;
       cancelSegmentRecording();
       handleSave(); // triggers auto-regenerate
