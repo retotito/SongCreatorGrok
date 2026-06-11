@@ -226,6 +226,7 @@
     markUnsaved();
     closeContextMenu();
     draw();
+    handleSave();
   }
 
   function deleteCleanupSegment(id) {
@@ -236,6 +237,7 @@
     markUnsaved();
     closeContextMenu();
     draw();
+    handleSave();
   }
 
   function nudgeCleanupSegment(id, deltaMs) {
@@ -832,6 +834,9 @@
   async function handleSave() {
     if (!$sessionId || isSaving) return;
     isSaving = true;
+    // Show spinner immediately if we know regeneration will follow
+    const willRegenerate = cleanedAudioDirty && cleanupSegments.length > 0;
+    if (willRegenerate) isRegeneratingCleaned = true;
     try {
       // Serialize notes for the API
       const noteData = notes.map(n => {
@@ -2526,6 +2531,7 @@
     if (cleanupDrag) {
       cleanupDrag = null;
       draw();
+      if (cleanedAudioDirty) handleSave();
       return;
     }
 
