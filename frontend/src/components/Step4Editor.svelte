@@ -4560,6 +4560,8 @@
     segRecChunks = [];
     segRecSegmentId = null;
     segRecPhase = 'idle';
+    micEnabled = false;
+    stopMic();
     draw();
   }
 
@@ -4598,8 +4600,6 @@
       }
       cleanedAudioDirty = true;
       cancelSegmentRecording();
-      micEnabled = false;
-      stopMic();
       handleSave(); // triggers auto-regenerate
     } catch (err) {
       console.error('[SegRec] Splice failed:', err);
