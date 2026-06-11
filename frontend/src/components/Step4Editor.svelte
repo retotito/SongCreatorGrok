@@ -304,9 +304,6 @@
       if (Math.abs(mx - left) <= 2) return { id: seg.id, mode: 'start' };
       if (Math.abs(mx - right) <= 2) return { id: seg.id, mode: 'end' };
       if (mx >= left && mx <= right) return { id: seg.id, mode: 'move' };
-    } else if (audioSource === 'edited') {
-      // Refresh edited source using the canonical resolver (cleaned preferred).
-      switchAudioSource('edited');
     }
     return null;
   }
