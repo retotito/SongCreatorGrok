@@ -949,7 +949,12 @@
           if (audioSource === 'edited') {
             const newUrl = getEditedAudioUrl();
             currentAudioUrl = newUrl;
-            if (audioEl) { editedAudioLoading = true; audioEl.load(); }
+            await tick();
+            if (audioEl) {
+              editedAudioLoading = true;
+              if (audioEl.src !== newUrl) audioEl.src = newUrl;
+              audioEl.load();
+            }
             loadWaveform(newUrl);
           }
         } catch (e) {
@@ -964,7 +969,12 @@
         if (audioSource === 'edited') {
           const newUrl = getEditedAudioUrl();
           currentAudioUrl = newUrl;
-          if (audioEl) { editedAudioLoading = true; audioEl.load(); }
+          await tick();
+          if (audioEl) {
+            editedAudioLoading = true;
+            if (audioEl.src !== newUrl) audioEl.src = newUrl;
+            audioEl.load();
+          }
           loadWaveform(newUrl);
         }
       }
