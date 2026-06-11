@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
 
@@ -222,6 +222,7 @@
     const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
     cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
+    cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
     draw();
@@ -231,6 +232,7 @@
     pushUndo();
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
+    cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
     draw();
@@ -457,6 +459,10 @@
   let segRecStopTimer = null;       // auto-stop at end of segment
   let segRecUploading = false;
   let segRecPatched = new Set();    // segment ids that have been successfully spliced
+
+  // Auto-regenerate cleaned audio after cleanup changes
+  let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
+  let isRegeneratingCleaned = false; // blocking modal while regenerating
 
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
@@ -860,6 +866,20 @@
       hasUnsavedChanges = false;
       editorState.update(s => ({ ...s, hasChanges: false }));
       console.log(`[Step4] Saved: ${result.note_count} notes, save #${editCount}`);
+
+      // Auto-regenerate cleaned audio if segments exist and something changed
+      if (cleanedAudioDirty && cleanupSegments.length > 0) {
+        cleanedAudioDirty = false;
+        isRegeneratingCleaned = true;
+        try {
+          await generateCleanedAudio($sessionId, serializeCleanupSegments());
+          console.log('[Step4] Cleaned audio regenerated');
+        } catch (e) {
+          console.warn('[Step4] Cleaned audio regeneration failed:', e);
+        } finally {
+          isRegeneratingCleaned = false;
+        }
+      }
     } catch (err) {
       console.error('[Step4] Save error:', err);
       errorMessage.set('Save failed: ' + err.message);
@@ -2240,6 +2260,7 @@
         seg.endMs = Math.max(mouseMs, cleanupDrag.startMs + 50);
       }
       cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+      cleanedAudioDirty = true;
       markUnsaved();
       draw();
       return;
@@ -4358,19 +4379,6 @@
     }
   }
 
-  async function toggleMic() {
-    if (micEnabled) {
-      micShowTrail = true; // always show when activating
-      draw();
-      micStarting = true;
-      await startMic();
-      micStarting = false;
-    } else {
-      stopMic();
-      draw();
-    }
-  }
-
   // ── Segment recording functions ──
   async function armSegmentRecording(segId) {
     const seg = cleanupSegments.find(s => s.id === segId);
@@ -4493,7 +4501,19 @@
       if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
 
       segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
+      // Bust vocal URL cache so the editor plays the new spliced audio
+      const cacheBust = `?v=${Date.now()}`;
+      vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+      if (audioEl) {
+        const wasPlaying = isPlaying;
+        if (wasPlaying) { audioEl.pause(); isPlaying = false; cancelAnimationFrame(animFrame); }
+        audioEl.src = vocalUrl;
+        audioEl.load();
+        if (wasPlaying) audioEl.play().catch(() => {});
+      }
+      cleanedAudioDirty = true;
       cancelSegmentRecording();
+      handleSave(); // triggers auto-regenerate
     } catch (err) {
       console.error('[SegRec] Splice failed:', err);
       alert('Failed to splice recording: ' + err.message);
@@ -5207,6 +5227,14 @@
 </script>
 
 <div class="step-content">
+  {#if isRegeneratingCleaned}
+    <div class="loading-modal-overlay" style="z-index:9999">
+      <div class="loading-modal">
+        <span class="loading-spinner"></span>
+        <span class="loading-label">Regenerating cleaned audio…</span>
+      </div>
+    </div>
+  {/if}
   <div class="toolbar">
     
 
