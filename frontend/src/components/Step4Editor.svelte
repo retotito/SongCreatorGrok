@@ -218,8 +218,9 @@
   function addCleanupSegmentAt(beat) {
     pushUndo();
     const startMs = beatToTime(beat) * 1000;
-    const endMs = startMs + Math.max(500, (15000 / bpm)); // ~1 beat in ms
+    const endMs = startMs + Math.max(500, (15000 / bpm));
     const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
+    console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${startMs.toFixed(0)} endMs=${endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
     cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
     cleanedAudioDirty = true;
@@ -230,6 +231,8 @@
   }
 
   function deleteCleanupSegment(id) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1}`);
     pushUndo();
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
@@ -3303,8 +3306,10 @@
 
   // ── Audio source toggle ──
   function switchAudioSource(source) {
+    const prevSource = audioSource;
     audioSource = source;
     const url = source === 'original' ? originalUrl : source === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
+    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | segRecPatched.size=${segRecPatched.size} | originalVocalUrl=${originalVocalUrl}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -4389,6 +4394,7 @@
   // ── Segment recording functions ──
   async function armSegmentRecording(segId) {
     const seg = cleanupSegments.find(s => s.id === segId);
+    console.log(`[SegRec] Arm segment id=${segId} | startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} dur=${seg ? (seg.endMs - seg.startMs).toFixed(0) : '?'}ms`);
     if (!seg) return;
 
     // Ensure mic is running
@@ -4424,11 +4430,12 @@
 
   async function startSegmentRecording() {
     const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
-    if (!seg || !micStream) return;
+    if (!seg || !micStream) { console.warn('[SegRec] startSegmentRecording: missing seg or micStream', { segRecSegmentId, hasMic: !!micStream }); return; }
 
     const startSec = seg.startMs / 1000;
     const endSec = seg.endMs / 1000;
     const durationSec = endSec - startSec;
+    console.log(`[SegRec] Start recording: preroll=${segRecPrerollSec}s region=${startSec.toFixed(2)}–${endSec.toFixed(2)}s dur=${durationSec.toFixed(2)}s`);
 
     segRecPhase = 'preroll';
     segRecCountdown = Math.ceil(segRecPrerollSec);
@@ -4461,11 +4468,13 @@
     segRecRecorder.onstop = () => {
       segRecBlob = new Blob(segRecChunks, { type: segRecRecorder.mimeType });
       segRecObjectUrl = URL.createObjectURL(segRecBlob);
+      console.log(`[SegRec] Recording done: mimeType=${segRecRecorder.mimeType} size=${segRecBlob.size} bytes objectUrl=${segRecObjectUrl}`);
       segRecPhase = 'review';
       draw();
     };
     segRecRecorder.start();
     segRecPhase = 'recording';
+    console.log(`[SegRec] MediaRecorder started: mimeType=${segRecRecorder.mimeType}`);
     draw();
 
     // Auto-stop after segment duration
@@ -4475,6 +4484,7 @@
   }
 
   function stopSegmentRecording() {
+    console.log(`[SegRec] Stop recording (phase=${segRecPhase} recorderState=${segRecRecorder?.state})`);
     if (segRecStopTimer) { clearTimeout(segRecStopTimer); segRecStopTimer = null; }
     if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
     if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
@@ -4507,11 +4517,14 @@
       const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
       if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
 
+      const spliceResult = await resp.json();
+      console.log(`[SegRec] Splice OK:`, spliceResult);
       segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
       // Bust vocal URL cache so the editor plays the new spliced audio
       const cacheBust = `?v=${Date.now()}`;
       vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
       if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
+      console.log(`[SegRec] Updated vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | audioSource: ${audioSource} → edited`);
       audioSource = 'edited'; // switch to edited so user hears the patched audio
       if (audioEl) {
         const wasPlaying = isPlaying;
@@ -5140,6 +5153,7 @@
       hasUnsavedChanges = false;
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
+      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_vocal_splice=${data.has_vocal_splice}`);
       vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
       // If splices exist, original demucs vocal is served at /demucs; else same as vocals
       originalVocalUrl = (hasVocalsAudio && data.has_vocal_splice)
@@ -5147,6 +5161,8 @@
         : vocalUrl;
       if (data.has_vocal_splice) segRecPatched = new Set(['restored']); // mark as having edits
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
+      console.log(`[Step4] URLs: vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | originalUrl=${originalUrl}`);
+      console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | initial audioSource will be: ${data.has_vocal_splice ? 'edited' : (hasVocalsAudio ? 'vocals' : 'original')}`);
       // Default to whichever audio is available
       if (hasVocalsAudio) {
         audioSource = data.has_vocal_splice ? 'edited' : 'vocals';
