@@ -15,6 +15,7 @@
   let gapMs = 0;
   let audioDuration = 0;
   let vocalUrl = '';
+  let currentAudioUrl = ''; // drives the <audio> src — updated by switchAudioSource
 
   // Raw ms timings for BPM re-quantization
   let rawTimings = [];   // syllable_timings from backend (start/end in seconds)
@@ -3321,8 +3322,8 @@
       stopAllMidiNotes();
     }
 
+    currentAudioUrl = url; // update reactive src — Svelte will update the <audio> element
     if (audioEl) {
-      audioEl.src = url;
       audioEl.load();
       audioEl.oncanplay = () => {
         audioEl.currentTime = time;
@@ -4525,11 +4526,12 @@
       vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
       if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
       console.log(`[SegRec] Updated vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | audioSource: ${audioSource} → edited`);
-      audioSource = 'edited'; // switch to edited so user hears the patched audio
+      audioSource = 'edited';
+      currentAudioUrl = vocalUrl; // edited source = new patched vocal — Svelte binding updates <audio src>
       if (audioEl) {
         const wasPlaying = isPlaying;
         if (wasPlaying) { audioEl.pause(); isPlaying = false; cancelAnimationFrame(animFrame); }
-        audioEl.src = vocalUrl;
+        // src updated via currentAudioUrl binding; just reload
         audioEl.load();
         if (wasPlaying) audioEl.play().catch(() => {});
       }
@@ -5169,7 +5171,9 @@
       } else if (hasOriginalAudio) {
         audioSource = 'original';
       }
-      console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource);
+      // Set the reactive audio URL driving the <audio> element
+      currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
+      console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
       computeTotalBeats();
 
       // Position playhead and scroll at GAP (song start) — unless we have a saved scroll position
@@ -5987,7 +5991,7 @@
   {/if}
 
   <!-- Hidden audio element for playback -->
-  <audio bind:this={audioEl} src={vocalUrl || originalUrl} preload="auto"
+  <audio bind:this={audioEl} src={currentAudioUrl} preload="auto"
     on:ended={() => {
       isPlaying = false;
       cancelAnimationFrame(animFrame);
