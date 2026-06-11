@@ -32,6 +32,7 @@
   let autosaveInterval = null;
   let toastMsg = '';        // brief status message shown as a toast
   let toastTimer = null;
+  let uiBusy = false;
 
   // View state
   let scrollX = 0;
@@ -263,6 +264,10 @@
     }
 
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
+    if (serializeCleanupSegmentsForCleaning().length === 0) {
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+    }
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
     if (cleanupSegments.length === 0) {
       cleanedAudioAvailable = false;
@@ -521,6 +526,7 @@
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
   let isRegeneratingCleaned = false; // blocking modal while regenerating
+  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading;
 
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
@@ -890,8 +896,9 @@
   async function handleSave() {
     if (!$sessionId || isSaving) return;
     isSaving = true;
+    const cleanTargets = serializeCleanupSegmentsForCleaning();
     // Show spinner immediately if we know regeneration will follow
-    const willRegenerate = cleanedAudioDirty && cleanupSegments.length > 0;
+    const willRegenerate = cleanedAudioDirty && cleanTargets.length > 0;
     if (willRegenerate) isRegeneratingCleaned = true;
     try {
       // Serialize notes for the API
@@ -928,12 +935,12 @@
       editorState.update(s => ({ ...s, hasChanges: false }));
       console.log(`[Step4] Saved: ${result.note_count} notes, save #${editCount}`);
 
-      // Auto-regenerate cleaned audio if segments exist and something changed
-      if (cleanedAudioDirty && cleanupSegments.length > 0) {
+      // Auto-regenerate cleaned audio only for non-recorded cleanup segments.
+      if (cleanedAudioDirty && cleanTargets.length > 0) {
         cleanedAudioDirty = false;
         isRegeneratingCleaned = true;
         try {
-          await generateCleanedAudio($sessionId, serializeCleanupSegmentsForCleaning());
+          await generateCleanedAudio($sessionId, cleanTargets);
           cleanedAudioAvailable = true;
           cleanedAudioCacheBust = `?v=${Date.now()}`;
           console.log('[Step4] Cleaned audio regenerated');
@@ -948,6 +955,16 @@
           console.warn('[Step4] Cleaned audio regeneration failed:', e);
         } finally {
           isRegeneratingCleaned = false;
+        }
+      } else if (cleanedAudioDirty) {
+        cleanedAudioDirty = false;
+        cleanedAudioAvailable = false;
+        cleanedAudioCacheBust = '';
+        if (audioSource === 'edited') {
+          const newUrl = getEditedAudioUrl();
+          currentAudioUrl = newUrl;
+          if (audioEl) { audioEl.load(); }
+          loadWaveform(newUrl);
         }
       }
     } catch (err) {
@@ -5555,6 +5572,14 @@
       </div>
     </div>
   {/if}
+  {#if uiBusy}
+    <div class="editor-busy-shield" aria-live="polite" aria-busy="true">
+      <div class="loading-modal">
+        <span class="loading-spinner"></span>
+        <span class="loading-label">{isRegeneratingCleaned ? 'Processing cleaned audio…' : isSaving ? 'Saving changes…' : 'Processing…'}</span>
+      </div>
+    </div>
+  {/if}
   <div class="toolbar">
     
 
@@ -6351,6 +6376,17 @@
   .step-content {
     max-width: 100%;
     margin: 0 auto;
+  }
+
+  .editor-busy-shield {
+    position: fixed;
+    inset: 0;
+    z-index: 9800;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: all;
   }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
