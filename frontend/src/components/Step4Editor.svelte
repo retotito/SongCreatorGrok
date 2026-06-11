@@ -33,6 +33,7 @@
   let toastMsg = '';        // brief status message shown as a toast
   let toastTimer = null;
   let uiBusy = false;
+  let editedAudioLoading = false;
 
   // View state
   let scrollX = 0;
@@ -526,7 +527,7 @@
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
   let isRegeneratingCleaned = false; // blocking modal while regenerating
-  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading;
+  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading || editedAudioLoading;
 
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
@@ -948,7 +949,7 @@
           if (audioSource === 'edited') {
             const newUrl = getEditedAudioUrl();
             currentAudioUrl = newUrl;
-            if (audioEl) { audioEl.load(); }
+            if (audioEl) { editedAudioLoading = true; audioEl.load(); }
             loadWaveform(newUrl);
           }
         } catch (e) {
@@ -963,7 +964,7 @@
         if (audioSource === 'edited') {
           const newUrl = getEditedAudioUrl();
           currentAudioUrl = newUrl;
-          if (audioEl) { audioEl.load(); }
+          if (audioEl) { editedAudioLoading = true; audioEl.load(); }
           loadWaveform(newUrl);
         }
       }
@@ -3460,6 +3461,7 @@
 
     currentAudioUrl = url; // update reactive src — Svelte will update the <audio> element
     if (audioEl) {
+      editedAudioLoading = source === 'edited';
       audioEl.load();
       audioEl.oncanplay = () => {
         audioEl.currentTime = time;
@@ -4703,6 +4705,7 @@
 
       if (audioEl) {
         // Defensive: set src directly as well (in case DOM binding is delayed).
+        editedAudioLoading = true;
         if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
         audioEl.load();
         audioEl.onloadedmetadata = () => {
@@ -5366,6 +5369,7 @@
       // attribute but the browser does not re-fetch/re-buffer unless load() is called.
       await tick();
       if (audioEl && currentAudioUrl) {
+        editedAudioLoading = audioSource === 'edited';
         if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
         audioEl.load();
       }
@@ -6275,6 +6279,8 @@
 
   <!-- Hidden audio element for playback -->
   <audio bind:this={audioEl} src={currentAudioUrl} preload="auto"
+    on:canplay={() => { editedAudioLoading = false; }}
+    on:error={() => { editedAudioLoading = false; }}
     on:ended={() => {
       isPlaying = false;
       cancelAnimationFrame(animFrame);
