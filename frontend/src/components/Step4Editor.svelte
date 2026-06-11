@@ -2306,13 +2306,27 @@
       }
       const mouseMs = beatToTime(xToBeat(mx)) * 1000;
       const msDelta = mouseMs - cleanupDrag.mouseStartMs;
+      // Non-overlap clamping: find sorted neighbours
+      const CLAMP_GAP = 10; // ms minimum gap between segments
+      const sortedOthers = cleanupSegments.filter(s => s.id !== seg.id).sort((a, b) => a.startMs - b.startMs);
       if (cleanupDrag.mode === 'move') {
         seg.startMs = cleanupDrag.startMs + msDelta;
         seg.endMs = cleanupDrag.endMs + msDelta;
+        const duration = cleanupDrag.endMs - cleanupDrag.startMs;
+        const prevN = [...sortedOthers].reverse().find(s => s.startMs < seg.startMs);
+        const nextN = sortedOthers.find(s => s.startMs >= seg.startMs);
+        const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
+        const maxStart = nextN ? nextN.startMs - CLAMP_GAP - duration : Infinity;
+        seg.startMs = Math.max(minStart, Math.min(isFinite(maxStart) ? maxStart : seg.startMs, seg.startMs));
+        seg.endMs = seg.startMs + duration;
       } else if (cleanupDrag.mode === 'start') {
         seg.startMs = Math.min(mouseMs, cleanupDrag.endMs - 50);
+        const prevN = [...sortedOthers].reverse().find(s => s.endMs <= seg.startMs + CLAMP_GAP + 1);
+        if (prevN) seg.startMs = Math.max(seg.startMs, prevN.endMs + CLAMP_GAP);
       } else if (cleanupDrag.mode === 'end') {
         seg.endMs = Math.max(mouseMs, cleanupDrag.startMs + 50);
+        const nextN = sortedOthers.find(s => s.startMs >= seg.endMs - CLAMP_GAP - 1);
+        if (nextN) seg.endMs = Math.min(seg.endMs, nextN.startMs - CLAMP_GAP);
       }
       cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
       cleanedAudioDirty = true;
@@ -2579,8 +2593,44 @@
 
   function handleMouseUp() {
     if (cleanupDrag) {
+      const drag = { ...cleanupDrag };
       cleanupDrag = null;
       draw();
+      // If the dragged segment was spliced and a handle moved inward, restore
+      // the freed audio region from the original demucs vocal before saving.
+      const seg = cleanupSegments.find(s => s.id === drag.id);
+      if (seg && segRecPatched.has(drag.id)) {
+        let freedStart = null, freedEnd = null;
+        if (drag.mode === 'start' && seg.startMs > drag.startMs + 10) {
+          freedStart = drag.startMs;
+          freedEnd = seg.startMs;
+        } else if (drag.mode === 'end' && seg.endMs < drag.endMs - 10) {
+          freedStart = seg.endMs;
+          freedEnd = drag.endMs;
+        }
+        if (freedStart !== null) {
+          console.log(`[SegResize] Spliced segment shrunk — restoring freed region ${freedStart.toFixed(0)}–${freedEnd.toFixed(0)}ms`);
+          fetch(`/api/restore-segment/${$sessionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ start_ms: freedStart, end_ms: freedEnd }),
+          }).then(r => r.json()).then(result => {
+            console.log('[SegResize] Restore OK:', result);
+            const cacheBust = `?v=${Date.now()}`;
+            vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+            if (audioSource === 'edited') {
+              currentAudioUrl = vocalUrl;
+              if (audioEl) { audioEl.src = currentAudioUrl; audioEl.load(); }
+              loadWaveform(currentAudioUrl);
+            }
+            handleSave();
+          }).catch(err => {
+            console.error('[SegResize] Restore failed:', err);
+            handleSave();
+          });
+          return;
+        }
+      }
       if (cleanedAudioDirty) handleSave();
       return;
     }
