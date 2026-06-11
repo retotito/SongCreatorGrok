@@ -2853,8 +2853,8 @@
   // ──── Context Menu ──────────────────────────
   function handleContextMenu(event) {
     event.preventDefault();
-    // No context menu during playback or grid align
-    if (isPlaying || gridAlignMode) return;
+    // No context menu during playback, grid align, or segment recording
+    if (isPlaying || gridAlignMode || segRecPhase !== 'idle') return;
 
     // Paste mode: show minimal paste/cancel menu
     if (pasteMode && clipboard) {
@@ -5416,11 +5416,12 @@
     </div> -->
     <div class="toolbar-toolset-wrapper">
       <div id="mic-controls-wrapper">
-        <button class="tool-btn" class:active={micEnabled} on:click={() => {
+        <button class="tool-btn" class:active={micEnabled} disabled={segRecPhase !== 'idle'} class:disabled-audio={segRecPhase !== 'idle'} on:click={() => {
+          if (segRecPhase !== 'idle') return;
           micEnabled = !micEnabled;
           if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
           toggleMic();
-        }} title="Microphone sing-along (M)">
+        }} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Microphone sing-along (M)'}>
           Mic <span class="mic-icon-wrap" class:mic-off={!micEnabled}>🎙️</span>
         </button>
       {#if micEnabled}
@@ -5587,9 +5588,9 @@
       </div>
       <div id="audio-source-wrapper">
         <div class="audio-source-toggle" title="Audio source">
-          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
-          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0)} on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
-          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
+          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio || segRecPhase !== 'idle'} disabled={segRecPhase !== 'idle'} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
+          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0) || segRecPhase !== 'idle'} disabled={segRecPhase !== 'idle'} on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecPhase !== 'idle' ? 'Disabled during recording' : cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
+          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio || segRecPhase !== 'idle'} disabled={segRecPhase !== 'idle'} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
         </div>
         <div class="volume-control" title="Audio volume">
           <span class="volume-icon" on:click={toggleMuteVocal}>
