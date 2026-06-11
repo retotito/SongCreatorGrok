@@ -411,8 +411,9 @@
   let bpmCalcResult = null; // { bpm, gapMs } computed from linear regression
 
   // Audio source toggle (vocals vs full mix)
-  let audioSource = 'vocals'; // 'vocals' | 'original'
+  let audioSource = 'vocals'; // 'vocals' | 'edited' | 'original'
   let originalUrl = '';
+  let originalVocalUrl = ''; // frozen at load — never changed by splices
   let hasVocalsAudio = true;
   let hasOriginalAudio = true;
 
@@ -3303,7 +3304,7 @@
   // ── Audio source toggle ──
   function switchAudioSource(source) {
     audioSource = source;
-    const url = source === 'original' ? originalUrl : vocalUrl;
+    const url = source === 'original' ? originalUrl : source === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -4510,6 +4511,8 @@
       // Bust vocal URL cache so the editor plays the new spliced audio
       const cacheBust = `?v=${Date.now()}`;
       vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+      if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
+      audioSource = 'edited'; // switch to edited so user hears the patched audio
       if (audioEl) {
         const wasPlaying = isPlaying;
         if (wasPlaying) { audioEl.pause(); isPlaying = false; cancelAnimationFrame(animFrame); }
@@ -5138,6 +5141,7 @@
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
       vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
+      originalVocalUrl = vocalUrl; // freeze original at load time
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
       // Default to whichever audio is available
       if (hasVocalsAudio) {
@@ -5170,7 +5174,7 @@
       loadFlags();
 
       // Load waveform for the active audio source
-      const activeAudioUrl = audioSource === 'original' ? originalUrl : vocalUrl;
+      const activeAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? vocalUrl : originalVocalUrl || vocalUrl;
       if (activeAudioUrl) {
         loadWaveform(activeAudioUrl);
       }
@@ -5503,7 +5507,8 @@
       </div>
       <div id="audio-source-wrapper">
         <div class="audio-source-toggle" title="Audio source">
-          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Vocals' : 'No vocals — go to Step 1 to extract or upload'}>Vocals 🎤</button>
+          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
+          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || segRecPatched.size === 0} on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'No edits yet — record over a cleanup segment first'}>Edited 🎙</button>
           <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
         </div>
         <div class="volume-control" title="Audio volume">
