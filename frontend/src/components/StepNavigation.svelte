@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentStep, steps, canGoToStep, uploadData } from '../stores/appStore.js';
+  import { currentStep, steps, canGoToStep, uploadData, recordingActive } from '../stores/appStore.js';
 
   export let backendStatus = 'checking';
   export let goHome = () => {};
@@ -33,6 +33,7 @@
   });
 
   function goToStep(num) {
+    if ($recordingActive) return;
     if (!$canGoToStep(num)) return;
 
     // Warn before entering Step 4 if no audio files are present
@@ -62,7 +63,7 @@
 
 <div class="topbar" class:topbar-hidden={!topbarVisible}>
   <div class="topbar-left">
-    <button class="home-btn" on:click={goHome} title="Back to Home">🏠</button>
+    <button class="home-btn" on:click={() => { if ($recordingActive) return; goHome(); }} disabled={$recordingActive} title={$recordingActive ? 'Disabled during recording' : 'Back to Home'}>🏠</button>
   </div>
 
   <nav class="step-nav">
@@ -71,9 +72,9 @@
         class="step-btn"
         class:active={$currentStep === step.num}
         class:completed={$currentStep > step.num}
-        class:disabled={!$canGoToStep(step.num)}
+        class:disabled={!$canGoToStep(step.num) || $recordingActive}
         on:click={() => goToStep(step.num)}
-        disabled={!$canGoToStep(step.num)}
+        disabled={!$canGoToStep(step.num) || $recordingActive}
       >
         <span class="step-icon">{step.icon}</span>
         <span class="step-label">{step.label}</span>

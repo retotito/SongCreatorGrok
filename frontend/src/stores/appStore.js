@@ -92,6 +92,9 @@ export const editorState = writable({
   hasChanges: false,
 });
 
+// Recording lock (set by Step4Editor during segment recording)
+export const recordingActive = writable(false);
+
 // Processing state
 export const isProcessing = writable(false);
 export const processingStatus = writable('');

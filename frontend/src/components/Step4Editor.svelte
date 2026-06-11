@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData } from '../stores/appStore.js';
+  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
@@ -486,6 +486,7 @@
   // ── Segment recording ──
   // phase: 'idle' | 'armed' | 'preroll' | 'recording' | 'review'
   let segRecPhase = 'idle';
+  $: recordingActive.set(segRecPhase !== 'idle');
   let segRecSegmentId = null;       // cleanup segment being recorded
   let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
   let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
@@ -5526,9 +5527,9 @@
           {/if}
         </div>
         <div id="pitch-line-controls-wrapper">
-          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio}
-            on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
-            title={hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
+          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || segRecPhase !== 'idle'} disabled={segRecPhase !== 'idle'}
+            on:click={() => { if (segRecPhase !== 'idle') return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
+            title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
             Pitch <span style="font-size:0.85em">〰️</span>
           </button>
           {#if pitchLineLoading}
@@ -5550,13 +5551,14 @@
           <!-- <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); handleBpmChange(); }}>−</button> -->
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.1)) * 1000) / 1000; handleBpmChange(); }}>−.1</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.01)) * 1000) / 1000; handleBpmChange(); }}>−.01</button> -->
-          <input type="number" class="bpm-input" bind:value={bpm} on:change={() => { console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" />
+          <input type="number" class="bpm-input" bind:value={bpm} on:change={() => { if (segRecPhase !== 'idle') return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={segRecPhase !== 'idle'} />
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
           <button class="tool-btn" style="margin-left: 4px;"
-                on:click={openTapper}
-                title="Tap the beat to calculate BPM (Enter key)">
+                on:click={() => { if (segRecPhase !== 'idle') return; openTapper(); }}
+                disabled={segRecPhase !== 'idle'}
+                title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Tap the beat to calculate BPM (Enter key)'}>
             Tap
           </button>
           <!-- Cal button kept for reference (beat marker calibration)
@@ -5570,21 +5572,22 @@
         <div id="gap-controls" title="Click to set a new GAP position on the waveform (Ctrl+G)">
           <span class="bpm-label gap-label">GAP</span>
           <span class="gap-input gap-display" role="button" tabindex="0"
-            on:click={enterSetGapMode}
-            on:keydown={(e) => e.key === 'Enter' && enterSetGapMode()}
-            title="Click to set GAP (Ctrl+G) — {gapMs}ms">
+            on:click={() => { if (segRecPhase !== 'idle') return; enterSetGapMode(); }}
+            on:keydown={(e) => { if (segRecPhase !== 'idle') return; e.key === 'Enter' && enterSetGapMode(); }}
+            title={segRecPhase !== 'idle' ? 'Disabled during recording' : `Click to set GAP (Ctrl+G) — ${gapMs}ms`}
+            style={segRecPhase !== 'idle' ? 'opacity:0.4;pointer-events:none;' : ''}>
             {gapMs} ms
           </span>
         </div>
       </div>
       <div id="edit-controls-wrapper">
-        <button class="tool-btn" on:click={autoFixWordSpaces} title="Convert old-style leading spaces to trailing (for imported songs)">
+        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; autoFixWordSpaces(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
            Fix Spaces&nbsp;🔤
         </button>
-        <button class="tool-btn" on:click={openTextEditor} title="Edit raw Ultrastar .txt">
+        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; openTextEditor(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Edit raw Ultrastar .txt'}>
            Text&nbsp;📝 
         </button>
-        <button class="tool-btn" on:click={() => { loadSessionNotes(); showNotesModal = true; }} title="Session notes">
+        <button class="tool-btn" on:click={() => { if (segRecPhase !== 'idle') return; loadSessionNotes(); showNotesModal = true; }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
       </div>
