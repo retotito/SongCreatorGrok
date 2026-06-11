@@ -1232,7 +1232,8 @@
 
       // Draw as a single smooth filled path
       const scale = wt / 2;
-      ctx.fillStyle = '#4fc3f7';
+      const waveformColor = audioSource === 'edited' ? '#68d4b0' : '#4fc3f7';
+      ctx.fillStyle = waveformColor;
       ctx.globalAlpha = 0.35;
       ctx.beginPath();
       ctx.moveTo(0, midY);
