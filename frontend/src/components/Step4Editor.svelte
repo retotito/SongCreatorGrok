@@ -287,6 +287,82 @@
     handleSave();
   }
 
+  function splitCleanupSegment(id, beat) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
+    const splitMs = beatToTime(beat) * 1000;
+    if (splitMs <= seg.startMs + 50 || splitMs >= seg.endMs - 50) {
+      showToast('Split point too close to segment edge');
+      return;
+    }
+
+    pushUndo();
+    const rightSeg = normalizeCleanupSegment({
+      id: cleanupSegmentIdCounter++,
+      startMs: splitMs,
+      endMs: seg.endMs,
+    });
+    seg.endMs = splitMs;
+    cleanupSegments = [...cleanupSegments, rightSeg]
+      .map(normalizeCleanupSegment)
+      .sort((a, b) => a.startMs - b.startMs);
+
+    // Splitting a recorded segment means both resulting subranges remain recorded.
+    if (segRecPatched.has(id)) {
+      segRecPatched = new Set([...segRecPatched, rightSeg.id]);
+    }
+
+    selectedCleanupSegment = rightSeg.id;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
+  function getJoinableCleanupPairAtBeat(beat) {
+    const beatMs = beatToTime(beat) * 1000;
+    const sorted = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const left = sorted[i];
+      const right = sorted[i + 1];
+      if (beatMs <= left.endMs || beatMs >= right.startMs) continue;
+      const leftPatched = segRecPatched.has(left.id);
+      const rightPatched = segRecPatched.has(right.id);
+      if (leftPatched !== rightPatched) return null;
+      return { left, right, patched: leftPatched };
+    }
+    return null;
+  }
+
+  function joinCleanupSegments(leftId, rightId) {
+    const left = cleanupSegments.find(s => s.id === leftId);
+    const right = cleanupSegments.find(s => s.id === rightId);
+    if (!left || !right) return;
+    const leftPatched = segRecPatched.has(left.id);
+    const rightPatched = segRecPatched.has(right.id);
+    if (leftPatched !== rightPatched) {
+      showToast('Cannot join recorded and clean segments');
+      return;
+    }
+
+    pushUndo();
+    left.endMs = Math.max(left.endMs, right.endMs);
+    cleanupSegments = cleanupSegments
+      .filter(s => s.id !== right.id)
+      .map(normalizeCleanupSegment)
+      .sort((a, b) => a.startMs - b.startMs);
+    if (rightPatched) {
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== right.id));
+    }
+    selectedCleanupSegment = left.id;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
   function getEditedAudioUrl() {
     // Prefer cleaned audio whenever it exists (it includes latest cleanup muting,
     // and on backend it is generated from the current vocal source, including splices).
@@ -6170,12 +6246,16 @@
           <button class="ctx-item" on:click={() => armSegmentRecording(seg.id)}>
             🎙 Record over this segment
           </button>
+          <button class="ctx-item" on:click={() => splitCleanupSegment(seg.id, contextMenu.beat)}>
+            ✂️ Split Cleanup Segment
+          </button>
           <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
             🗑 Delete Cleanup Segment
           </button>
         </div>
       {/if}
     {:else if contextMenu.isWaveformEmpty}
+      {@const joinPair = getJoinableCleanupPairAtBeat(contextMenu.beat)}
       <div
         class="context-menu"
         bind:this={contextMenuEl}
@@ -6188,6 +6268,11 @@
         <button class="ctx-item" on:click={() => addCleanupSegmentAt(contextMenu.beat)}>
           🧹 Add Cleanup Segment
         </button>
+        {#if joinPair}
+          <button class="ctx-item" on:click={() => joinCleanupSegments(joinPair.left.id, joinPair.right.id)}>
+            🔗 Join Adjacent Cleanup Segments
+          </button>
+        {/if}
       </div>
     {:else if contextMenu.isFlag}
       <!-- Flag context menu -->
@@ -6404,7 +6489,7 @@
     position: fixed;
     inset: 0;
     z-index: 9800;
-    background: rgba(255, 0, 0, 0.33);
+    background: rgba(0, 0, 0, 0.35);
     display: flex;
     align-items: center;
     justify-content: center;
