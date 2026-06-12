@@ -87,44 +87,9 @@
       <div class="sm-error">❌ {error}</div>
       <button class="sm-btn" on:click={load}>Retry</button>
     {:else if info}
-      <!-- Data paths -->
+      <!-- Sessions -->
       <div class="sm-section">
-        <div class="sm-section-title">📁 Storage Locations</div>
-        <div class="sm-path-row"><span class="sm-path-label">Sessions</span><code class="sm-path">{info.sessions_dir}</code></div>
-        <div class="sm-path-row"><span class="sm-path-label">Downloads</span><code class="sm-path">{info.downloads_dir}</code></div>
-        <div class="sm-path-row"><span class="sm-path-label">Uploads</span><code class="sm-path">{info.uploads_dir}</code></div>
-      </div>
-
-      <!-- Orphan cleanup -->
-      <div class="sm-section">
-        <div class="sm-section-title">🗑 Orphaned Files</div>
-        {#if info.orphan_files.length === 0}
-          <p class="sm-hint">No orphaned files found.</p>
-        {:else}
-          <p class="sm-hint">{info.orphan_files.length} files not linked to any session — {fmt(info.orphan_size_bytes)} total.</p>
-          <details class="sm-orphan-details">
-            <summary>Show files</summary>
-            <div class="sm-file-list">
-              {#each info.orphan_files as f}
-                <div class="sm-file-row">
-                  <span class="sm-file-name">{f.name}</span>
-                  <span class="sm-file-size">{fmt(f.size)}</span>
-                </div>
-              {/each}
-            </div>
-          </details>
-          <button class="sm-btn sm-btn-danger" on:click={doCleanup} disabled={cleanupRunning}>
-            {cleanupRunning ? '⏳ Cleaning…' : '🗑 Delete Orphaned Files'}
-          </button>
-          {#if cleanupResult}
-            <p class="sm-success">✅ Deleted {cleanupResult.deleted.length} files.{cleanupResult.errors.length > 0 ? ` ${cleanupResult.errors.length} errors.` : ''}</p>
-          {/if}
-        {/if}
-      </div>
-
-      <!-- Session list -->
-      <div class="sm-section">
-        <div class="sm-section-title">📋 All Sessions ({info.sessions.length})</div>
+        <div class="sm-section-title">📋 Sessions ({info.sessions.length})</div>
         {#if info.sessions.length === 0}
           <p class="sm-hint">No sessions found.</p>
         {:else}
@@ -171,6 +136,48 @@
             {/each}
           </div>
         {/if}
+      </div>
+
+      <!-- Unlinked data — files on disk not tied to any session -->
+      <div class="sm-section sm-section-unlinked">
+        <div class="sm-section-title">
+          🗂 Unlinked Data on Disk
+          {#if info.orphan_files.length > 0}
+            <span class="sm-orphan-badge">{info.orphan_files.length} file{info.orphan_files.length !== 1 ? 's' : ''} · {fmt(info.orphan_size_bytes)}</span>
+          {:else}
+            <span class="sm-orphan-badge sm-orphan-clean">clean ✓</span>
+          {/if}
+        </div>
+        <p class="sm-hint">Files found on disk that can't be connected to any session — leftover from deleted or old sessions.</p>
+        {#if info.orphan_files.length === 0}
+          <p class="sm-hint sm-hint-ok">✓ Nothing to clean up.</p>
+        {:else}
+          <details class="sm-orphan-details">
+            <summary>Show {info.orphan_files.length} file{info.orphan_files.length !== 1 ? 's' : ''}</summary>
+            <div class="sm-file-list">
+              {#each info.orphan_files as f}
+                <div class="sm-file-row">
+                  <span class="sm-file-name">{f.name}</span>
+                  <span class="sm-file-size">{fmt(f.size)}</span>
+                </div>
+              {/each}
+            </div>
+          </details>
+          <button class="sm-btn sm-btn-danger" on:click={doCleanup} disabled={cleanupRunning}>
+            {cleanupRunning ? '⏳ Cleaning…' : '🗑 Delete Unlinked Files'}
+          </button>
+          {#if cleanupResult}
+            <p class="sm-success">✅ Deleted {cleanupResult.deleted.length} files.{cleanupResult.errors.length > 0 ? ` ${cleanupResult.errors.length} errors.` : ''}</p>
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Storage paths -->
+      <div class="sm-section">
+        <div class="sm-section-title">📁 Storage Locations</div>
+        <div class="sm-path-row"><span class="sm-path-label">Sessions</span><code class="sm-path">{info.sessions_dir}</code></div>
+        <div class="sm-path-row"><span class="sm-path-label">Downloads</span><code class="sm-path">{info.downloads_dir}</code></div>
+        <div class="sm-path-row"><span class="sm-path-label">Uploads</span><code class="sm-path">{info.uploads_dir}</code></div>
       </div>
 
       <!-- Manual cleanup commands -->
@@ -327,6 +334,24 @@
   .sm-badge-generated { background: #1b3a1b; color: #66bb6a; }
   .sm-badge-uploaded, .sm-badge-created { background: #2a3a5e; color: #90caf9; }
   .sm-badge-generation_failed { background: #3a1a1a; color: #ef9a9a; }
+
+  .sm-section-unlinked { border-left: 3px solid #7a4a00; }
+
+  .sm-orphan-badge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 10px;
+    background: #3a2a0a;
+    color: #ffb74d;
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+    vertical-align: middle;
+  }
+  .sm-orphan-clean { background: #1b3a1b; color: #66bb6a; }
+  .sm-hint-ok { color: #66bb6a; }
 
   .sm-orphan-details, .sm-file-details { margin: 0.4rem 0; }
   .sm-orphan-details summary, .sm-file-details summary {
