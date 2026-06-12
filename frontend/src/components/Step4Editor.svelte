@@ -140,6 +140,25 @@
   let flagIdCounter = 1;
   let selectedFlag = null;
 
+  function normalizeFlag(flag) {
+    const beat = Math.round(Number(flag?.beat) || 0);
+    const parsedTimeMs = Number(flag?.timeMs);
+    const timeMs = Number.isFinite(parsedTimeMs)
+      ? Math.max(0, parsedTimeMs)
+      : Math.max(0, beatToTime(beat) * 1000);
+    return {
+      id: Number(flag?.id),
+      beat: Math.round(timeToBeat(timeMs / 1000)),
+      timeMs,
+    };
+  }
+
+  function resyncFlagsToGrid() {
+    if (!flags.length) return;
+    flags = flags.map(normalizeFlag);
+    saveFlags();
+  }
+
   // Vocal cleanup segments (waveform-only helper ranges)
   let cleanupSegments = []; // { id, startMs, endMs }
   let cleanupSegmentIdCounter = 1;
@@ -154,7 +173,7 @@
       const raw = localStorage.getItem(`editor_flags_${$sessionId}`);
       if (raw) {
         const parsed = JSON.parse(raw);
-        flags = parsed.flags || [];
+        flags = (parsed.flags || []).map(normalizeFlag);
         flagIdCounter = (parsed.counter || 0) + 1;
       }
     } catch { /* ignore */ }
@@ -166,7 +185,12 @@
   }
 
   function addFlagAt(beat) {
-    flags = [...flags, { id: flagIdCounter++, beat: Math.round(beat) }];
+    const snappedBeat = Math.round(beat);
+    flags = [...flags, {
+      id: flagIdCounter++,
+      beat: snappedBeat,
+      timeMs: Math.max(0, beatToTime(snappedBeat) * 1000),
+    }];
     saveFlags();
     closeContextMenu();
     draw();
@@ -1392,6 +1416,7 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs(bpmActuallyChanged);
+    resyncFlagsToGrid();
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
@@ -2615,6 +2640,7 @@
       const flag = flags.find(f => f.id === selectedFlag);
       if (flag) {
         flag.beat = Math.round(xToBeat(mx));
+        flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
         flags = [...flags];
         draw();
       }
@@ -8067,8 +8093,24 @@
   .dot.yellow { background: #fdd835; }
   .dot.gold { background: #ffd700; }
   .dot.orange { background: #ff9800; }
-  .dot.red-line { background: #c62828; width: 2px; height: 12px; }
-  .dot.green-flag { background: #4ade80; width: 2px; height: 12px; }
+  .dot.red-line {
+    background: repeating-linear-gradient(
+      to bottom,
+      #c62828 0 2px,
+      transparent 2px 5px
+    );
+    width: 2px;
+    height: 12px;
+  }
+  .dot.green-flag {
+    background: repeating-linear-gradient(
+      to bottom,
+      #4ade80 0 2px,
+      transparent 2px 5px
+    );
+    width: 2px;
+    height: 12px;
+  }
   .dot.cleanup-range { background: #ff6b6b; }
   .dot.recorded-range { background: #80e080; }
 
