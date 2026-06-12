@@ -7124,9 +7124,12 @@
             {/each}
           </select>
         </label>
-        <label>
-          Audio Source
-          <select class="mic-select" bind:value={segRegenAudioSource}>
+        <label class="seg-regen-audio-label" title="important: select the adio source">
+          <span class="seg-regen-audio-head">
+            <span>Audio Source</span>
+            <span class="seg-regen-audio-flag">!</span>
+          </span>
+          <select class="mic-select seg-regen-audio-select" bind:value={segRegenAudioSource}>
             <option value="vocals">Vocal{segRegenCurrentEditorSource === 'vocals' ? ' (current)' : ''}</option>
             <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited{segRegenCurrentEditorSource === 'edited' ? ' (current)' : ''}</option>
           </select>
@@ -9044,6 +9047,40 @@
     gap: 4px;
     font-size: 0.75rem;
     color: #8ab8c7;
+  }
+
+  .seg-regen-audio-label {
+    background: linear-gradient(180deg, rgba(255, 187, 0, 0.14), rgba(255, 187, 0, 0.06));
+    border: 1px solid rgba(255, 187, 0, 0.45);
+    border-radius: 7px;
+    padding: 6px;
+  }
+
+  .seg-regen-audio-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #ffd666;
+    font-weight: 700;
+  }
+
+  .seg-regen-audio-flag {
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 800;
+    background: #ffb300;
+    color: #261a00;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  }
+
+  .seg-regen-audio-select {
+    border-color: #ffb300;
+    box-shadow: 0 0 0 1px rgba(255, 187, 0, 0.25) inset;
   }
 
   .seg-regen-mode-help {
