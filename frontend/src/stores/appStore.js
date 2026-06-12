@@ -104,6 +104,9 @@ export const errorMessage = writable('');
 export const generationModalOpen = writable(false);
 export const generationUseCleaned = writable(false);
 
+// Global UI overlays that should suspend editor-wide shortcuts
+export const storageManagerOpen = writable(false);
+
 // Steps definition (Step 3 is a modal overlay, not a tab)
 export const steps = [
   { num: 1, label: 'Upload', icon: '📁' },
@@ -131,6 +134,7 @@ export function resetSession() {
   localStorage.removeItem('currentStep');
   localStorage.removeItem('sessionId');
   generationModalOpen.set(false);
+  storageManagerOpen.set(false);
   currentStep.set(0);
   sessionId.set(null);
   uploadData.set({ filename: null, hasVocals: false, vocalsFilename: null, hasOriginal: false, vocalUrl: null });

@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentStep, steps, canGoToStep, uploadData, recordingActive } from '../stores/appStore.js';
+  import { currentStep, steps, canGoToStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import StorageManager from './StorageManager.svelte';
 
   let showStorage = false;
@@ -33,7 +33,10 @@
   });
   onDestroy(() => {
     window.removeEventListener('scroll', handleScroll);
+    storageManagerOpen.set(false);
   });
+
+  $: storageManagerOpen.set(showStorage);
 
   function goToStep(num) {
     if ($recordingActive) return;

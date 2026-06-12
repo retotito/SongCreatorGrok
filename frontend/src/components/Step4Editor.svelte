@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive } from '../stores/appStore.js';
+  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
@@ -4490,6 +4490,7 @@
     // Skip all shortcuts when text editor modal is open
     if (showTextEditor) return;
     if (showNotesModal) return;
+    if ($storageManagerOpen) return;
     // Skip shortcuts when typing in a text/number input field (BPM, GAP, context menu, etc.)
     // For range inputs: only block arrow keys (which move the slider); let all other shortcuts through
     if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
