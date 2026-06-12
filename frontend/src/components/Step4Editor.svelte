@@ -2268,6 +2268,12 @@
       if (hit) {
         const seg = cleanupSegments.find(s => s.id === hit.id);
         if (seg) {
+          // Don't allow dragging segments with recordings
+          if (segRecPatched.has(seg.id)) {
+            selectedCleanupSegment = seg.id;
+            draw();
+            return;
+          }
           pushUndo();
           selectedCleanupSegment = seg.id;
           cleanupDrag = {
@@ -2693,10 +2699,12 @@
 
       if (showWaveform && my < waveTop()) {
         const cleanupHit = hitTestCleanupSegment(mx, my);
-        if (cleanupHit?.mode === 'start' || cleanupHit?.mode === 'end') {
-          cursor = 'col-resize';
-        } else if (cleanupHit?.mode === 'move') {
-          cursor = 'move';
+        if (cleanupHit && !segRecPatched.has(cleanupHit.id)) {
+          if (cleanupHit.mode === 'start' || cleanupHit.mode === 'end') {
+            cursor = 'col-resize';
+          } else if (cleanupHit.mode === 'move') {
+            cursor = 'move';
+          }
         }
       }
 
