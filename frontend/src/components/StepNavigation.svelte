@@ -1,6 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { currentStep, steps, canGoToStep, uploadData, recordingActive } from '../stores/appStore.js';
+  import StorageManager from './StorageManager.svelte';
+
+  let showStorage = false;
 
   export let backendStatus = 'checking';
   export let goHome = () => {};
@@ -96,8 +99,13 @@
         {/if}
       </div>
     {/if}
+    <button class="gear-btn" on:click={() => showStorage = !showStorage} title="Storage Manager">⚙️</button>
   </div>
 </div>
+
+{#if showStorage}
+  <StorageManager on:close={() => showStorage = false} />
+{/if}
 
 <!--
 <div class="step-actions">
@@ -255,7 +263,26 @@
   .topbar-right {
     min-width: 160px;
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .gear-btn {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0.2rem 0.35rem;
+    line-height: 1;
+    color: #888;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .gear-btn:hover {
+    background: #1e2040;
+    border-color: #333;
+    color: #ccc;
   }
 
   .backend-status {

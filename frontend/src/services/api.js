@@ -313,6 +313,15 @@ export async function generateEmptyUltrastar(sessionId) {
   return request('POST', `/generate/empty/${sessionId}`);
 }
 
+// ─── Storage Manager ───────────────────────────
+export async function getStorageInfo() {
+  return request('GET', '/storage-info');
+}
+
+export async function cleanupOrphans() {
+  return request('POST', '/cleanup-orphans');
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

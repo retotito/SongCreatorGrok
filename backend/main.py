@@ -779,6 +779,153 @@ async def delete_session_endpoint(session_id: str):
     return {"status": "ok"}
 
 
+@app.get("/api/storage-info")
+async def get_storage_info():
+    """Return per-session disk usage and data directory paths for the storage manager."""
+    import glob as _glob
+
+    def _dir_size(path: str) -> int:
+        total = 0
+        try:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    def _file_size(path: str) -> int:
+        try:
+            return os.path.getsize(path) if path and os.path.exists(path) else 0
+        except OSError:
+            return 0
+
+    session_rows = []
+    for sid, s in sessions.items():
+        result = s.get("result") or {}
+        files = []
+
+        # Upload dir
+        upload_dir = os.path.join(UPLOAD_DIR, sid)
+        upload_size = _dir_size(upload_dir) if os.path.isdir(upload_dir) else 0
+
+        # Audio files
+        for key in ("original_audio", "vocal_audio", "original_demucs_vocal"):
+            p = s.get(key)
+            if p and os.path.exists(p):
+                files.append({"label": key, "path": p, "size": _file_size(p)})
+
+        # Patched vocals
+        for p in s.get("patched_vocal_files", []):
+            if p and os.path.exists(p):
+                files.append({"label": "patched_vocal", "path": p, "size": _file_size(p)})
+
+        # Cleaned vocal
+        cp = result.get("cleaned_vocal_path")
+        if cp and os.path.exists(cp):
+            files.append({"label": "cleaned_vocal", "path": cp, "size": _file_size(cp)})
+
+        # Generated files
+        for key in ("txt_file", "midi_file", "summary_file"):
+            fname = result.get(key)
+            if fname:
+                p = os.path.join(DOWNLOADS_DIR, fname)
+                if os.path.exists(p):
+                    files.append({"label": key, "path": p, "size": _file_size(p)})
+
+        total_size = upload_size + sum(f["size"] for f in files)
+
+        session_rows.append({
+            "id": sid,
+            "artist": s.get("artist", "Unknown"),
+            "title": s.get("title", "Untitled"),
+            "status": "generated" if result else s.get("status", "unknown"),
+            "created_at": s.get("created_at", 0),
+            "total_size_bytes": total_size,
+            "files": files,
+        })
+
+    session_rows.sort(key=lambda x: x["created_at"], reverse=True)
+
+    # Orphan scan: downloads files not referenced by any session
+    all_referenced = set()
+    for s in sessions.values():
+        r = s.get("result") or {}
+        for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            fname = r.get(key)
+            if fname:
+                all_referenced.add(fname)
+        cp = r.get("cleaned_vocal_path")
+        if cp:
+            all_referenced.add(os.path.basename(cp))
+        for fn in s.get("generated_files", []):
+            all_referenced.add(fn)
+
+    orphan_files = []
+    orphan_size = 0
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if fname not in all_referenced:
+                sz = _file_size(fpath)
+                orphan_files.append({"path": fpath, "name": fname, "size": sz})
+                orphan_size += sz
+    except OSError:
+        pass
+
+    return {
+        "status": "ok",
+        "data_dir": _DATA_DIR,
+        "sessions_dir": SESSIONS_DIR,
+        "downloads_dir": DOWNLOADS_DIR,
+        "uploads_dir": UPLOAD_DIR,
+        "sessions": session_rows,
+        "orphan_files": orphan_files,
+        "orphan_size_bytes": orphan_size,
+    }
+
+
+@app.post("/api/cleanup-orphans")
+async def cleanup_orphans():
+    """Delete download files not referenced by any active session."""
+    all_referenced = set()
+    for s in sessions.values():
+        r = s.get("result") or {}
+        for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            fname = r.get(key)
+            if fname:
+                all_referenced.add(fname)
+        cp = r.get("cleaned_vocal_path")
+        if cp:
+            all_referenced.add(os.path.basename(cp))
+        for fn in s.get("generated_files", []):
+            all_referenced.add(fn)
+
+    deleted = []
+    errors = []
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if fname not in all_referenced:
+                try:
+                    os.remove(fpath)
+                    deleted.append(fname)
+                except OSError as e:
+                    errors.append({"file": fname, "error": str(e)})
+    except OSError:
+        pass
+
+    log_step("CLEANUP", f"Orphan cleanup: deleted {len(deleted)} files, {len(errors)} errors")
+    return {"status": "ok", "deleted": deleted, "errors": errors}
+
+
 @app.post("/api/resume/{session_id}")
 async def resume_specific_session(session_id: str):
     """Resume an existing session by ID (opens it without cloning)."""
