@@ -4491,19 +4491,6 @@
     if (showTextEditor) return;
     if (showNotesModal) return;
     if ($storageManagerOpen) return;
-
-    // If focus/selection is inside the Storage Manager popup, do not hijack
-    // native Cmd/Ctrl shortcuts like copy/select-all.
-    const targetEl = e.target instanceof HTMLElement ? e.target : null;
-    if (targetEl?.closest('.sm-panel')) return;
-
-    // If user selected plain text in the UI, let browser copy/select behavior run.
-    if (e.metaKey || e.ctrlKey) {
-      const k = e.key.toLowerCase();
-      const hasTextSelection = !!window.getSelection()?.toString();
-      if (hasTextSelection && (k === 'c' || k === 'a')) return;
-    }
-
     // Skip shortcuts when typing in a text/number input field (BPM, GAP, context menu, etc.)
     // For range inputs: only block arrow keys (which move the slider); let all other shortcuts through
     if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
