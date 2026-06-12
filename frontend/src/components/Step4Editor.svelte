@@ -717,7 +717,9 @@
   // ── Segment recording ──
   // phase: 'idle' | 'armed' | 'preroll' | 'recording' | 'review'
   let segRecPhase = 'idle';
-  $: recordingActive.set(segRecPhase !== 'idle');
+  let uiModalGuardActive = false;
+  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen;
+  $: recordingActive.set(uiModalGuardActive);
   let segRecSegmentId = null;       // cleanup segment being recorded
   let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
   let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
@@ -1530,12 +1532,12 @@
         } else if (patched) {
           ctx.fillStyle = selected ? 'rgba(100, 220, 100, 0.38)' : 'rgba(100, 220, 100, 0.22)';
         } else {
-          ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.32)' : 'rgba(255, 107, 107, 0.2)';
+          ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.52)' : 'rgba(255, 107, 107, 0.4)';
         }
         ctx.fillRect(left, 0, width, wt);
 
         const handleW = 2;
-        ctx.fillStyle = patched ? '#80e080' : (selected ? '#ffd2d2' : '#ff9e9e');
+        ctx.fillStyle = patched ? '#80e080' : '#ff6b6b';
         ctx.fillRect(left - handleW / 2, 0, handleW, wt);
         ctx.fillRect(right - handleW / 2, 0, handleW, wt);
       }
@@ -6217,12 +6219,12 @@
     </div> -->
     <div class="toolbar-toolset-wrapper">
       <div id="mic-controls-wrapper">
-        <button class="tool-btn" class:active={micEnabled} disabled={segRecPhase !== 'idle'} class:disabled-audio={segRecPhase !== 'idle'} on:click={() => {
-          if (segRecPhase !== 'idle') return;
+        <button class="tool-btn" class:active={micEnabled} disabled={uiModalGuardActive} class:disabled-audio={uiModalGuardActive} on:click={() => {
+          if (uiModalGuardActive) return;
           micEnabled = !micEnabled;
           if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
           toggleMic();
-        }} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Microphone sing-along (M)'}>
+        }} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Microphone sing-along (M)'}>
           Mic <span class="mic-icon-wrap" class:mic-off={!micEnabled}>🎙️</span>
         </button>
       {#if micEnabled}
@@ -6263,14 +6265,14 @@
       </div>
       <div id="vocal_trace_outer_wrapper">
         <div id="vocal_trace-controls-wrapper">
-          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || segRecPhase !== 'idle'} on:click={(e) => {
-            if (segRecPhase !== 'idle') return;
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} on:click={(e) => {
+            if (uiModalGuardActive) return;
             if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
             vocalTraceEnabled = !vocalTraceEnabled;
             if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
             toggleVocalTrace();
             e.currentTarget.blur();
-          }} title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
+          }} title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
             Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
           </button>
           {#if vocalTraceLoading}
@@ -6296,9 +6298,9 @@
           {/if}
         </div>
         <div id="pitch-line-controls-wrapper">
-          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || segRecPhase !== 'idle'} disabled={segRecPhase !== 'idle'}
-            on:click={() => { if (segRecPhase !== 'idle') return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
-            title={segRecPhase !== 'idle' ? 'Disabled during recording' : hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
+          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} disabled={uiModalGuardActive}
+            on:click={() => { if (uiModalGuardActive) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
+            title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
             Pitch <span style="font-size:0.85em">〰️</span>
           </button>
           {#if pitchLineLoading}
@@ -6320,14 +6322,14 @@
           <!-- <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); handleBpmChange(); }}>−</button> -->
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.1)) * 1000) / 1000; handleBpmChange(); }}>−.1</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.01)) * 1000) / 1000; handleBpmChange(); }}>−.01</button> -->
-          <input type="number" class="bpm-input" class:disabled-audio={segRecPhase !== 'idle'} bind:value={bpm} on:change={() => { if (segRecPhase !== 'idle') return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={segRecPhase !== 'idle'} />
+          <input type="number" class="bpm-input" class:disabled-audio={uiModalGuardActive} bind:value={bpm} on:change={() => { if (uiModalGuardActive) return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={uiModalGuardActive} />
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
-          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} style="margin-left: 4px;"
-                on:click={() => { if (segRecPhase !== 'idle') return; openTapper(); }}
-                disabled={segRecPhase !== 'idle'}
-                title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Tap the beat to calculate BPM (Enter key)'}>
+              <button class="tool-btn" class:disabled-audio={uiModalGuardActive} style="margin-left: 4px;"
+                on:click={() => { if (uiModalGuardActive) return; openTapper(); }}
+                disabled={uiModalGuardActive}
+                title={uiModalGuardActive ? 'Disabled while modal is active' : 'Tap the beat to calculate BPM (Enter key)'}>
             Tap
           </button>
           <!-- Cal button kept for reference (beat marker calibration)
@@ -6340,23 +6342,23 @@
         </div>
         <div id="gap-controls" title="Click to set a new GAP position on the waveform (Ctrl+G)">
           <span class="bpm-label gap-label">GAP</span>
-          <span class="gap-input gap-display" class:disabled-audio={segRecPhase !== 'idle'} role="button" tabindex="0"
-            on:click={() => { if (segRecPhase !== 'idle') return; enterSetGapMode(); }}
-            on:keydown={(e) => { if (segRecPhase !== 'idle') return; e.key === 'Enter' && enterSetGapMode(); }}
-            title={segRecPhase !== 'idle' ? 'Disabled during recording' : `Click to set GAP (Ctrl+G) — ${gapMs}ms`}
+          <span class="gap-input gap-display" class:disabled-audio={uiModalGuardActive} role="button" tabindex="0"
+            on:click={() => { if (uiModalGuardActive) return; enterSetGapMode(); }}
+            on:keydown={(e) => { if (uiModalGuardActive) return; e.key === 'Enter' && enterSetGapMode(); }}
+            title={uiModalGuardActive ? 'Disabled while modal is active' : `Click to set GAP (Ctrl+G) — ${gapMs}ms`}
             >
             {gapMs} ms
           </span>
         </div>
       </div>
       <div id="edit-controls-wrapper">
-          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; autoFixWordSpaces(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; autoFixWordSpaces(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
            Fix Spaces&nbsp;🔤
         </button>
-          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; openTextEditor(); }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Edit raw Ultrastar .txt'}>
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; openTextEditor(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Edit raw Ultrastar .txt'}>
            Text&nbsp;📝 
         </button>
-          <button class="tool-btn" class:disabled-audio={segRecPhase !== 'idle'} on:click={() => { if (segRecPhase !== 'idle') return; loadSessionNotes(); showNotesModal = true; }} disabled={segRecPhase !== 'idle'} title={segRecPhase !== 'idle' ? 'Disabled during recording' : 'Session notes'}>
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; loadSessionNotes(); showNotesModal = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
       </div>
@@ -6731,7 +6733,7 @@
             🎙 Record over this segment
           </button>
           <button class="ctx-item" on:click={() => openSegmentRegenerateFromCleanup(seg)}>
-            🧠 Regenerate Notes In Segment
+            🤖 AI Generate Notes In Segment
           </button>
           {#if isPatchedSeg}
             <button class="ctx-item" on:click={() => emptyRecordedCleanupSegment(seg.id)}>
@@ -6775,7 +6777,7 @@
         </button>
         {#if isBeatInsideActiveLoop(contextMenu.beat)}
           <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
-            🧠 Segment AI (Loop Range)
+            🤖 AI Generate Notes In Loop
           </button>
         {/if}
         {#if joinPair}
@@ -6833,7 +6835,7 @@
         </button>
         {#if isBeatInsideActiveLoop(contextMenu.beat)}
           <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
-            🧠 Segment AI (Loop Range)
+            🤖 AI Generate Notes In Loop
           </button>
         {/if}
         {#if clipboard}
@@ -6888,6 +6890,7 @@
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
     <span class="legend-item"><span class="dot green-flag"></span> Flag</span>
     <span class="legend-item"><span class="dot cleanup-range"></span> Cleanup segment</span>
+    <span class="legend-item"><span class="dot recorded-range"></span> Recorded segment</span>
   </div>
 
   <!-- Stats bar for debugging timing -->
@@ -7011,25 +7014,11 @@
       style="left:{segRegenModalX}px;top:{segRegenModalY}px"
       on:mousedown={segRegenModalMouseDown}
       role="dialog"
-      aria-label="Segment regenerate"
+      aria-label="AI note generation"
     >
-      <div class="seg-regen-modal-title">🧠 Segment Regenerate</div>
+      <div class="seg-regen-modal-title">🤖 AI Note Generation</div>
       <div class="seg-regen-modal-subtitle">
-        {segRegenRange.sourceType === 'cleanup' ? 'Cleanup Segment' : 'Loop Range'}
-        · {formatTime(segRegenRange.startMs / 1000)} → {formatTime(segRegenRange.endMs / 1000)}
-        ({formatTime((segRegenRange.endMs - segRegenRange.startMs) / 1000)})
-        {#if segRegenRange.sourceType === 'loop' && hasActiveLoopRange()}
-          · beats {Math.min(loopStartBeat, loopEndBeat).toFixed(2)} → {Math.max(loopStartBeat, loopEndBeat).toFixed(2)}
-        {/if}
-      </div>
-
-      <div class="seg-regen-mode-row">
-        <button class="tool-btn sm" class:active={segRegenMode === 'lyrics_first'} on:click={() => segRegenMode = 'lyrics_first'}>
-          Lyrics-first
-        </button>
-        <button class="tool-btn sm" class:active={segRegenMode === 'one_go'} on:click={() => segRegenMode = 'one_go'}>
-          One-go
-        </button>
+        Section · {formatTime(segRegenRange.startMs / 1000)} → {formatTime(segRegenRange.endMs / 1000)}
       </div>
 
       <div class="seg-regen-options-grid">
@@ -7044,14 +7033,6 @@
           </select>
         </label>
         <label>
-          Preset
-          <select class="mic-select" bind:value={segRegenPreset}>
-            <option value="fast">Fast</option>
-            <option value="balanced">Balanced</option>
-            <option value="accurate">Accurate</option>
-          </select>
-        </label>
-        <label>
           Audio Source
           <select class="mic-select" bind:value={segRegenAudioSource}>
             <option value="current">Current ({audioSource})</option>
@@ -7061,66 +7042,52 @@
         </label>
       </div>
 
-      {#if segRegenMode === 'lyrics_first'}
-        <div class="seg-regen-mode-help">
-          Step 1: recognize local lyrics on an isolated clip and preview confidence.
-          Step 2: continue to note generation only if text is correct.
-        </div>
-        <label class="seg-regen-toggle">
-          <input type="checkbox" bind:checked={segRegenAutoHyphenate} />
-          Auto-hyphenate after preview
-        </label>
-        <div class="seg-regen-actions">
-          <button class="btn btn-primary" on:click={previewSegmentLyrics} disabled={segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}>Preview Lyrics</button>
-          <button
-            class="btn"
-            disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
-            on:click={async () => {
-              if (segRegenPreviewLines.length === 0) {
-                showToast('Run Preview Lyrics first');
-                return;
-              }
-              segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines);
-            }}
-          >Hyphenate</button>
-          <button
-            class="btn"
-            disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
-            on:click={generateNotesFromSegmentPreview}
-          >{segRegenGenerateLoading ? 'Generating...' : 'Generate Notes'}</button>
-        </div>
-        <div class="seg-regen-preview">
-          {#if segRegenPreviewLoading}
-            <div class="seg-regen-preview-state">Recognizing lyrics...</div>
-          {:else if segRegenHyphenateLoading}
-            <div class="seg-regen-preview-state">Applying hyphenation...</div>
-          {:else if segRegenPreviewError}
-            <div class="seg-regen-preview-error">{segRegenPreviewError}</div>
-          {:else if segRegenPreviewLines.length > 0}
-            <div class="seg-regen-preview-head">
-              <span>Preview {segRegenPreviewHyphenated ? '(hyphenated)' : '(raw)'}</span>
-              {#if segRegenPreviewConfidence !== null}
-                <span>Conf {(segRegenPreviewConfidence * 100).toFixed(0)}%</span>
-              {/if}
-            </div>
-            <div class="seg-regen-preview-body">
-              {#each segRegenPreviewLines as line}
-                <div class="seg-regen-preview-line">{line}</div>
-              {/each}
-            </div>
-          {:else}
-            <div class="seg-regen-preview-state">No preview yet.</div>
-          {/if}
-        </div>
-      {:else}
-        <div class="seg-regen-mode-help">
-          Runs full local pipeline in one go (replace notes in selected range).
-          Existing notes in range will be replaced after snapshot.
-        </div>
-        <div class="seg-regen-actions">
-          <button class="btn btn-primary" on:click={runSegmentOneGoRegenerate}>Run One-Go Regenerate</button>
-        </div>
-      {/if}
+      <label class="seg-regen-toggle">
+        <input type="checkbox" bind:checked={segRegenAutoHyphenate} />
+        Auto-hyphenate after preview
+      </label>
+      <div class="seg-regen-actions">
+        <button class="btn btn-primary" on:click={previewSegmentLyrics} disabled={segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}>Preview Lyrics</button>
+        <button
+          class="btn"
+          disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+          on:click={async () => {
+            if (segRegenPreviewLines.length === 0) {
+              showToast('Run Preview Lyrics first');
+              return;
+            }
+            segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines);
+          }}
+        >Hyphenate</button>
+        <button
+          class="btn"
+          disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+          on:click={generateNotesFromSegmentPreview}
+        >{segRegenGenerateLoading ? 'Generating...' : 'Generate Notes'}</button>
+      </div>
+      <div class="seg-regen-preview">
+        {#if segRegenPreviewLoading}
+          <div class="seg-regen-preview-state">Recognizing lyrics...</div>
+        {:else if segRegenHyphenateLoading}
+          <div class="seg-regen-preview-state">Applying hyphenation...</div>
+        {:else if segRegenPreviewError}
+          <div class="seg-regen-preview-error">{segRegenPreviewError}</div>
+        {:else if segRegenPreviewLines.length > 0}
+          <div class="seg-regen-preview-head">
+            <span>Preview {segRegenPreviewHyphenated ? '(hyphenated)' : '(raw)'}</span>
+            {#if segRegenPreviewConfidence !== null}
+              <span>Conf {(segRegenPreviewConfidence * 100).toFixed(0)}%</span>
+            {/if}
+          </div>
+          <div class="seg-regen-preview-body">
+            {#each segRegenPreviewLines as line}
+              <div class="seg-regen-preview-line">{line}</div>
+            {/each}
+          </div>
+        {:else}
+          <div class="seg-regen-preview-state">No preview yet.</div>
+        {/if}
+      </div>
 
       <div class="seg-regen-footer">
         <button class="btn" on:click={closeSegmentRegenerateModal}>Close</button>
@@ -7968,11 +7935,11 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    background: rgba(255, 107, 107, 0.2);
+    background: #ff6b6b;
   }
 
   .scrollbar-cleanup-seg.patched {
-    background: rgba(100, 220, 100, 0.22);
+    background: #80e080;
   }
 
   .scrollbar-handle {
@@ -8045,6 +8012,7 @@
   .dot.red-line { background: #c62828; width: 2px; height: 12px; }
   .dot.green-flag { background: #4ade80; width: 2px; height: 12px; }
   .dot.cleanup-range { background: #ff6b6b; }
+  .dot.recorded-range { background: #80e080; }
 
   .save-controls {
     display: flex;
