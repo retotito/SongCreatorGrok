@@ -6857,7 +6857,7 @@
           🎵 Add Note
         </button>
         <button class="ctx-item" on:click={() => addBreakAt(contextMenu.beat)}>
-          ┃ Add Break
+          🔴 Add Break
         </button>
         <button class="ctx-item" on:click={() => addFlagAt(contextMenu.beat)}>
           🟢 Add Flag
