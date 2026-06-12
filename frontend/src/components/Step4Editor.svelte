@@ -4237,24 +4237,69 @@
   function mergeWithNext(noteId) {
     const id = noteId ?? selectedNote;
     if (id === null) return;
-    const realNotes = notes.filter(n => n.type !== 'break');
-    const realIdx = realNotes.findIndex(n => n.id === id);
-    if (realIdx === -1 || realIdx >= realNotes.length - 1) return;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const realIdx = ordered.findIndex(n => n.id === id);
+    if (realIdx === -1 || realIdx >= ordered.length - 1) return;
 
-    const current = realNotes[realIdx];
-    const next = realNotes[realIdx + 1];
+    const current = ordered[realIdx];
+    const next = ordered[realIdx + 1];
+    const mergedDuration = (next.startBeat + next.duration) - current.startBeat;
+    if (mergedDuration <= 0) return;
 
     pushUndo();
-    // Extend current to cover next
-    current.duration = (next.startBeat + next.duration) - current.startBeat;
-    current.syllable = current.syllable.trimEnd() + next.syllable.trimStart();
-
-    // Remove next note
-    notes = notes.filter(n => n.id !== next.id);
-    notes = [...notes];
+    notes = notes
+      .filter(n => n.id !== next.id)
+      .map(n => {
+        if (n.id !== current.id) return n;
+        return {
+          ...n,
+          duration: mergedDuration,
+          syllable: n.syllable.trimEnd() + next.syllable.trimStart(),
+        };
+      });
+    selectedNote = current.id;
+    selectedNotes = new Set([current.id]);
     markUnsaved();
     closeContextMenu();
+    computeTotalBeats();
     draw();
+  }
+
+  function mergeWithPrevious(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const realIdx = ordered.findIndex(n => n.id === id);
+    if (realIdx <= 0) return;
+    mergeWithNext(ordered[realIdx - 1].id);
+  }
+
+  function canMergeWithNext(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return false;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const idx = ordered.findIndex(n => n.id === id);
+    return idx !== -1 && idx < ordered.length - 1;
+  }
+
+  function canMergeWithPrevious(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return false;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const idx = ordered.findIndex(n => n.id === id);
+    return idx > 0;
   }
 
   function toggleWordSpace(noteId, hasSpace) {
@@ -5085,11 +5130,15 @@
       }
     }
 
-    // Note action shortcuts (only when a note is selected and not in an input)
-    if (selectedNote !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Note action shortcuts (selected note or currently opened note context menu)
+    if ((selectedNote !== null || (contextMenu.visible && contextMenu.noteId !== null)) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const shortcutNoteId = contextMenu.visible && contextMenu.noteId !== null
+        ? contextMenu.noteId
+        : selectedNote;
+
       if (e.key.toLowerCase() === 'p') {
         e.preventDefault();
-        playNotePitch(selectedNote);
+        playNotePitch(shortcutNoteId);
       }
 
       if (e.code === 'Delete' || e.code === 'Backspace') {
@@ -5108,11 +5157,17 @@
       }
       if (e.key.toLowerCase() === 's' && !e.shiftKey && contextMenu.visible) {
         e.preventDefault();
-        splitNote(selectedNote);
+        splitNote(shortcutNoteId);
       }
-      if (e.key.toLowerCase() === 'm' && contextMenu.visible) {
+      if (e.key.toLowerCase() === 'j' && e.shiftKey) {
         e.preventDefault();
-        mergeWithNext(selectedNote);
+        mergeWithPrevious(shortcutNoteId);
+        return;
+      }
+      if (e.key.toLowerCase() === 'j' && !e.shiftKey) {
+        e.preventDefault();
+        mergeWithNext(shortcutNoteId);
+        return;
       }
     }
   }
@@ -6983,6 +7038,8 @@
   {#if contextMenu.visible}
     {@const ctxNote = notes.find(n => n.id === contextMenu.noteId)}
     {@const isMultiCtx = selectedNotes.size > 1 && selectedNotes.has(contextMenu.noteId)}
+    {@const canMergePrev = ctxNote && !isMultiCtx && canMergeWithPrevious(ctxNote.id)}
+    {@const canMergeNext = ctxNote && !isMultiCtx && canMergeWithNext(ctxNote.id)}
     {#if ctxNote}
       <div
         class="context-menu"
@@ -7042,8 +7099,11 @@
           <button class="ctx-item" on:click={() => splitNote(ctxNote.id, contextMenu.beat)}>
             ✂️ Split Note <span class="ctx-shortcut">S</span>
           </button>
-          <button class="ctx-item" on:click={() => mergeWithNext(ctxNote.id)}>
-            🔗 Merge with Next <span class="ctx-shortcut">M</span>
+          <button class="ctx-item" disabled={!canMergePrev} on:click={() => mergeWithPrevious(ctxNote.id)}>
+            🔗 Join with Previous <span class="ctx-shortcut">Shift+J</span>
+          </button>
+          <button class="ctx-item" disabled={!canMergeNext} on:click={() => mergeWithNext(ctxNote.id)}>
+            🔗 Join with Next <span class="ctx-shortcut">J</span>
           </button>
           <div class="ctx-divider"></div>
           {/if}
@@ -8844,6 +8904,16 @@
 
   .ctx-item:hover {
     background: #2a2a4e;
+  }
+
+  .ctx-item:disabled {
+    opacity: 0.45;
+    cursor: default;
+    pointer-events: none;
+  }
+
+  .ctx-item:disabled .ctx-shortcut {
+    opacity: 0.65;
   }
 
   .ctx-item.danger {
