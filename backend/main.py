@@ -1454,7 +1454,7 @@ async def upload_mix_audio(session_id: str, audio: UploadFile = File(...)):
 
 @app.delete("/api/delete-audio/{session_id}/{audio_type}")
 async def delete_audio(session_id: str, audio_type: str):
-    """Delete an audio file (original or vocals) from a session."""
+    """Delete an audio file (original, vocals, or instrumental) from a session."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1473,8 +1473,15 @@ async def delete_audio(session_id: str, audio_type: str):
         session["vocals_header"] = ""
         session["status"] = "uploaded" if session.get("original_audio") else "created"
         log_step("DELETE", f"Session {session_id}: deleted vocals")
+    elif audio_type == "instrumental":
+        path = session.get("instrumental_audio")
+        if path and os.path.exists(path):
+            os.remove(path)
+        session["instrumental_audio"] = None
+        session["instrumental_header"] = ""
+        log_step("DELETE", f"Session {session_id}: deleted instrumental")
     else:
-        raise HTTPException(status_code=400, detail="Invalid audio type. Use 'original' or 'vocals'.")
+        raise HTTPException(status_code=400, detail="Invalid audio type. Use 'original', 'vocals', or 'instrumental'.")
 
     _update_txt_asset_headers(session)
     save_session(session_id)
