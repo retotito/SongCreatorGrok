@@ -1800,9 +1800,9 @@
         // Draw break line
         const x = beatToX(note.startBeat);
         const isBreakSelected = selectedNote === note.id;
-        ctx.strokeStyle = isBreakSelected ? '#ef5350' : '#c6282855';
-        ctx.lineWidth = isBreakSelected ? 3 : 2;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = isBreakSelected ? '#ff3b30' : '#ef5350';
+        ctx.lineWidth = isBreakSelected ? 4 : 3;
+        ctx.setLineDash(isBreakSelected ? [6, 4] : [5, 3]);
         ctx.beginPath();
         ctx.moveTo(x, wt);
         ctx.lineTo(x, pianoH);
@@ -1811,8 +1811,8 @@
 
         // Draw drag handle (diamond shape at center)
         const handleY = (wt + pianoH) / 2;
-        const hs = isBreakSelected ? 7 : 5;
-        ctx.fillStyle = isBreakSelected ? '#ef5350' : '#c62828aa';
+        const hs = isBreakSelected ? 8 : 6;
+        ctx.fillStyle = isBreakSelected ? '#ff3b30' : '#ef5350';
         ctx.beginPath();
         ctx.moveTo(x, handleY - hs);
         ctx.lineTo(x + hs, handleY);
