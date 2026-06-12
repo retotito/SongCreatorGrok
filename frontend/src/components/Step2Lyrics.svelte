@@ -435,10 +435,10 @@
     </div>
     <div class="generate-row">
       <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
-        🚀 Generate Ultrastar Files
+        🚀 Generate Ultrastar File
       </button>
       <button class="btn btn-secondary btn-generate" on:click={handleGenerateEmpty} disabled={$isProcessing || !$sessionId} title="Skip note alignment — open editor with empty file">
-        📄 Generate Empty File
+        📄 Generate Empty Ultrastar File
       </button>
       {#if cleanedAudioAvailable}
         <button class="btn btn-generate-cleaned btn-generate" on:click={() => handleSubmit(true)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>

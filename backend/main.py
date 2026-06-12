@@ -2828,16 +2828,19 @@ async def generate_empty(session_id: str):
     vocal = session.get("vocal_audio") or session.get("original_audio")
     original = session.get("original_audio")
 
-    import librosa as _librosa
+    from services.bpm_detection import detect_bpm, get_audio_duration
+
     audio_duration = 0.0
     bpm = 120.0
     gap_ms = 0
 
     if vocal and os.path.exists(vocal):
         try:
-            y, sr = _librosa.load(vocal, sr=None, mono=True, duration=60)
-            audio_duration_full = _librosa.get_duration(path=vocal)
-            audio_duration = audio_duration_full
+            bpm = detect_bpm(vocal, original_audio_path=original)
+        except Exception as exc:
+            log_step("EMPTY_GEN", f"BPM detection failed, falling back to 120.0: {exc}")
+        try:
+            audio_duration = get_audio_duration(vocal)
         except Exception:
             pass
 
