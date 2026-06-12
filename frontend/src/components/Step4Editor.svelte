@@ -2218,18 +2218,18 @@
       const fx = beatToX(flag.beat);
       if (fx < -10 || fx > w + 10) continue;
       const isFlagSelected = selectedFlag === flag.id;
-      ctx.strokeStyle = isFlagSelected ? '#4ade80' : '#4ade8066';
-      ctx.lineWidth = isFlagSelected ? 2 : 1.5;
-      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = isFlagSelected ? '#22c55e' : '#4ade80';
+      ctx.lineWidth = isFlagSelected ? 3.5 : 2.5;
+      ctx.setLineDash(isFlagSelected ? [6, 4] : [5, 3]);
       ctx.beginPath();
       ctx.moveTo(fx, wt);
       ctx.lineTo(fx, pianoH);
       ctx.stroke();
       ctx.setLineDash([]);
       // Diamond handle at vertical center
-      const ths = isFlagSelected ? 7 : 5;
+      const ths = isFlagSelected ? 8 : 6;
       const thy = (wt + pianoH) / 2;
-      ctx.fillStyle = isFlagSelected ? '#4ade80' : '#4ade80aa';
+      ctx.fillStyle = isFlagSelected ? '#22c55e' : '#4ade80';
       ctx.beginPath();
       ctx.moveTo(fx, thy - ths);
       ctx.lineTo(fx + ths, thy);
@@ -2238,7 +2238,7 @@
       ctx.closePath();
       ctx.fill();
       if (isFlagSelected) {
-        ctx.fillStyle = '#4ade80';
+        ctx.fillStyle = '#22c55e';
         ctx.font = '9px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(`flag @${flag.beat}`, fx, thy - ths - 4);
@@ -6823,7 +6823,7 @@
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
         <div class="ctx-header">
-          <span class="ctx-location-label">🚩 Flag @ beat {contextMenu.beat}</span>
+          <span class="ctx-location-label">🟢 Flag @ beat {contextMenu.beat}</span>
         </div>
         <div class="ctx-divider"></div>
         <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat - 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
@@ -6860,7 +6860,7 @@
           ┃ Add Break
         </button>
         <button class="ctx-item" on:click={() => addFlagAt(contextMenu.beat)}>
-          🚩 Add Flag
+          🟢 Add Flag
         </button>
         {#if isBeatInsideActiveLoop(contextMenu.beat)}
           <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
