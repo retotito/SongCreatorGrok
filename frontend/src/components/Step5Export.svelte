@@ -627,7 +627,7 @@
               on:drop={onBgDrop}
               on:click={() => document.getElementById('bg-file-input').click()}
             >
-              <span class="dropzone-icon">{bgUploading ? '⏳' : '🌄'}</span>
+              <span class="dropzone-icon">{bgUploading ? '⏳' : '🖼'}</span>
               <span class="dropzone-hint">{bgUploading ? 'Uploading…' : 'Drop image or click'}<br>{#if !bgUploading}<small>16:9 crop tool · 1920×1080</small>{/if}</span>
             </div>
           {/if}
