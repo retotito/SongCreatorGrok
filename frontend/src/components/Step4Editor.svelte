@@ -89,6 +89,11 @@
     if (next !== scrollX) scrollX = next;
   }
 
+  function nudgeViewport(deltaPx) {
+    scrollX = clampScrollX(scrollX + deltaPx);
+    draw();
+  }
+
   // While dragging loop boundaries, auto-scroll only when the pointer is outside the canvas.
   function autoScrollAtCanvasEdge(mx) {
     const w = canvasEl?.width || canvasW || 800;
@@ -270,6 +275,12 @@
     markUnsaved();
     closeContextMenu();
     draw();
+  }
+
+  function clearMarkerSelection() {
+    selectedFlag = null;
+    selectedNote = null;
+    selectedNotes = new Set();
   }
 
   function normalizeCleanupSegment(seg) {
@@ -2414,6 +2425,7 @@
       if (hit) {
         const seg = cleanupSegments.find(s => s.id === hit.id);
         if (seg) {
+          clearMarkerSelection();
           // Don't allow dragging segments with recordings
           if (segRecPatched.has(seg.id)) {
             selectedCleanupSegment = seg.id;
@@ -2540,12 +2552,14 @@
         draw();
         return;
       }
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
 
     // Alt+click anywhere → seek playhead
     if (event.altKey) {
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
@@ -2553,6 +2567,7 @@
     // ── No note editing during playback ──
     if (isPlaying) {
       // Only allow seeking (handled above) — block note selection/dragging
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
@@ -2693,8 +2708,7 @@
         boxSelectEnd = { x: mx, y: my };
         console.log('[Mouse] Start box selection');
       } else {
-        selectedNote = null;
-        selectedNotes = new Set();
+        clearMarkerSelection();
         seekToTime(beatToTime(beat));
         console.log(`[Mouse] No note — seek to beat ${beat.toFixed(1)}`);
       }
@@ -3934,6 +3948,10 @@
     if (contextMenu.visible && contextMenuEl && !contextMenuEl.contains(e.target)) {
       closeContextMenu();
     }
+    if (e.target !== canvasEl && !(contextMenuEl && contextMenuEl.contains(e.target))) {
+      clearMarkerSelection();
+      draw();
+    }
   }
 
   // ──── Note Actions ──────────────────────────
@@ -4792,8 +4810,14 @@
         updatePitchRange();
         draw();
       } else {
-        if (e.code === 'ArrowLeft')  seekPlayback(e.shiftKey ? -1 : -5);
-        if (e.code === 'ArrowRight') seekPlayback(e.shiftKey ? 1 : 5);
+        if (e.code === 'ArrowLeft') {
+          nudgeViewport(e.shiftKey ? -160 : -48);
+          return;
+        }
+        if (e.code === 'ArrowRight') {
+          nudgeViewport(e.shiftKey ? 160 : 48);
+          return;
+        }
       }
       return;
     }
