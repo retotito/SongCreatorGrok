@@ -988,7 +988,7 @@
   // ──── BPM Re-quantization ────────────────────
   // Rebuild notes from raw ms timings using the current bpm/gapMs,
   // preserving pitches from the original Ultrastar parse.
-  function requantizeFromMs(bpmActuallyChanged = false) {
+  function requantizeFromMs(bpmActuallyChanged = false, previousTimingRef = null) {
     if (!rawTimings || rawTimings.length === 0) {
       console.log('[Requantize] No rawTimings, skipping');
       return;
@@ -1008,6 +1008,23 @@
     }
 
     const gapSec = gapMs / 1000;
+    // Preserve existing break placements by anchoring them to the previous timing
+    // reference (old GAP/BPM), then mapping them into the current grid.
+    const prevBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
+    const prevGapSec = (Number.isFinite(previousTimingRef?.gapMs)
+      ? Number(previousTimingRef.gapMs)
+      : gapMs) / 1000;
+    const preservedBreaks = notes
+      .filter(n => n.type === 'break')
+      .map(n => {
+        const startBeat = Number(n.startBeat) || 0;
+        const endBeat = n.endBeat == null ? null : Number(n.endBeat);
+        return {
+          startSec: prevGapSec + (startBeat * 15) / prevBpm,
+          endSec: endBeat == null ? null : prevGapSec + (endBeat * 15) / prevBpm,
+        };
+      });
+    const preserveExistingBreaks = preservedBreaks.length > 0;
     let id = 0;
     let prevLineIndex = null;
     let lastEndBeat = 0;
@@ -1019,8 +1036,8 @@
       const endSec = timing.end;
       const lineIndex = timing.line_index ?? 0;
 
-      // Insert break between phrases
-      if (prevLineIndex !== null && lineIndex !== prevLineIndex) {
+      // Insert break between phrases only when there are no existing break edits to preserve.
+      if (!preserveExistingBreaks && prevLineIndex !== null && lineIndex !== prevLineIndex) {
         const breakStart = lastEndBeat + 2;
         const nextStartBeat = Math.round(((startSec - gapSec) * bpm) / 15);
         const breakEnd = Math.max(breakStart + 1, nextStartBeat - 2);
@@ -1072,7 +1089,25 @@
       prevLineIndex = lineIndex;
     }
 
-    notes = newNotes;
+    if (preserveExistingBreaks) {
+      for (const b of preservedBreaks) {
+        const startBeat = Math.round(((b.startSec - gapSec) * bpm) / 15);
+        let endBeat = null;
+        if (b.endSec !== null) {
+          endBeat = Math.max(startBeat + 1, Math.round(((b.endSec - gapSec) * bpm) / 15));
+        }
+        newNotes.push({ id: id++, type: 'break', startBeat, endBeat });
+      }
+    }
+
+    notes = newNotes.sort((a, b) => {
+      const byBeat = (a.startBeat ?? 0) - (b.startBeat ?? 0);
+      if (byBeat !== 0) return byBeat;
+      const aBreak = a.type === 'break' ? 0 : 1;
+      const bBreak = b.type === 'break' ? 0 : 1;
+      if (aBreak !== bBreak) return aBreak - bBreak;
+      return (a.id ?? 0) - (b.id ?? 0);
+    });
     console.log(`[Requantize] Built ${newNotes.filter(n => n.type !== 'break').length} notes, ${newNotes.filter(n => n.type === 'break').length} breaks`);
     // Keep rawTimings in sync so the next BPM change requantizes from these beat positions
     syncRawTimingsFromNotes();
@@ -1319,7 +1354,7 @@
     gridAlignOffsetMs = 0;
     gridAlignDragging = false;
     if (canvasEl) canvasEl.style.cursor = '';
-    handleBpmGapChange();
+    handleBpmGapChange(false, { gapMs: gridAlignOriginalGapMs, bpm });
     markUnsaved();
   }
 
@@ -1417,12 +1452,16 @@
     // Stop mic and clear trail — hit positions are beat-based at old BPM
     if (micEnabled) { micEnabled = false; stopMic(); }
     clearMicTrail();
+    const previousTimingRef = {
+      gapMs,
+      bpm: Number(rawTimings?.[0]?.syncedBpm) || bpm,
+    };
     snapGapToGrid();
-    handleBpmGapChange(true);
+    handleBpmGapChange(true, previousTimingRef);
     markUnsaved();
   }
 
-  function handleBpmGapChange(bpmActuallyChanged = false) {
+  function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
     console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} (initial: bpm=${initialBpm} gap=${initialGap})`);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
@@ -1430,7 +1469,7 @@
       const gapSec = gapMs / 1000;
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
-    requantizeFromMs(bpmActuallyChanged);
+    requantizeFromMs(bpmActuallyChanged, previousTimingRef);
     resyncFlagsToGrid();
   }
 
@@ -2376,9 +2415,10 @@
       const newGapMs = Math.round(newGapSec * 1000);
       console.log(`[SetGAP] Setting GAP to ${newGapMs}ms (beat ${setGapHoverBeat} → time ${newGapSec.toFixed(3)}s)`);
       pushUndo();
+      const previousGapMs = gapMs;
       gapMs = newGapMs;
       cancelSetGapMode();
-      handleBpmGapChange();
+      handleBpmGapChange(false, { gapMs: previousGapMs, bpm });
       markUnsaved();
       return;
     }
