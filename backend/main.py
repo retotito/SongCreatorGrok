@@ -4026,6 +4026,7 @@ async def save_assets_meta(session_id: str, request: Request):
 async def download_zip(
     session_id: str,
     include_vocals: str = "1",
+    include_edited_vocals: str = "1",
     include_instrumental: str = "1",
     include_summary: str = "1",
     include_midi: str = "1",
@@ -4131,6 +4132,18 @@ async def download_zip(
         if vocal_path and os.path.exists(vocal_path) and include_vocals == "1":
             ext = os.path.splitext(vocal_path)[1]
             zf.write(vocal_path, f"{base} [Vocals]{ext}")
+
+        # Edited vocals audio (cleanup output from editor)
+        cleaned_path = result.get("cleaned_vocal_path")
+        if (not cleaned_path or not os.path.exists(cleaned_path)):
+            cleaned_file = result.get("cleaned_vocal_file")
+            if cleaned_file:
+                candidate = os.path.join(DOWNLOADS_DIR, cleaned_file)
+                if os.path.exists(candidate):
+                    cleaned_path = candidate
+        if cleaned_path and os.path.exists(cleaned_path) and include_edited_vocals == "1":
+            ext = os.path.splitext(cleaned_path)[1]
+            zf.write(cleaned_path, f"{base} [Edited Vocals]{ext}")
 
         # Instrumental audio (no_vocals from Demucs)
         instrumental_path = session.get("instrumental_audio")
