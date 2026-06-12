@@ -182,8 +182,8 @@
 
       <!-- Manual cleanup commands -->
       <div class="sm-section sm-section-manual">
-        <div class="sm-section-title">🖥 Manual Cleanup Commands</div>
-        <p class="sm-hint">To manually purge all downloads and uploads without deleting session metadata:</p>
+        <div class="sm-section-title">🖥 Manual Cleanup Commands (Full Wipe)</div>
+        <p class="sm-hint">⚠️ These commands delete all files in downloads/uploads, including files used by active sessions. They are not session-aware.</p>
         <div class="sm-cmd-block">
           <span class="sm-cmd-os">macOS / Linux</span>
           <code class="sm-cmd">{macCmd}</code>
