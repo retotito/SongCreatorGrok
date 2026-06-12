@@ -6906,6 +6906,11 @@
       {#each flags as flag}
         <div class="scrollbar-flag" style="left: {((flag.beat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
       {/each}
+      {#each notes as note (note.id)}
+        {#if note.type === 'break'}
+          <div class="scrollbar-break" style="left: {((note.startBeat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+        {/if}
+      {/each}
       <!-- draggable handle -->
       <div class="scrollbar-handle" style="left: {scrollHandlePct}%"></div>
     </div>
@@ -8006,10 +8011,30 @@
     top: 0;
     bottom: 10px;
     width: 2px;
-    background: #4ade80;
+    background: repeating-linear-gradient(
+      to bottom,
+      #4ade80 0 2px,
+      transparent 2px 5px
+    );
     pointer-events: none;
     transform: translateX(-50%);
     opacity: 0.75;
+    z-index: 2;
+  }
+
+  .scrollbar-break {
+    position: absolute;
+    top: 0;
+    bottom: 10px;
+    width: 2px;
+    background: repeating-linear-gradient(
+      to bottom,
+      #ff6b6b 0 2px,
+      transparent 2px 5px
+    );
+    pointer-events: none;
+    transform: translateX(-50%);
+    opacity: 0.85;
     z-index: 2;
   }
 
