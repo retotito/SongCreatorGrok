@@ -76,6 +76,19 @@
     return Math.min(maxX, Math.max(minX, x));
   }
 
+  // Keep a target beat visible with a small edge padding while preserving current context.
+  function ensureBeatVisible(beat, edgePaddingPx = 56) {
+    const w = canvasEl?.width || canvasW || 800;
+    const x = beatToX(beat);
+    let next = scrollX;
+    if (x < edgePaddingPx) {
+      next = clampScrollX(scrollX - (edgePaddingPx - x));
+    } else if (x > w - edgePaddingPx) {
+      next = clampScrollX(scrollX + (x - (w - edgePaddingPx)));
+    }
+    if (next !== scrollX) scrollX = next;
+  }
+
   // While dragging loop boundaries, auto-scroll only when the pointer is outside the canvas.
   function autoScrollAtCanvasEdge(mx) {
     const w = canvasEl?.width || canvasW || 800;
@@ -187,11 +200,15 @@
 
   function addFlagAt(beat) {
     const snappedBeat = Math.round(beat);
+    const newFlagId = flagIdCounter++;
     flags = [...flags, {
-      id: flagIdCounter++,
+      id: newFlagId,
       beat: snappedBeat,
       timeMs: Math.max(0, beatToTime(snappedBeat) * 1000),
     }];
+    selectedFlag = newFlagId;
+    selectedNote = null;
+    selectedNotes = new Set();
     saveFlags();
     closeContextMenu();
     draw();
@@ -201,6 +218,56 @@
     flags = flags.filter(f => f.id !== id);
     if (selectedFlag === id) selectedFlag = null;
     saveFlags();
+    closeContextMenu();
+    draw();
+  }
+
+  function getGridNudgeStep() {
+    return zoom >= 4 ? 1 : BEATS_PER_QUARTER / 2;
+  }
+
+  function clampBeatToSongBounds(beat) {
+    const minBeat = snapBeatValue(timeToBeat(0));
+    const maxBeat = snapBeatValue(timeToBeat(Math.max(0, audioDuration || 0)));
+    return Math.max(minBeat, Math.min(maxBeat, beat));
+  }
+
+  function nudgeFlag(id, delta) {
+    const flag = flags.find(f => f.id === id);
+    if (!flag) return;
+    const step = getGridNudgeStep();
+    flag.beat = clampBeatToSongBounds(
+      snapBeatValue(flag.beat + (delta < 0 ? -step : step))
+    );
+    flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
+    flags = [...flags];
+    ensureBeatVisible(flag.beat);
+    selectedFlag = flag.id;
+    saveFlags();
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function nudgeBreak(noteId, delta) {
+    const step = getGridNudgeStep();
+    let moved = false;
+    let movedBeat = null;
+    pushUndo();
+    notes = notes.map(n => {
+      if (n.id !== noteId || n.type !== 'break') return n;
+      moved = true;
+      movedBeat = clampBeatToSongBounds(
+        snapBeatValue(n.startBeat + (delta < 0 ? -step : step))
+      );
+      return {
+        ...n,
+        startBeat: movedBeat,
+      };
+    });
+    if (!moved) return;
+    if (movedBeat !== null) ensureBeatVisible(movedBeat);
+    markUnsaved();
     closeContextMenu();
     draw();
   }
@@ -2496,6 +2563,22 @@
 
     const isMultiKey = event.metaKey || event.ctrlKey;
 
+    // Check flag hit first so flags are selectable even if a note overlaps the same x-position.
+    if (!isMultiKey) {
+      for (const flag of flags) {
+        const fx = beatToX(flag.beat);
+        if (Math.abs(mx - fx) <= 8) {
+          selectedFlag = flag.id;
+          selectedNote = null;
+          selectedNotes = new Set();
+          isDragging = true;
+          dragStart = { x: mx, y: my, beat: flag.beat };
+          draw();
+          return;
+        }
+      }
+    }
+
     // Find clicked note (check regular notes first, then breaks)
     let found = null;
     for (const note of notes) {
@@ -2528,22 +2611,6 @@
           found = note;
           dragMode = 'move-break';
           break;
-        }
-      }
-    }
-
-    // Check flag hit (8px zone, before note handling)
-    if (!found) {
-      for (const flag of flags) {
-        const fx = beatToX(flag.beat);
-        if (Math.abs(mx - fx) <= 8) {
-          selectedFlag = flag.id;
-          selectedNote = null;
-          selectedNotes = new Set();
-          isDragging = true;
-          dragStart = { x: mx, y: my, beat: flag.beat };
-          draw();
-          return;
         }
       }
     }
@@ -3019,7 +3086,6 @@
     // Finish flag drag
     if (isDragging && selectedFlag !== null) {
       isDragging = false;
-      selectedFlag = null;
       saveFlags();
       draw();
       return;
@@ -3986,7 +4052,9 @@
     });
     if (insertIdx === -1) insertIdx = notes.length;
     notes = [...notes.slice(0, insertIdx), breakNote, ...notes.slice(insertIdx)];
+    selectedFlag = null;
     selectedNote = maxId;
+    selectedNotes = new Set([maxId]);
     markUnsaved();
     closeContextMenu();
     draw();
@@ -4646,6 +4714,21 @@
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
       e.preventDefault();
 
+      // Arrow left/right: nudge selected flag by one visible grid line.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedFlag !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        nudgeFlag(selectedFlag, e.code === 'ArrowRight' ? 1 : -1);
+        return;
+      }
+
+      // Arrow left/right: nudge selected breakpoint by one visible grid line.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedNote !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        const selectedBreak = notes.find(n => n.id === selectedNote && n.type === 'break');
+        if (selectedBreak) {
+          nudgeBreak(selectedBreak.id, e.code === 'ArrowRight' ? 1 : -1);
+          return;
+        }
+      }
+
       // Ctrl+Left/Right (single note only): resize duration from right edge
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
           selectedNotes.size <= 1 && selectedNote !== null) {
@@ -4815,17 +4898,28 @@
       return;
     }
 
+    // Delete selected flag or selected breakpoint directly.
+    if ((e.code === 'Delete' || e.code === 'Backspace') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (selectedFlag !== null) {
+        e.preventDefault();
+        deleteFlag(selectedFlag);
+        return;
+      }
+      if (selectedNote !== null) {
+        const selectedBreak = notes.find(n => n.id === selectedNote && n.type === 'break');
+        if (selectedBreak) {
+          e.preventDefault();
+          deleteNote(selectedBreak.id);
+          return;
+        }
+      }
+    }
+
     // Note action shortcuts (only when a note is selected and not in an input)
     if (selectedNote !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
       if (e.key.toLowerCase() === 'p') {
         e.preventDefault();
         playNotePitch(selectedNote);
-      }
-      // Delete selected flag
-      if ((e.code === 'Delete' || e.code === 'Backspace') && selectedFlag !== null) {
-        e.preventDefault();
-        deleteFlag(selectedFlag);
-        return;
       }
 
       if (e.code === 'Delete' || e.code === 'Backspace') {
@@ -6727,13 +6821,13 @@
         {#if contextMenu.isBreak}
           <!-- Break context menu -->
           <div class="ctx-header">
-            <span class="ctx-break-label">Break @ beat {ctxNote.startBeat}</span>
+            <span class="ctx-break-label">🔴 Break @ beat {ctxNote.startBeat}</span>
           </div>
           <div class="ctx-divider"></div>
-          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat = n.startBeat - 1; notes = [...notes]; markUnsaved(); draw(); } }}>
+          <button class="ctx-item" on:click={() => nudgeBreak(ctxNote.id, -1)}>
             ← Nudge Left <span class="ctx-shortcut">-1</span>
           </button>
-          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat += 1; notes = [...notes]; markUnsaved(); draw(); } }}>
+          <button class="ctx-item" on:click={() => nudgeBreak(ctxNote.id, 1)}>
             → Nudge Right <span class="ctx-shortcut">+1</span>
           </button>
           <div class="ctx-divider"></div>
@@ -6911,10 +7005,10 @@
           <span class="ctx-location-label">🟢 Flag @ beat {contextMenu.beat}</span>
         </div>
         <div class="ctx-divider"></div>
-        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat - 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+        <button class="ctx-item" on:click={() => nudgeFlag(contextMenu.flagId, -1)}>
           ← Nudge Left <span class="ctx-shortcut">-1</span>
         </button>
-        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat + 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+        <button class="ctx-item" on:click={() => nudgeFlag(contextMenu.flagId, 1)}>
           → Nudge Right <span class="ctx-shortcut">+1</span>
         </button>
         <div class="ctx-divider"></div>
