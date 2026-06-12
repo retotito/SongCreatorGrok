@@ -183,6 +183,7 @@
   let cleanupSegmentIdCounter = 1;
   let selectedCleanupSegment = null;
   let cleanupDrag = null; // { id, mode, startMs, endMs, mouseStartMs }
+  let cleanupKeyboardSaveTimer = null;
   const cleanupJoinMaxGapMs = 150;
   let cleanupSegmentsHavePatchedMetadata = false;
 
@@ -281,6 +282,85 @@
     selectedFlag = null;
     selectedNote = null;
     selectedNotes = new Set();
+  }
+
+  function clearCleanupKeyboardSaveTimer() {
+    if (cleanupKeyboardSaveTimer) {
+      clearTimeout(cleanupKeyboardSaveTimer);
+      cleanupKeyboardSaveTimer = null;
+    }
+  }
+
+  function scheduleCleanupKeyboardSave() {
+    clearCleanupKeyboardSaveTimer();
+    cleanupKeyboardSaveTimer = setTimeout(() => {
+      cleanupKeyboardSaveTimer = null;
+      if (hasUnsavedChanges || cleanedAudioDirty) handleSave();
+    }, 500);
+  }
+
+  function getCleanupKeyboardStepMs(largeStep = false) {
+    const beatStep = getGridNudgeStep() * (largeStep ? 4 : 1);
+    return (15000 / bpm) * beatStep;
+  }
+
+  function adjustSelectedCleanupSegment(mode, direction, largeStep = false) {
+    if (selectedCleanupSegment === null) return false;
+    const seg = cleanupSegments.find(s => s.id === selectedCleanupSegment);
+    if (!seg || segRecPatched.has(seg.id)) return false;
+
+    const stepMs = getCleanupKeyboardStepMs(largeStep) * (direction > 0 ? 1 : -1);
+    const CLAMP_GAP = 10;
+    const sortedOthers = cleanupSegments.filter(s => s.id !== seg.id).sort((a, b) => a.startMs - b.startMs);
+    const prevN = [...sortedOthers].reverse().find(s => s.endMs <= seg.startMs);
+    const nextN = sortedOthers.find(s => s.startMs >= seg.endMs);
+    const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
+    const songEndMs = Math.max(0, (audioEl?.duration || audioDuration || 0) * 1000);
+    const maxEndBound = songEndMs > 0 ? songEndMs : Infinity;
+    const maxEnd = nextN ? Math.min(nextN.startMs - CLAMP_GAP, maxEndBound) : maxEndBound;
+
+    let changed = false;
+    pushUndo();
+    cleanupSegments = cleanupSegments.map(current => {
+      if (current.id !== seg.id) return current;
+
+      if (mode === 'move') {
+        const duration = current.endMs - current.startMs;
+        let newStart = current.startMs + stepMs;
+        newStart = Math.max(minStart, newStart);
+        if (isFinite(maxEnd)) newStart = Math.min(maxEnd - duration, newStart);
+        if (newStart === current.startMs) return current;
+        changed = true;
+        return { ...current, startMs: newStart, endMs: newStart + duration };
+      }
+
+      if (mode === 'start') {
+        let newStart = current.startMs + stepMs;
+        newStart = Math.max(minStart, newStart);
+        newStart = Math.min(current.endMs - 50, newStart);
+        if (newStart === current.startMs) return current;
+        changed = true;
+        return { ...current, startMs: newStart };
+      }
+
+      if (mode === 'end') {
+        let newEnd = current.endMs + stepMs;
+        if (isFinite(maxEnd)) newEnd = Math.min(maxEnd, newEnd);
+        newEnd = Math.max(current.startMs + 50, newEnd);
+        if (newEnd === current.endMs) return current;
+        changed = true;
+        return { ...current, endMs: newEnd };
+      }
+
+      return current;
+    }).map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+
+    if (!changed) return false;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    scheduleCleanupKeyboardSave();
+    draw();
+    return true;
   }
 
   function normalizeCleanupSegment(seg) {
@@ -4732,6 +4812,16 @@
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
       e.preventDefault();
 
+      // Arrow left/right: move editable cleanup segments by one visible grid step.
+      if (selectedCleanupSegment !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        const direction = e.code === 'ArrowRight' ? 1 : -1;
+        const mode = (e.ctrlKey || e.metaKey)
+          ? (e.shiftKey ? 'start' : 'end')
+          : 'move';
+        const largeStep = e.shiftKey && !(e.ctrlKey || e.metaKey);
+        if (adjustSelectedCleanupSegment(mode, direction, largeStep)) return;
+      }
+
       // Arrow left/right: nudge selected flag by one visible grid line.
       if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedFlag !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
         nudgeFlag(selectedFlag, e.code === 'ArrowRight' ? 1 : -1);
@@ -6242,6 +6332,7 @@
     }
     saveSessionNotes();
     saveFlags();
+    clearCleanupKeyboardSaveTimer();
     if (autosaveInterval) clearInterval(autosaveInterval);
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
