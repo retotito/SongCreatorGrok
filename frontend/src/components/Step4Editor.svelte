@@ -574,6 +574,12 @@
   let segRegenHyphenateLoading = false;
   let segRegenPreviewHyphenated = false;
   let segRegenGenerateLoading = false;
+  $: segRegenModalBlocking = segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading;
+  $: segRegenModalBlockingLabel = segRegenGenerateLoading
+    ? 'Generating notes...'
+    : segRegenHyphenateLoading
+      ? 'Applying hyphenation...'
+      : 'Recognizing lyrics...';
 
   // Undo/Redo history
   let undoStack = [];
@@ -7086,12 +7092,22 @@
   {/if}
 
   {#if segRegenModalOpen}
+    {#if segRegenModalBlocking}
+      <div class="seg-regen-global-blocker" aria-live="polite" aria-label={segRegenModalBlockingLabel}>
+        <div class="loading-modal seg-regen-loading-modal">
+          <span class="loading-spinner"></span>
+          <span class="loading-label">{segRegenModalBlockingLabel}</span>
+        </div>
+      </div>
+    {/if}
+
     <div
       class="seg-regen-modal"
       style="left:{segRegenModalX}px;top:{segRegenModalY}px"
       on:mousedown={segRegenModalMouseDown}
       role="dialog"
       aria-label="AI note generation"
+      aria-busy={segRegenModalBlocking}
     >
       <div class="seg-regen-modal-title">🤖 AI Note Generation</div>
       <div class="seg-regen-modal-subtitle">
@@ -8979,6 +8995,22 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .seg-regen-global-blocker {
+    position: fixed;
+    inset: 0;
+    z-index: 9100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7, 13, 16, 0.62);
+    pointer-events: all;
+  }
+
+  .seg-regen-loading-modal {
+    padding: 1rem 1.2rem;
+    min-width: 200px;
   }
 
   .seg-regen-modal-title {
