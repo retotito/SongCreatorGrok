@@ -2560,6 +2560,7 @@
     hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
 
     if (cleanupDrag) {
+      autoScrollAtCanvasEdge(mx);
       const seg = cleanupSegments.find(s => s.id === cleanupDrag.id);
       if (!seg) {
         cleanupDrag = null;
