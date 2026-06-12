@@ -4600,13 +4600,14 @@
 
       if (hasSelection) {
         const ids = selectedNotes.size > 0 ? selectedNotes : new Set([selectedNote]);
+        const pitchStep = (e.shiftKey || e.ctrlKey || e.metaKey) ? 12 : 1;
         pushUndo();
         notes = notes.map(n => {
           if (!ids.has(n.id) || n.type === 'break') return n;
           if (e.code === 'ArrowLeft')  return { ...n, startBeat: n.startBeat - (e.shiftKey ? 4 : 1) };
           if (e.code === 'ArrowRight') return { ...n, startBeat: n.startBeat + (e.shiftKey ? 4 : 1) };
-          if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + (e.shiftKey ? 12 : 1) };
-          if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - (e.shiftKey ? 12 : 1) };
+          if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + pitchStep };
+          if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - pitchStep };
           return n;
         });
         // Play pitch preview on up/down — only for single note
@@ -6954,6 +6955,8 @@
     <div class="shortcut-group">
       <span class="shortcut-label">Edit</span>
       <span class="shortcut"><kbd>Drag</kbd> move</span>
+      <span class="shortcut"><kbd>↑↓</kbd> pitch ±1 semitone</span>
+      <span class="shortcut"><kbd>Ctrl+↑↓</kbd> pitch ±1 octave</span>
       <span class="shortcut"><kbd>S</kbd> split</span>
       <span class="shortcut"><kbd>Del</kbd> delete</span>
       <span class="shortcut"><kbd>P</kbd> play pitch</span>
