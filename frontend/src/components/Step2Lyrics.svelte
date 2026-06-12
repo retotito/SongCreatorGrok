@@ -533,10 +533,6 @@
 {/if}
 
 <style>
-  .step-content {
-    
-  }
-
   .warning-modal-overlay {
     position: fixed;
     inset: 0;
@@ -659,11 +655,16 @@
   }
 
   .btn-transcribe { background: #6a1b9a; color: white; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .btn-transcribe { white-space: nowrap; }
   .btn-transcribe:hover:not(:disabled) { background: #8e24aa; }
   .btn-transcribe:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .audio-section {
-    margin-bottom: 1.25rem;
+    background: linear-gradient(135deg, #1a3a3a 0%, #1a2e3a 100%);
+    border: 1px solid #2a7a7a;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
   }
 
   .audio-section audio {
@@ -856,7 +857,7 @@
     display: flex;
     justify-content: flex-end;
     gap: 0.75rem;
-    margin-top: 0.75rem;
+    margin-top: 28px;
     flex-wrap: wrap;
   }
 
