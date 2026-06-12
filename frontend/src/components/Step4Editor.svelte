@@ -124,6 +124,36 @@
     return Math.max(1, Math.min(w - 1, mx));
   }
 
+  function getVisibleBeatBounds() {
+    const w = canvasEl?.width || canvasW || 800;
+    return {
+      minBeat: xToBeat(0),
+      maxBeat: xToBeat(w),
+    };
+  }
+
+  function clampValue(value, min, max) {
+    if (max < min) return min;
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function clampNoteStartToVisibleCanvas(startBeat, duration) {
+    const { minBeat, maxBeat } = getVisibleBeatBounds();
+    const minStart = Math.ceil(minBeat);
+    const maxStart = Math.floor(maxBeat - duration);
+    return clampValue(startBeat, minStart, maxStart);
+  }
+
+  function clampSelectedMoveDeltaToVisibleCanvas(moveDelta, selection) {
+    if (!selection?.length) return moveDelta;
+    const { minBeat, maxBeat } = getVisibleBeatBounds();
+    const selectionStart = Math.min(...selection.map(note => note.startBeat));
+    const selectionEnd = Math.max(...selection.map(note => note.startBeat + note.duration));
+    const minDelta = Math.ceil(minBeat - selectionStart);
+    const maxDelta = Math.floor(maxBeat - selectionEnd);
+    return clampValue(moveDelta, minDelta, maxDelta);
+  }
+
   // Rubber-band (box) selection
   let isBoxSelecting = false;
   let boxSelectStart = { x: 0, y: 0 };
@@ -3046,7 +3076,7 @@
 
     // ── Multi-note drag ──
     if (dragMode === 'move' && selectedNotes.size > 1 && selectedNotes.has(note.id)) {
-      const beatDelta = Math.round(dx / zoom);
+      const rawBeatDelta = Math.round(dx / zoom);
       const pitchDelta = yToPitch(dragStart.y + dy) - dragStart.pitch;
       
       if (!dragStart.groupOffsets) {
@@ -3058,6 +3088,12 @@
           }
         }
       }
+
+      const groupSelection = dragStart.groupOffsets.map(offset => ({
+        startBeat: offset.beat,
+        duration: notes.find(nn => nn.id === offset.id)?.duration ?? 1,
+      }));
+      const beatDelta = clampSelectedMoveDeltaToVisibleCanvas(rawBeatDelta, groupSelection);
       
       for (const offset of dragStart.groupOffsets) {
         const n = notes.find(nn => nn.id === offset.id);
@@ -3071,19 +3107,27 @@
         if (dragStart.groupOffsets.length <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'move') {
-      note.startBeat = Math.round(dragStart.beat + dx / zoom);
+      const desiredStartBeat = Math.round(dragStart.beat + dx / zoom);
+      note.startBeat = clampNoteStartToVisibleCanvas(desiredStartBeat, note.duration);
       note.pitch = Math.max(minPitch, Math.min(maxPitch, yToPitch(dragStart.y + dy)));
       // Update pitch preview if pitch changed — only for single note
       if (note.pitch !== dragLastPitch) {
         if (selectedNotes.size <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'resize-right') {
-      note.duration = Math.max(1, Math.round(dragStart.duration + dx / zoom));
+      const { maxBeat } = getVisibleBeatBounds();
+      const maxDuration = Math.max(1, Math.floor(maxBeat - note.startBeat));
+      note.duration = clampValue(Math.round(dragStart.duration + dx / zoom), 1, maxDuration);
     } else if (dragMode === 'resize-left') {
-      const newStart = Math.round(dragStart.beat + dx / zoom);
-      const diff = note.startBeat - newStart;
+      const { minBeat } = getVisibleBeatBounds();
+      const originalEnd = dragStart.beat + dragStart.duration;
+      const newStart = clampValue(
+        Math.round(dragStart.beat + dx / zoom),
+        Math.ceil(minBeat),
+        originalEnd - 1,
+      );
       note.startBeat = newStart;
-      note.duration = Math.max(1, note.duration + diff);
+      note.duration = Math.max(1, originalEnd - newStart);
     }
 
     editorState.update(s => ({ ...s, hasChanges: true }));
@@ -4844,7 +4888,9 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const newDur = Math.max(snap, note.duration + delta);
+          const { maxBeat } = getVisibleBeatBounds();
+          const maxDur = Math.max(snap, Math.floor(maxBeat - note.startBeat));
+          const newDur = clampValue(note.duration + delta, snap, maxDur);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, duration: newDur } : n);
@@ -4862,8 +4908,10 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const newStart = note.startBeat + delta;
-          const newDur = Math.max(snap, note.duration - delta);
+          const { minBeat } = getVisibleBeatBounds();
+          const maxStart = note.startBeat + note.duration - snap;
+          const newStart = clampValue(note.startBeat + delta, Math.ceil(minBeat), maxStart);
+          const newDur = note.duration - (newStart - note.startBeat);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
@@ -4877,11 +4925,19 @@
       if (hasSelection) {
         const ids = selectedNotes.size > 0 ? selectedNotes : new Set([selectedNote]);
         const pitchStep = (e.shiftKey || e.ctrlKey || e.metaKey) ? 12 : 1;
+        const isHorizontalMove = e.code === 'ArrowLeft' || e.code === 'ArrowRight';
+        const selectedNoteObjects = notes.filter(n => ids.has(n.id) && n.type !== 'break');
+        const moveDelta = isHorizontalMove
+          ? clampSelectedMoveDeltaToVisibleCanvas(
+              e.code === 'ArrowLeft' ? -(e.shiftKey ? 4 : 1) : (e.shiftKey ? 4 : 1),
+              selectedNoteObjects,
+            )
+          : 0;
+        if (isHorizontalMove && moveDelta === 0) return;
         pushUndo();
         notes = notes.map(n => {
           if (!ids.has(n.id) || n.type === 'break') return n;
-          if (e.code === 'ArrowLeft')  return { ...n, startBeat: n.startBeat - (e.shiftKey ? 4 : 1) };
-          if (e.code === 'ArrowRight') return { ...n, startBeat: n.startBeat + (e.shiftKey ? 4 : 1) };
+          if (isHorizontalMove) return { ...n, startBeat: n.startBeat + moveDelta };
           if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + pitchStep };
           if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - pitchStep };
           return n;
