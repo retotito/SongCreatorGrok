@@ -838,13 +838,6 @@ async def get_storage_info():
 
         total_size = upload_size + sum(f["size"] for f in files)
 
-        # Determine if the session's key audio still exists on disk
-        audio_path = s.get("vocal_audio") or s.get("original_audio")
-        has_audio = bool(audio_path and os.path.exists(audio_path))
-        # Determine if generated result files still exist
-        txt_fname = result.get("txt_file")
-        has_result_file = bool(txt_fname and os.path.exists(os.path.join(DOWNLOADS_DIR, txt_fname)))
-
         session_rows.append({
             "id": sid,
             "artist": s.get("artist", "Unknown"),
@@ -852,9 +845,6 @@ async def get_storage_info():
             "status": "generated" if result else s.get("status", "unknown"),
             "created_at": s.get("created_at", 0),
             "total_size_bytes": total_size,
-            "has_audio": has_audio,
-            "has_result": bool(result),
-            "has_result_file": has_result_file,
             "files": files,
         })
 

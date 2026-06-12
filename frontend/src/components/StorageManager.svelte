@@ -72,10 +72,6 @@
   // Mac / Windows shell commands for manual cleanup
   $: macCmd = info ? `rm -rf "${info.downloads_dir}"/* "${info.uploads_dir}"/*` : '';
   $: winCmd = info ? `del /Q "${info.downloads_dir}\\*" & del /Q "${info.uploads_dir}\\*"` : '';
-
-  // Split sessions into active (audio present) vs stale (audio/files missing)
-  $: activeSessions = info ? info.sessions.filter(s => s.has_audio || s.id === $currentSessionId) : [];
-  $: staleSessions  = info ? info.sessions.filter(s => !s.has_audio && s.id !== $currentSessionId) : [];
 </script>
 
 <div class="sm-backdrop" role="presentation" on:click|self={() => dispatch('close')} on:keydown={(e) => e.key === 'Escape' && dispatch('close')}>
@@ -99,16 +95,13 @@
         <div class="sm-path-row"><span class="sm-path-label">Uploads</span><code class="sm-path">{info.uploads_dir}</code></div>
       </div>
 
-      <!-- Orphan cleanup — always visible -->
+      <!-- Orphan cleanup -->
       <div class="sm-section">
-        <div class="sm-section-title">
-          🗑 Orphaned Files
-          <span class="sm-count {info.orphan_files.length > 0 ? 'sm-count-warn' : 'sm-count-ok'}">{info.orphan_files.length}</span>
-        </div>
+        <div class="sm-section-title">🗑 Orphaned Files</div>
         {#if info.orphan_files.length === 0}
-          <p class="sm-hint">✓ No orphaned files — downloads folder is clean.</p>
+          <p class="sm-hint">No orphaned files found.</p>
         {:else}
-          <p class="sm-hint">{info.orphan_files.length} file{info.orphan_files.length !== 1 ? 's' : ''} not linked to any session — <strong>{fmt(info.orphan_size_bytes)}</strong> total.</p>
+          <p class="sm-hint">{info.orphan_files.length} files not linked to any session — {fmt(info.orphan_size_bytes)} total.</p>
           <details class="sm-orphan-details">
             <summary>Show files</summary>
             <div class="sm-file-list">
@@ -129,24 +122,21 @@
         {/if}
       </div>
 
-      <!-- Active sessions -->
+      <!-- Session list -->
       <div class="sm-section">
-        <div class="sm-section-title">
-          ✅ Active Sessions
-          <span class="sm-count sm-count-ok">{activeSessions.length}</span>
-        </div>
-        {#if activeSessions.length === 0}
-          <p class="sm-hint">No active sessions.</p>
+        <div class="sm-section-title">📋 All Sessions ({info.sessions.length})</div>
+        {#if info.sessions.length === 0}
+          <p class="sm-hint">No sessions found.</p>
         {:else}
           <div class="sm-session-list">
-            {#each activeSessions as s}
+            {#each info.sessions as s}
               {@const isCurrent = s.id === $currentSessionId}
               <div class="sm-session-row" class:sm-session-current={isCurrent}>
                 <div class="sm-session-info">
                   <div class="sm-session-title">
                     {s.artist} — {s.title}
                     {#if isCurrent}<span class="sm-badge">current</span>{/if}
-                    <span class="sm-badge sm-badge-{s.status}">{s.status}</span>
+                    <span class="sm-badge sm-badge-status sm-badge-{s.status}">{s.status}</span>
                   </div>
                   <div class="sm-session-meta">
                     {fmtDate(s.created_at)} · {fmt(s.total_size_bytes)}
@@ -168,43 +158,15 @@
                   {/if}
                 </div>
                 {#if !isCurrent}
-                  <button class="sm-btn sm-btn-danger sm-btn-sm" on:click={() => doDelete(s.id)} disabled={deletingId === s.id} title="Delete session and all its files">
+                  <button
+                    class="sm-btn sm-btn-danger sm-btn-sm"
+                    on:click={() => doDelete(s.id)}
+                    disabled={deletingId === s.id}
+                    title="Delete session and all its files"
+                  >
                     {deletingId === s.id ? '⏳' : '🗑'}
                   </button>
                 {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <!-- Stale/orphaned sessions (audio files gone) -->
-      <div class="sm-section">
-        <div class="sm-section-title">
-          ⚠️ Stale Sessions <span class="sm-hint-inline">(audio files missing)</span>
-          <span class="sm-count {staleSessions.length > 0 ? 'sm-count-warn' : 'sm-count-ok'}">{staleSessions.length}</span>
-        </div>
-        {#if staleSessions.length === 0}
-          <p class="sm-hint">✓ No stale sessions.</p>
-        {:else}
-          <p class="sm-hint">These sessions have no audio files on disk anymore — safe to delete.</p>
-          <div class="sm-session-list">
-            {#each staleSessions as s}
-              <div class="sm-session-row sm-session-stale">
-                <div class="sm-session-info">
-                  <div class="sm-session-title">
-                    {s.artist} — {s.title}
-                    <span class="sm-badge sm-badge-{s.status}">{s.status}</span>
-                    <span class="sm-badge sm-badge-stale">no audio</span>
-                  </div>
-                  <div class="sm-session-meta">
-                    {fmtDate(s.created_at)} · {fmt(s.total_size_bytes)}
-                    <span class="sm-session-id">id: {s.id.slice(0, 8)}</span>
-                  </div>
-                </div>
-                <button class="sm-btn sm-btn-danger sm-btn-sm" on:click={() => doDelete(s.id)} disabled={deletingId === s.id} title="Delete stale session">
-                  {deletingId === s.id ? '⏳' : '🗑'}
-                </button>
               </div>
             {/each}
           </div>
@@ -365,23 +327,6 @@
   .sm-badge-generated { background: #1b3a1b; color: #66bb6a; }
   .sm-badge-uploaded, .sm-badge-created { background: #2a3a5e; color: #90caf9; }
   .sm-badge-generation_failed { background: #3a1a1a; color: #ef9a9a; }
-  .sm-badge-stale { background: #3a2a0a; color: #ffb74d; }
-
-  .sm-session-stale { opacity: 0.75; border-color: #3a3020; }
-
-  .sm-count {
-    display: inline-block;
-    margin-left: 0.4rem;
-    font-size: 0.72rem;
-    padding: 0.05rem 0.4rem;
-    border-radius: 10px;
-    font-weight: 700;
-    vertical-align: middle;
-  }
-  .sm-count-ok { background: #1b3a1b; color: #66bb6a; }
-  .sm-count-warn { background: #3a2a0a; color: #ffb74d; }
-
-  .sm-hint-inline { font-size: 0.75rem; color: #666; font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: 0.25rem; }
 
   .sm-orphan-details, .sm-file-details { margin: 0.4rem 0; }
   .sm-orphan-details summary, .sm-file-details summary {
