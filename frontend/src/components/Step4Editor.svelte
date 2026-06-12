@@ -4630,6 +4630,25 @@
       return;
     }
 
+    // Tab / Shift+Tab: select next / previous note (single selection only)
+    if (e.code === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote !== null && selectedNotes.size <= 1) {
+      e.preventDefault();
+      const realNotes = notes
+        .filter(n => n.type !== 'break')
+        .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+      const idx = realNotes.findIndex(n => n.id === selectedNote);
+      if (idx !== -1) {
+        const targetIdx = e.shiftKey ? idx - 1 : idx + 1;
+        if (targetIdx >= 0 && targetIdx < realNotes.length) {
+          const targetId = realNotes[targetIdx].id;
+          selectedNote = targetId;
+          selectedNotes = new Set([targetId]);
+          draw();
+        }
+      }
+      return;
+    }
+
     // L: toggle loop on/off
     if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote === null) {
       e.preventDefault();
@@ -6955,6 +6974,8 @@
     <div class="shortcut-group">
       <span class="shortcut-label">Edit</span>
       <span class="shortcut"><kbd>Drag</kbd> move</span>
+      <span class="shortcut"><kbd>Tab</kbd> next note</span>
+      <span class="shortcut"><kbd>Shift+Tab</kbd> previous note</span>
       <span class="shortcut"><kbd>↑↓</kbd> pitch ±1 semitone</span>
       <span class="shortcut"><kbd>Ctrl+↑↓</kbd> pitch ±1 octave</span>
       <span class="shortcut"><kbd>S</kbd> split</span>
