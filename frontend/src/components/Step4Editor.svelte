@@ -3916,7 +3916,7 @@
       startBeat: beat,
       duration,
       pitch: Math.max(minPitch, Math.min(maxPitch, pitch)),
-      syllable: ' ~',
+      syllable: 'word ',
       isRap: false,
       isGolden: false,
       confidence: 1.0,
