@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
+  import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
 
@@ -563,7 +564,8 @@
   let segRegenModalDragOffsetY = 0;
   let segRegenLanguage = 'auto';
   let segRegenPreset = 'balanced';
-  let segRegenAudioSource = 'current'; // 'current' | 'vocals' | 'edited'
+  let segRegenAudioSource = 'vocals'; // 'vocals' | 'edited'
+  let segRegenCurrentEditorSource = 'vocals'; // 'vocals' | 'edited' (badge-only)
   let segRegenPreviewLoading = false;
   let segRegenPreviewError = '';
   let segRegenPreviewLines = [];
@@ -590,6 +592,13 @@
 
   // Playback speed
   let playbackRate = 1.0;
+
+  // Keep AI modal "(current)" source badge in sync with editor source,
+  // but ignore full-mix/original while the modal is open.
+  $: if (segRegenModalOpen) {
+    if (audioSource === 'edited') segRegenCurrentEditorSource = 'edited';
+    else if (audioSource === 'vocals') segRegenCurrentEditorSource = 'vocals';
+  }
 
   // MIDI pitch playback during track play
   let midiPlayback = false;
@@ -3516,6 +3525,13 @@
     segRegenPreviewLines = [];
     segRegenPreviewConfidence = null;
     segRegenPreviewHyphenated = false;
+    segRegenLanguage = SUPPORTED_LANGUAGES.some(l => l.code === $lyricsData?.language)
+      ? $lyricsData.language
+      : 'auto';
+    segRegenCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
+    segRegenAudioSource = (segRegenCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+      ? 'edited'
+      : 'vocals';
     console.log('[SegmentAI] Modal range applied:', {
       sourceType: segRegenRange.sourceType,
       cleanupId: segRegenRange.cleanupId,
@@ -3714,11 +3730,7 @@
   }
 
   function getSegRegenAudioSourceForApi() {
-    if (segRegenAudioSource === 'current') {
-      // Use whichever source the user is currently auditioning in Step 4.
-      return audioSource;
-    }
-    return segRegenAudioSource;
+    return segRegenAudioSource === 'edited' ? 'edited' : 'vocals';
   }
 
   async function previewSegmentLyrics() {
@@ -7091,18 +7103,16 @@
           Language
           <select class="mic-select" bind:value={segRegenLanguage}>
             <option value="auto">Auto</option>
-            <option value="en">English</option>
-            <option value="de">German</option>
-            <option value="fr">French</option>
-            <option value="it">Italian</option>
+            {#each SUPPORTED_LANGUAGES as lang}
+              <option value={lang.code}>{lang.label}</option>
+            {/each}
           </select>
         </label>
         <label>
           Audio Source
           <select class="mic-select" bind:value={segRegenAudioSource}>
-            <option value="current">Current ({audioSource})</option>
-            <option value="vocals">Vocals</option>
-            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited</option>
+            <option value="vocals">Vocal{segRegenCurrentEditorSource === 'vocals' ? ' (current)' : ''}</option>
+            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited{segRegenCurrentEditorSource === 'edited' ? ' (current)' : ''}</option>
           </select>
         </label>
       </div>
