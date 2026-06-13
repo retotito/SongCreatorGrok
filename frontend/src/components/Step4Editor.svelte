@@ -467,14 +467,27 @@
 
   function addCleanupSegmentAtMs(startMs) {
     pushUndo();
-    const endMs = startMs + Math.max(500, (15000 / bpm));
-    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs, endMs });
+    let segStartMs = startMs;
+    let segEndMs = startMs + Math.max(500, (15000 / bpm));
+
+    // If user adds a cleanup segment from within an active loop,
+    // default the segment to exactly match loop boundaries.
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      const loopStartMs = beatToTime(Math.min(loopStartBeat, loopEndBeat)) * 1000;
+      const loopEndMs = beatToTime(Math.max(loopStartBeat, loopEndBeat)) * 1000;
+      if (startMs >= loopStartMs && startMs <= loopEndMs) {
+        segStartMs = loopStartMs;
+        segEndMs = loopEndMs;
+      }
+    }
+
+    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs: segStartMs, endMs: segEndMs });
     const overlap = findCleanupOverlap(seg.startMs, seg.endMs);
     if (overlap) {
       showToast('Cleanup segments cannot overlap');
       return;
     }
-    console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${startMs.toFixed(0)} endMs=${endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
+    console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${seg.startMs.toFixed(0)} endMs=${seg.endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
     cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
     cleanedAudioDirty = true;
