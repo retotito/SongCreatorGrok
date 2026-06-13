@@ -800,6 +800,7 @@
       audioSource,
       midiPlayback,
       metronomeEnabled,
+      waveformHeight,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -6763,6 +6764,9 @@
         }
         if (typeof uiPrefs.midiPlayback === 'boolean') midiPlayback = uiPrefs.midiPlayback;
         if (typeof uiPrefs.metronomeEnabled === 'boolean') metronomeEnabled = uiPrefs.metronomeEnabled;
+        if (typeof uiPrefs.waveformHeight === 'number' && Number.isFinite(uiPrefs.waveformHeight)) {
+          waveformHeight = Math.max(40, Math.min(240, uiPrefs.waveformHeight));
+        }
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
@@ -7284,7 +7288,7 @@
     {#if showWaveform}
       <input type="range" class="wave-height-slider wave-height-overlay" min="40" max="240" step="10"
              bind:value={waveformHeight}
-             on:input={() => { resizeCanvas(); draw(); }}
+             on:input={() => { saveEditorUiPrefs('waveform-height'); resizeCanvas(); draw(); }}
              title="Waveform height: {waveformHeight}px" />
     {/if}
     
