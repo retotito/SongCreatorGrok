@@ -787,6 +787,55 @@
   // Playback speed
   let playbackRate = 1.0;
 
+  function getEditorUiPrefsKey() {
+    return $sessionId ? `editor_ui_prefs_${$sessionId}` : null;
+  }
+
+  function saveEditorUiPrefs(reason = 'unknown') {
+    const key = getEditorUiPrefsKey();
+    if (!key) return;
+    const payload = {
+      scrollMode,
+      playbackRate,
+      audioSource,
+      midiPlayback,
+      metronomeEnabled,
+    };
+    localStorage.setItem(key, JSON.stringify(payload));
+    console.log('[Step4] Saved UI prefs', { reason, ...payload });
+  }
+
+  function restoreEditorUiPrefs() {
+    const key = getEditorUiPrefsKey();
+    if (!key) return null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+      const prefs = JSON.parse(raw);
+      console.log('[Step4] Loaded UI prefs', prefs);
+      return prefs;
+    } catch (err) {
+      console.warn('[Step4] Failed to parse UI prefs, ignoring', err);
+      return null;
+    }
+  }
+
+  function resolvePreferredAudioSource(preferred) {
+    const editedAvailable = hasVocalsAudio && (cleanedAudioAvailable || segRecPatched.size > 0);
+    if (preferred === 'edited' && editedAvailable) return 'edited';
+    if (preferred === 'vocals' && hasVocalsAudio) return 'vocals';
+    if (preferred === 'original' && hasOriginalAudio) return 'original';
+    // Fallback policy: prefer full mix when preferred source is unavailable.
+    if (hasOriginalAudio) return 'original';
+    if (hasVocalsAudio) return editedAvailable ? 'edited' : 'vocals';
+    return 'original';
+  }
+
+  function toggleScrollMode() {
+    scrollMode = !scrollMode;
+    saveEditorUiPrefs('scroll-mode');
+  }
+
   // Keep AI modal "(current)" source badge in sync with editor source,
   // but ignore full-mix/original while the modal is open.
   $: if (segRegenModalOpen) {
@@ -4681,6 +4730,7 @@
     // Re-load waveform for new source
     loadWaveform(url);
     console.log('[Step4] Audio source:', source, 'at', time.toFixed(2) + 's', wasPlaying ? '(resuming)' : '(paused)');
+    saveEditorUiPrefs('audio-source');
   }
 
   async function handleMissingAudio(type) {
@@ -5571,6 +5621,7 @@
       audioEl.playbackRate = rate;
       audioEl.preservesPitch = true;
     }
+    saveEditorUiPrefs('playback-rate');
   }
 
   // ──── MIDI Pitch Playback ────────────────────
@@ -5661,6 +5712,7 @@
     }
     lastMetronomeBeat = -1;
     console.log('[Metronome]', metronomeEnabled ? 'ON' : 'OFF');
+    saveEditorUiPrefs('metronome-toggle');
   }
 
   function stopAllMidiNotes() {
@@ -5681,6 +5733,7 @@
       stopAllMidiNotes();
     }
     console.log('[MIDI] Pitch playback:', midiPlayback);
+    saveEditorUiPrefs('midi-toggle');
   }
 
   function toggleMuteVocal() {
@@ -6700,12 +6753,21 @@
       }
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
       console.log(`[Step4] URLs: vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | originalUrl=${originalUrl}`);
-      console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | initial audioSource will be: ${data.has_vocal_splice ? 'edited' : (hasVocalsAudio ? 'vocals' : 'original')}`);
-      // Default to whichever audio is available
-      if (hasVocalsAudio) {
-        audioSource = data.has_vocal_splice ? 'edited' : 'vocals';
-      } else if (hasOriginalAudio) {
-        audioSource = 'original';
+      const defaultSource = hasVocalsAudio ? (data.has_vocal_splice ? 'edited' : 'vocals') : (hasOriginalAudio ? 'original' : 'original');
+      console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | default audioSource=${defaultSource}`);
+      const uiPrefs = restoreEditorUiPrefs();
+      if (uiPrefs) {
+        if (typeof uiPrefs.scrollMode === 'boolean') scrollMode = uiPrefs.scrollMode;
+        if (typeof uiPrefs.playbackRate === 'number' && [0.25, 0.5, 0.75, 1].includes(uiPrefs.playbackRate)) {
+          playbackRate = uiPrefs.playbackRate;
+        }
+        if (typeof uiPrefs.midiPlayback === 'boolean') midiPlayback = uiPrefs.midiPlayback;
+        if (typeof uiPrefs.metronomeEnabled === 'boolean') metronomeEnabled = uiPrefs.metronomeEnabled;
+      }
+      const preferredSource = uiPrefs?.audioSource || defaultSource;
+      audioSource = resolvePreferredAudioSource(preferredSource);
+      if (preferredSource !== audioSource) {
+        console.log(`[Step4] Audio source fallback: preferred=${preferredSource} -> resolved=${audioSource}`);
       }
       // Set the reactive audio URL driving the <audio> element
       const editedUrl = getEditedAudioUrl();
@@ -6717,8 +6779,11 @@
       if (audioEl && currentAudioUrl) {
         editedAudioLoading = audioSource === 'edited';
         if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
+        audioEl.playbackRate = playbackRate;
+        audioEl.preservesPitch = true;
         audioEl.load();
       }
+      saveEditorUiPrefs('loadData');
       computeTotalBeats();
 
       // Position playhead and scroll at GAP (song start) — unless we have a saved scroll position
@@ -6786,6 +6851,7 @@
     if ($sessionId) {
       localStorage.setItem(`editor_scroll_${$sessionId}`, JSON.stringify({ sx: scrollX, z: zoom }));
     }
+    saveEditorUiPrefs('destroy');
     saveSessionNotes();
     saveFlags();
     clearCleanupKeyboardSaveTimer();
@@ -7153,7 +7219,7 @@
           <span class="mic-icon-wrap" class:mic-off={!loopEnabled}>🔁</span>
         </button>
         <button class="tool-btn" style="width: 62px;"
-          on:click={() => { scrollMode = !scrollMode; }}
+          on:click={toggleScrollMode}
           title={scrollMode ? 'Following playhead — click to pin' : 'View pinned — click to follow'}>
           {scrollMode ? 'Scroll' : 'Page'}
         </button>
