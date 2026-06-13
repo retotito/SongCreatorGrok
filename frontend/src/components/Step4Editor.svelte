@@ -798,6 +798,7 @@
       scrollMode,
       playbackRate,
       audioSource,
+      audioVolume,
       midiPlayback,
       metronomeEnabled,
       waveformHeight,
@@ -5746,6 +5747,7 @@
   function handleVolumeChange(e) {
     audioVolume = parseFloat(e.target.value);
     if (audioEl && !muteVocal) audioEl.volume = audioVolume;
+    saveEditorUiPrefs('audio-volume');
   }
 
   // ──── Mic Sing-Along ────────────────────────────
@@ -6761,6 +6763,9 @@
         if (typeof uiPrefs.scrollMode === 'boolean') scrollMode = uiPrefs.scrollMode;
         if (typeof uiPrefs.playbackRate === 'number' && [0.25, 0.5, 0.75, 1].includes(uiPrefs.playbackRate)) {
           playbackRate = uiPrefs.playbackRate;
+        }
+        if (typeof uiPrefs.audioVolume === 'number' && Number.isFinite(uiPrefs.audioVolume)) {
+          audioVolume = Math.max(0, Math.min(1, uiPrefs.audioVolume));
         }
         if (typeof uiPrefs.midiPlayback === 'boolean') midiPlayback = uiPrefs.midiPlayback;
         if (typeof uiPrefs.metronomeEnabled === 'boolean') metronomeEnabled = uiPrefs.metronomeEnabled;
