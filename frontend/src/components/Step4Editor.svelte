@@ -823,12 +823,171 @@
   let metronomeEnabled = false;
   let metronomeCtx = null;
   let lastMetronomeBeat = -1; // tracks which quarter-note beat we last clicked
-  let metronomeOffset = 0;    // offset in ultrastar beats (0 = on beat, 4 = half beat / 8th note off)
-  let metronomeDivisor = 1;   // 1=quarter note, 2=half note, 4=bar click
+  let metronomeOffset = 0;    // fallback offset when no downbeat anchor is defined
+  let metronomeToolOpen = false;
+  let metronomeToolX = 36;
+  let metronomeToolY = 180;
+  let metronomeToolDragging = false;
+  let metronomeToolDragOffsetX = 0;
+  let metronomeToolDragOffsetY = 0;
+  let metronomePickTarget = 0; // 0 = idle, 1 = set first downbeat, 2 = set second downbeat
+  let metronomePickHoverBeat = null;
+  let metronomeDownbeat1Beat = null;
+  let metronomeDownbeat2Beat = null;
+  let metronomeManualDownbeatAnchorBeat = null;
+  let metronomeManualDownbeatInterval = null;
+  let metronomeManualBeatUnitInterval = null;
+  let metronomeSigNumerator = 4;
+  let metronomeSigDenominator = 4;
+  let metronomeSpeedFactor = 1;
+  const METRONOME_SIGNATURE_NUM_OPTIONS = [2, 3, 4, 5, 6, 7, 9, 12];
+  const METRONOME_SIGNATURE_DEN_OPTIONS = [2, 4, 5, 8, 16];
   // BEATS_PER_QUARTER: US-BPM / 30 = quarter note duration in US beats (Bohning ×4 convention)
   // e.g. BPM=480 → 16, BPM=400 → ~13.3, BPM=200 → ~6.7. Recalculated reactively when bpm changes.
   $: BEATS_PER_QUARTER = bpm > 0 ? Math.round(bpm / 30) : 8;
   $: BEATS_PER_MEASURE = BEATS_PER_QUARTER * 4;
+
+  function getMetronomeSignatureIntervalBeats() {
+    const numerator = Number(metronomeSigNumerator);
+    const denominator = Number(metronomeSigDenominator);
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return null;
+    const unitBeats = (BEATS_PER_QUARTER * 4) / denominator;
+    const interval = unitBeats * numerator;
+    if (!Number.isFinite(interval) || interval <= 0) return null;
+    return interval;
+  }
+
+  function getMetronomeBeatUnitInterval() {
+    if (metronomeManualBeatUnitInterval && metronomeManualBeatUnitInterval > 0) return metronomeManualBeatUnitInterval;
+    return BEATS_PER_QUARTER;
+  }
+
+  function getMetronomeClickInterval() {
+    return getMetronomeBeatUnitInterval();
+  }
+
+  function getMetronomeDownbeatAnchorBeat() {
+    if (metronomeManualDownbeatAnchorBeat !== null) return metronomeManualDownbeatAnchorBeat;
+    if (downbeatFromHeader) {
+      const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
+      return Math.round(exactBeat);
+    }
+    return metronomeOffset;
+  }
+
+  function getMetronomeDownbeatInterval() {
+    return metronomeManualDownbeatInterval || BEATS_PER_MEASURE;
+  }
+
+  function getMetronomeClickOffset() {
+    const clickInterval = getMetronomeClickInterval();
+    const anchorBeat = getMetronomeDownbeatAnchorBeat();
+    return ((anchorBeat % clickInterval) + clickInterval) % clickInterval;
+  }
+
+  function clearMetronomePickTarget() {
+    metronomePickTarget = 0;
+    metronomePickHoverBeat = null;
+    if (canvasEl && !setGapMode) canvasEl.style.cursor = '';
+  }
+
+  function armMetronomeDownbeatPick(target) {
+    console.log(`[MetronomeTool] Arm pick target=${target} bpm=${bpm} BEATS_PER_QUARTER=${BEATS_PER_QUARTER}`);
+    if (!metronomeEnabled) return;
+    if (isPlaying) {
+      showToast('Pause playback before setting downbeats');
+      return;
+    }
+    if (setGapMode || gridAlignMode) {
+      showToast('Exit GAP/Grid align mode first');
+      return;
+    }
+    metronomePickTarget = target;
+    metronomePickHoverBeat = null;
+    if (canvasEl) canvasEl.style.cursor = 'crosshair';
+    showToast(`Metronome: click grid line for downbeat ${target}`);
+    draw();
+  }
+
+  function recalcMetronomeFromControls(reason = 'manual') {
+    const isLoad = reason === 'load';
+    if (metronomeDownbeat1Beat === null) {
+      console.log('[MetronomeTool] Recalc skipped (DB1 not set)', { reason });
+      return false;
+    }
+    const numerator = Number(metronomeSigNumerator);
+    const denominator = Number(metronomeSigDenominator);
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+      showToast('Invalid time signature');
+      return false;
+    }
+    // Compute BEATS_PER_QUARTER directly from current bpm — do NOT use the reactive
+    // $: variable because inside an async load function Svelte may not have re-evaluated
+    // it yet, producing stale (wrong) intervals.
+    const currentBpq = bpm > 0 ? Math.round(bpm / 30) : 8;
+    const beatUnitInterval = (currentBpq * 4) / denominator;
+    const downbeatInterval = beatUnitInterval * numerator;
+    if (!Number.isFinite(beatUnitInterval) || !Number.isFinite(downbeatInterval) || beatUnitInterval <= 0 || downbeatInterval <= 0) {
+      showToast('Cannot calculate metronome intervals from current BPM/signature');
+      return false;
+    }
+    const speed = Math.max(0.25, Number(metronomeSpeedFactor) || 1);
+    const effectiveBeatUnitInterval = beatUnitInterval / speed;
+    const effectiveDownbeatInterval = downbeatInterval / speed;
+    metronomeManualDownbeatAnchorBeat = metronomeDownbeat1Beat;
+    metronomeManualBeatUnitInterval = effectiveBeatUnitInterval;
+    metronomeManualDownbeatInterval = effectiveDownbeatInterval;
+    lastMetronomeBeat = -1;
+    console.log('[MetronomeTool] Recalculated', {
+      reason,
+      db1: metronomeDownbeat1Beat,
+      numerator,
+      denominator,
+      bpm,
+      currentBpq,
+      reactiveBpq: BEATS_PER_QUARTER,
+      beatUnitInterval,
+      downbeatInterval,
+      effectiveBeatUnitInterval,
+      effectiveDownbeatInterval,
+      speedFactor: metronomeSpeedFactor,
+    });
+    if (!isLoad) markUnsaved();
+    draw();
+    return true;
+  }
+
+  function nudgeMetronomeSpeed(direction) {
+    const prev = metronomeSpeedFactor;
+    if (direction === 'faster') {
+      metronomeSpeedFactor = Math.min(8, metronomeSpeedFactor * 2);
+    } else {
+      metronomeSpeedFactor = Math.max(0.25, metronomeSpeedFactor / 2);
+    }
+    if (prev !== metronomeSpeedFactor) {
+      lastMetronomeBeat = -1;
+      showToast(`Metronome speed x${metronomeSpeedFactor}`);
+      recalcMetronomeFromControls('speed-change');
+      markUnsaved();
+    }
+  }
+
+  function clearMetronomeDownbeatReference() {
+    metronomeDownbeat1Beat = null;
+    metronomeDownbeat2Beat = null;
+    metronomeManualDownbeatAnchorBeat = null;
+    metronomeManualDownbeatInterval = null;
+    metronomeManualBeatUnitInterval = null;
+    metronomeSpeedFactor = 1;
+    clearMetronomePickTarget();
+    lastMetronomeBeat = -1;
+    showToast('Metronome downbeats reset');
+    draw();
+  }
+
+  function applyManualMetronomeDownbeats() {
+    return recalcMetronomeFromControls('legacy-apply');
+  }
 
   // Downbeat offset: ms from audio 0s to first downbeat
   let downbeatOffsetMs = 0;
@@ -945,7 +1104,8 @@
   // phase: 'idle' | 'armed' | 'preroll' | 'recording' | 'review'
   let segRecPhase = 'idle';
   let uiModalGuardActive = false;
-  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen;
+  // Guard selected toolbar controls while any blocking modal/tool is open.
+  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || metronomeToolOpen;
   $: recordingActive.set(uiModalGuardActive);
   let segRecSegmentId = null;       // cleanup segment being recorded
   let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
@@ -1321,6 +1481,13 @@
       downbeatFromHeader,
       extraHeaders: JSON.parse(JSON.stringify(extraHeaders)),
       rawTimings: JSON.parse(JSON.stringify(rawTimings)),
+      metronomeDownbeat1Beat,
+      metronomeSigNumerator,
+      metronomeSigDenominator,
+      metronomeSpeedFactor,
+      metronomeManualDownbeatAnchorBeat,
+      metronomeManualDownbeatInterval,
+      metronomeManualBeatUnitInterval,
     };
   }
 
@@ -1337,6 +1504,13 @@
     if (snap.downbeatFromHeader !== undefined) downbeatFromHeader = snap.downbeatFromHeader;
     if (snap.extraHeaders !== undefined) extraHeaders = snap.extraHeaders;
     if (snap.rawTimings !== undefined) rawTimings = snap.rawTimings;
+    if (snap.metronomeDownbeat1Beat !== undefined) metronomeDownbeat1Beat = snap.metronomeDownbeat1Beat;
+    if (snap.metronomeSigNumerator !== undefined) metronomeSigNumerator = snap.metronomeSigNumerator;
+    if (snap.metronomeSigDenominator !== undefined) metronomeSigDenominator = snap.metronomeSigDenominator;
+    if (snap.metronomeSpeedFactor !== undefined) metronomeSpeedFactor = snap.metronomeSpeedFactor;
+    if (snap.metronomeManualDownbeatAnchorBeat !== undefined) metronomeManualDownbeatAnchorBeat = snap.metronomeManualDownbeatAnchorBeat;
+    if (snap.metronomeManualDownbeatInterval !== undefined) metronomeManualDownbeatInterval = snap.metronomeManualDownbeatInterval;
+    if (snap.metronomeManualBeatUnitInterval !== undefined) metronomeManualBeatUnitInterval = snap.metronomeManualBeatUnitInterval;
 
     selectedNote = null;
     selectedNotes = new Set();
@@ -1395,6 +1569,15 @@
       const headersToSave = [...extraHeaders];
       if (downbeatOffsetMs !== 0) {
         headersToSave.push({ key: 'DOWNBEATOFFSET', value: String(Math.round(downbeatOffsetMs)) });
+      }
+      if (metronomeManualDownbeatAnchorBeat !== null) {
+        const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
+        headersToSave.push({ key: 'METRONOMEANCHOR', value: String(Math.round(anchorMs)) });
+        headersToSave.push({ key: 'METRONOMEIG', value: `${metronomeSigNumerator}/${metronomeSigDenominator}` });
+        headersToSave.push({ key: 'METRONOMESPEED', value: String(metronomeSpeedFactor) });
+        console.log(`%c[MetronomeTool] Saving headers: ANCHOR=${Math.round(anchorMs)} IG=${metronomeSigNumerator}/${metronomeSigDenominator} SPEED=${metronomeSpeedFactor} anchor_beat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`, 'color:#7dd3fc');
+      } else {
+        console.log('[MetronomeTool] No metronome anchor set — not saving METRONOME* headers');
       }
       const result = await saveEditorState(
         $sessionId,
@@ -1489,6 +1672,7 @@
 
   function enterSetGapMode() {
     if (isPlaying || gridAlignMode) return;
+    clearMetronomePickTarget();
     setGapMode = true;
     setGapHoverBeat = null;
     if (canvasEl) canvasEl.style.cursor = 'crosshair';
@@ -1509,6 +1693,7 @@
   // ── Grid Align mode functions ──
   function enterGridAlignMode() {
     if (isPlaying) return; // don't enter while playing
+    clearMetronomePickTarget();
     gridAlignMode = true;
     gridAlignOffsetMs = 0;
     gridAlignOriginalGapMs = gapMs;
@@ -1926,38 +2111,45 @@
     // Quarter note lines (thickest), 8th note lines (medium), fine lines (thinnest)
     // In gridAlignMode, grid lines are offset by gridAlignOffsetMs (preview shift)
     const gridOffsetPx = gridAlignMode ? msToPixels(gridAlignOffsetMs) : 0;
-    const startBeat = Math.floor(xToBeat(0 - gridOffsetPx));
-    const endBeat = Math.ceil(xToBeat(w - gridOffsetPx));
-    const beatsPerMeasure = BEATS_PER_QUARTER * 4; // 4/4 time = 4 quarter notes per measure
-    const beatsPerEighth = BEATS_PER_QUARTER / 2;  // half a quarter note
+    const startBeat = xToBeat(0 - gridOffsetPx);
+    const endBeat = xToBeat(w - gridOffsetPx);
+    const beatsPerMeasure = Math.max(0.0001, getMetronomeDownbeatInterval());
+    const beatsPerBeatUnit = Math.max(0.0001, getMetronomeBeatUnitInterval());
+    const beatsPerSubUnit = Math.max(0.0001, beatsPerBeatUnit / 2);
 
     // Find the downbeat gridline beat — use fractional offset for sub-beat precision
-    let downbeatBeat = -99999;
-    let downbeatFracPx = 0; // sub-beat pixel offset for smooth grid positioning
-    if (downbeatOffsetMs !== 0) {
+    let downbeatBeat = getMetronomeDownbeatAnchorBeat();
+    if (metronomeManualDownbeatAnchorBeat === null && downbeatFromHeader) {
       const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
-      downbeatBeat = Math.round(exactBeat);
-      downbeatFracPx = (exactBeat - downbeatBeat) * zoom;
+      downbeatBeat = exactBeat;
     }
 
-    for (let b = startBeat; b <= endBeat; b++) {
-      const x = beatToX(b) + gridOffsetPx + (downbeatFromHeader ? downbeatFracPx : 0);
-      // When we have a downbeat reference, all grid subdivisions align to it
-      const rel = downbeatFromHeader ? b - downbeatBeat : b;
-      const isMeasure = ((rel % beatsPerMeasure) + beatsPerMeasure) % beatsPerMeasure === 0;
-      const isQuarter = ((rel % BEATS_PER_QUARTER) + BEATS_PER_QUARTER) % BEATS_PER_QUARTER === 0;
-      const isEighth = ((rel % beatsPerEighth) + beatsPerEighth) % beatsPerEighth === 0;
+    const nearMultiple = (value, step) => {
+      const ratio = value / step;
+      return Math.abs(ratio - Math.round(ratio)) < 1e-4;
+    };
+    const firstSubIndex = Math.floor((startBeat - downbeatBeat) / beatsPerSubUnit) - 2;
+    const lastSubIndex = Math.ceil((endBeat - downbeatBeat) / beatsPerSubUnit) + 2;
+
+    for (let i = firstSubIndex; i <= lastSubIndex; i++) {
+      const b = downbeatBeat + i * beatsPerSubUnit;
+      const x = beatToX(b) + gridOffsetPx;
+      if (x < -1 || x > w + 1) continue;
+      const rel = b - downbeatBeat;
+      const isMeasure = nearMultiple(rel, beatsPerMeasure);
+      const isBeatUnit = nearMultiple(rel, beatsPerBeatUnit);
+      const isSubUnit = nearMultiple(rel, beatsPerSubUnit);
       // Highlight the beat level that the metronome is currently clicking on
-      const metronomeInterval = BEATS_PER_QUARTER * metronomeDivisor;
-      const isMetronomeBeat = metronomeEnabled && ((rel % metronomeInterval) + metronomeInterval) % metronomeInterval === 0;
+      const metronomeInterval = getMetronomeClickInterval();
+      const isMetronomeBeat = metronomeEnabled && nearMultiple(rel, metronomeInterval);
 
       if (isMeasure) {
         ctx.strokeStyle = isMetronomeBeat ? '#a0a0ff' : '#7070cc';
         ctx.lineWidth = 2;
-      } else if (isQuarter) {
+      } else if (isBeatUnit) {
         ctx.strokeStyle = isMetronomeBeat ? '#8888ee' : '#404078';
         ctx.lineWidth = 1;
-      } else if (isEighth) {
+      } else if (isSubUnit) {
         ctx.strokeStyle = isMetronomeBeat ? '#6666cc' : '#30305a';
         ctx.lineWidth = 0.5;
       } else {
@@ -2011,6 +2203,54 @@
         // New GAP = time of this grid line (since this line becomes beat 0)
         const newGapMs = Math.round(hoverTimeSec * 1000);
         ctx.fillText(`GAP ${newGapMs}ms`, hoverX, 12);
+        ctx.restore();
+      }
+    }
+
+    // ── Metronome downbeat guide lines ──
+    if (metronomeDownbeat1Beat !== null || metronomeDownbeat2Beat !== null) {
+      const drawDownbeatGuide = (beat, label, color) => {
+        if (beat === null) return;
+        const x = beatToX(beat);
+        if (x < 0 || x > w) return;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = color;
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x, 12);
+        ctx.restore();
+      };
+      drawDownbeatGuide(metronomeDownbeat1Beat, 'DB1', '#7dd3fc');
+      drawDownbeatGuide(metronomeDownbeat2Beat, 'DB2', '#22d3ee');
+    }
+
+    // ── Metronome pick hover: snapped dotted preview line ──
+    if ((metronomePickTarget === 1 || metronomePickTarget === 2) && metronomePickHoverBeat !== null) {
+      const hoverX = beatToX(metronomePickHoverBeat);
+      if (hoverX >= 0 && hoverX <= w) {
+        const label = metronomePickTarget === 1 ? 'Set DB1' : 'Set DB2';
+        ctx.save();
+        ctx.strokeStyle = '#7dd3fc';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 3]);
+        ctx.globalAlpha = 0.95;
+        ctx.beginPath();
+        ctx.moveTo(hoverX, 0);
+        ctx.lineTo(hoverX, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#7dd3fc';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, hoverX, 12);
         ctx.restore();
       }
     }
@@ -2597,6 +2837,24 @@
       return;
     }
 
+    // ── Metronome downbeat pick mode ──
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      const target = metronomePickTarget;
+      const pickedBeat = nearestGridBeat(mx);
+      console.log(`[MetronomeTool] Pick target=${target} beat=${pickedBeat} (mx=${mx.toFixed(1)})`);
+      if (target === 1) {
+        metronomeDownbeat1Beat = pickedBeat;
+        metronomeDownbeat2Beat = null;
+        recalcMetronomeFromControls('pick-db1');
+        showToast('Downbeat set and grid recalculated');
+      } else {
+        showToast('Use Set Downbeat only in simplified mode');
+      }
+      clearMetronomePickTarget();
+      draw();
+      return;
+    }
+
     // ── Set GAP mode click ──
     if (setGapMode && setGapHoverBeat !== null) {
       // Compute the new GAP: the absolute time of the hovered grid line becomes the new GAP
@@ -2836,6 +3094,13 @@
     const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
     hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
 
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      metronomePickHoverBeat = insideCanvas ? nearestGridBeat(mx) : null;
+      canvasEl.style.cursor = 'crosshair';
+      draw();
+      return;
+    }
+
     if (cleanupDrag) {
       autoScrollAtCanvasEdge(mx);
       const seg = cleanupSegments.find(s => s.id === cleanupDrag.id);
@@ -2962,6 +3227,11 @@
       }
       canvasEl.style.cursor = setGapHoverBeat !== null ? 'crosshair' : 'not-allowed';
       draw();
+      return;
+    }
+
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      canvasEl.style.cursor = 'crosshair';
       return;
     }
 
@@ -4068,6 +4338,29 @@
     window.removeEventListener('mouseup', segRegenModalMouseUp);
   }
 
+  function metronomeToolMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.metronome-tool-title')) return;
+    metronomeToolDragging = true;
+    metronomeToolDragOffsetX = e.clientX - metronomeToolX;
+    metronomeToolDragOffsetY = e.clientY - metronomeToolY;
+    window.addEventListener('mousemove', metronomeToolMouseMove);
+    window.addEventListener('mouseup', metronomeToolMouseUp);
+    e.preventDefault();
+  }
+
+  function metronomeToolMouseMove(e) {
+    if (!metronomeToolDragging) return;
+    metronomeToolX = Math.max(0, Math.min(window.innerWidth - 300, e.clientX - metronomeToolDragOffsetX));
+    metronomeToolY = Math.max(0, Math.min(window.innerHeight - 240, e.clientY - metronomeToolDragOffsetY));
+  }
+
+  function metronomeToolMouseUp() {
+    metronomeToolDragging = false;
+    window.removeEventListener('mousemove', metronomeToolMouseMove);
+    window.removeEventListener('mouseup', metronomeToolMouseUp);
+  }
+
   function handleGlobalClick(e) {
     if (contextMenu.visible && contextMenuEl && !contextMenuEl.contains(e.target)) {
       closeContextMenu();
@@ -4418,8 +4711,15 @@
     if (downbeatOffsetMs !== 0) {
       lines.push(`#DOWNBEATOFFSET:${Math.round(downbeatOffsetMs)}`);
     }
+    // Metronome tool state
+    if (metronomeManualDownbeatAnchorBeat !== null) {
+      const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
+      lines.push(`#METRONOMEANCHOR:${Math.round(anchorMs)}`);
+      lines.push(`#METRONOMEIG:${metronomeSigNumerator}/${metronomeSigDenominator}`);
+      lines.push(`#METRONOMESPEED:${metronomeSpeedFactor}`);
+    }
     // Extra headers (YOUTUBE, COVER, LANGUAGE, etc.)
-    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET']);
+    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
     for (const h of extraHeaders) {
       if (!standardKeys.has(h.key.toUpperCase())) {
         // Keep #MP3 in sync with current artist/title and original file extension
@@ -4594,7 +4894,7 @@
       console.log('[Play] No audioEl');
       return;
     }
-    if (gridAlignMode || setGapMode) return; // block playback during grid/gap modes
+    if (gridAlignMode || setGapMode || metronomePickTarget !== 0) return; // block playback during transient editing modes
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
@@ -4643,8 +4943,8 @@
       if (micEnabled) micShowTrail = true;
       // Initialize metronome to current beat so it doesn't click immediately
       if (metronomeEnabled) {
-        const clickInterval = BEATS_PER_QUARTER * metronomeDivisor;
-        const offsetBeat = playbackBeat - metronomeOffset;
+        const clickInterval = getMetronomeClickInterval();
+        const offsetBeat = playbackBeat - getMetronomeClickOffset();
         lastMetronomeBeat = Math.floor(offsetBeat / clickInterval);
       }
       if (midiPlayback) ensureMidiCtx();
@@ -5093,6 +5393,9 @@
         draw();
       } else if (setGapMode) {
         cancelSetGapMode();
+      } else if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+        clearMetronomePickTarget();
+        showToast('Metronome downbeat pick cancelled');
       } else if (pasteMode) {
         cancelPaste();
       } else if (selectedCleanupSegment !== null) {
@@ -5333,23 +5636,18 @@
   }
 
   function updateMetronome(currentBeat) {
-    // Click interval in US beats = one quarter note × divisor
-    const clickInterval = BEATS_PER_QUARTER * metronomeDivisor;
-    // When we have a downbeat reference, shift the click grid so a click falls on it
-    let clickOffset = metronomeOffset;
-    let accentPhase = 0;
-    if (downbeatFromHeader) {
-      const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
-      const dbBeat = Math.round(exactBeat);
-      clickOffset = dbBeat % clickInterval;
-      accentPhase = Math.floor((dbBeat - clickOffset) / clickInterval) % 4;
-    }
+    // Always click quarter notes; accenting is based on downbeat anchors.
+    const clickInterval = getMetronomeClickInterval();
+    const clickOffset = getMetronomeClickOffset();
+    const downbeatAnchor = getMetronomeDownbeatAnchorBeat();
+    const downbeatInterval = Math.max(0.0001, getMetronomeDownbeatInterval());
     const offsetBeat = currentBeat - clickOffset;
     const clickBeat = Math.floor(offsetBeat / clickInterval);
     if (clickBeat !== lastMetronomeBeat) {
       lastMetronomeBeat = clickBeat;
-      // Accent on the downbeat (every 4 clicks = one bar)
-      const isDownbeat = ((clickBeat - accentPhase) % 4 + 4) % 4 === 0;
+      const clickedBeat = clickBeat * clickInterval + clickOffset;
+      const phase = (clickedBeat - downbeatAnchor) / downbeatInterval;
+      const isDownbeat = Math.abs(phase - Math.round(phase)) < 1e-3;
       playMetronomeClick(isDownbeat);
     }
   }
@@ -5357,6 +5655,10 @@
   function toggleMetronome() {
     metronomeEnabled = !metronomeEnabled;
     if (metronomeEnabled) ensureMetronomeCtx();
+    if (!metronomeEnabled) {
+      metronomeToolOpen = false;
+      clearMetronomePickTarget();
+    }
     lastMetronomeBeat = -1;
     console.log('[Metronome]', metronomeEnabled ? 'ON' : 'OFF');
   }
@@ -6290,16 +6592,26 @@
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
       // Parse extra headers from ultrastar content
-      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET']);
+      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
       extraHeaders = [];
       let foundDownbeatOffset = false;
+      let loadedMetronomeAnchorMs = null;
+      let loadedMetronomeIg = null;
+      let loadedMetronomeSpeed = null;
       for (const line of (data.ultrastar_content || '').split('\n')) {
         const m = line.match(/^#([\w]+):(.*)/);
         if (m) {
-          if (m[1].toUpperCase() === 'DOWNBEATOFFSET') {
+          const key = m[1].toUpperCase();
+          if (key === 'DOWNBEATOFFSET') {
             downbeatOffsetMs = parseFloat(m[2]) || 0;
             foundDownbeatOffset = true;
-          } else if (!standardKeys.has(m[1].toUpperCase())) {
+          } else if (key === 'METRONOMEANCHOR') {
+            loadedMetronomeAnchorMs = parseFloat(m[2]) || null;
+          } else if (key === 'METRONOMEIG') {
+            loadedMetronomeIg = m[2].trim();
+          } else if (key === 'METRONOMESPEED') {
+            loadedMetronomeSpeed = parseFloat(m[2]) || 1;
+          } else if (!standardKeys.has(key)) {
             extraHeaders.push({ key: m[1], value: m[2] });
           }
         }
@@ -6315,6 +6627,33 @@
 
       bpm = data.bpm;
       gapMs = data.gap_ms;
+
+      // Restore metronome tool state from headers (needs bpm + gapMs resolved first)
+      console.log(`%c[MetronomeTool] Load — raw header values: ANCHOR=${loadedMetronomeAnchorMs} IG=${loadedMetronomeIg} SPEED=${loadedMetronomeSpeed}`, 'color:#7dd3fc');
+      if (loadedMetronomeAnchorMs !== null) {
+        if (loadedMetronomeIg) {
+          const parts = loadedMetronomeIg.split('/');
+          if (parts.length === 2) {
+            metronomeSigNumerator = parseInt(parts[0]) || 4;
+            metronomeSigDenominator = parseInt(parts[1]) || 4;
+          }
+        }
+        metronomeSpeedFactor = loadedMetronomeSpeed !== null ? loadedMetronomeSpeed : 1;
+        metronomeDownbeat1Beat = (loadedMetronomeAnchorMs - data.gap_ms) * data.bpm / 15000;
+        metronomeDownbeat2Beat = null;
+        console.log(`%c[MetronomeTool] Restoring: anchorMs=${loadedMetronomeAnchorMs} → beat=${metronomeDownbeat1Beat?.toFixed(3)} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor} bpm=${data.bpm} gap=${data.gap_ms}`, 'color:#7dd3fc;font-weight:bold');
+        recalcMetronomeFromControls('load');
+        console.log(`%c[MetronomeTool] After recalc: anchorBeat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)} interval=${metronomeManualDownbeatInterval?.toFixed(3)} beatUnit=${metronomeManualBeatUnitInterval?.toFixed(3)}`, 'color:#7dd3fc');
+      } else {
+        console.log('[MetronomeTool] No METRONOMEANCHOR header found — clearing metronome tool state');
+        metronomeDownbeat1Beat = null;
+        metronomeManualDownbeatAnchorBeat = null;
+        metronomeManualDownbeatInterval = null;
+        metronomeManualBeatUnitInterval = null;
+        metronomeSpeedFactor = 1;
+        metronomeSigNumerator = 4;
+        metronomeSigDenominator = 4;
+      }
 
       // Compute first downbeat once on load
       if (!foundDownbeatOffset) {
@@ -6436,7 +6775,13 @@
   });
 
   onDestroy(() => {
-    if (hasUnsavedChanges) handleSave(); // autosave on navigate away
+    console.log(`%c[Step4] onDestroy — hasUnsavedChanges=${hasUnsavedChanges} metronomeAnchor=${metronomeManualDownbeatAnchorBeat} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor}`, 'color:#ffd700;font-weight:bold');
+    if (hasUnsavedChanges) {
+      console.log('[Step4] onDestroy — triggering save');
+      handleSave();
+    } else {
+      console.log('[Step4] onDestroy — nothing to save');
+    }
     // Persist scroll position for this session
     if ($sessionId) {
       localStorage.setItem(`editor_scroll_${$sessionId}`, JSON.stringify({ sx: scrollX, z: zoom }));
@@ -6849,9 +7194,9 @@
           <span>Metronome</span><span style="padding-left: 4px">{metronomeEnabled ? ' 🔈' : ' 🔇'}</span>
         </button>
         {#if metronomeEnabled}
-          <button class="tool-btn sm" class:active={metronomeDivisor === 1} on:click={() => { metronomeDivisor = 1; lastMetronomeBeat = -1; draw(); }} title="Click every quarter note">♩</button>
-          <button class="tool-btn sm" class:active={metronomeDivisor === 2} on:click={() => { metronomeDivisor = 2; lastMetronomeBeat = -1; draw(); }} title="Click every half note">𝅗𝅥</button>
-          <button class="tool-btn sm" class:active={metronomeDivisor === 4} on:click={() => { metronomeDivisor = 4; lastMetronomeBeat = -1; draw(); }} title="Click every bar (4/4)">𝄺</button>
+          <button class="tool-btn sm" class:active={metronomeToolOpen} on:click={() => { metronomeToolOpen = !metronomeToolOpen; if (!metronomeToolOpen) clearMetronomePickTarget(); }} title="Open metronome downbeat tool">
+            ⚙️
+          </button>
         {/if}
       </div>
     </div>
@@ -7364,6 +7709,68 @@
       console.log('[Audio] Reached end of track — stopped playback');
     }}
   ></audio>
+
+  {#if metronomeEnabled && metronomeToolOpen}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="metronome-tool-modal"
+      style="left:{metronomeToolX}px;top:{metronomeToolY}px"
+      on:mousedown={metronomeToolMouseDown}
+      role="dialog"
+      aria-label="Metronome downbeat tool"
+    >
+      <div class="metronome-tool-title">⏱ Metronome Downbeat Tool</div>
+
+      <div class="metronome-tool-row">
+        <button class="tool-btn sm" class:active={metronomePickTarget === 1} on:click={() => armMetronomeDownbeatPick(1)}>
+          Set Downbeat
+        </button>
+      </div>
+
+      <div class="metronome-signature-row">
+        <select class="mic-select" bind:value={metronomeSigNumerator} on:change={(e) => { metronomeSigNumerator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature numerator">
+          {#each METRONOME_SIGNATURE_NUM_OPTIONS as num}
+            <option value={num}>{num}</option>
+          {/each}
+        </select>
+        <span class="metronome-signature-slash">/</span>
+        <select class="mic-select" bind:value={metronomeSigDenominator} on:change={(e) => { metronomeSigDenominator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature denominator">
+          {#each METRONOME_SIGNATURE_DEN_OPTIONS as den}
+            <option value={den}>{den}</option>
+          {/each}
+        </select>
+      </div>
+
+      {#if getMetronomeSignatureIntervalBeats() === null}
+        <div class="metronome-signature-warning">
+          Impossible value for this BPM grid. Choose another signature.
+        </div>
+      {:else}
+        <div class="metronome-signature-hint">
+          Measure size: {getMetronomeSignatureIntervalBeats()?.toFixed(3)} beats
+        </div>
+      {/if}
+
+      <div class="metronome-signature-hint">
+        Downbeat: {metronomeDownbeat1Beat === null ? 'not set' : metronomeDownbeat1Beat.toFixed(3)}
+      </div>
+
+      <div class="metronome-speed-row">
+        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('slower')} title="Half speed">−</button>
+        <span class="metronome-speed-value">Speed x{metronomeSpeedFactor}</span>
+        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('faster')} title="Double speed">+</button>
+      </div>
+
+      <div class="metronome-tool-row">
+        <button class="tool-btn sm" on:click={clearMetronomeDownbeatReference}>
+          Reset
+        </button>
+        <button class="tool-btn sm" on:click={() => { metronomeToolOpen = false; clearMetronomePickTarget(); }}>
+          Close
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <div class="shortcut-bar">
     <div class="shortcut-group">
@@ -9373,6 +9780,86 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .metronome-tool-modal {
+    position: fixed;
+    z-index: 9055;
+    width: 286px;
+    cursor: default;
+    background: #161923;
+    border: 2px solid #4f7aa1;
+    border-radius: 10px;
+    padding: 10px 12px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .metronome-tool-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #cfe8ff;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .metronome-tool-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .metronome-tool-row .tool-btn {
+    flex: 1;
+    font-size: 0.78rem;
+    padding: 4px 6px;
+  }
+
+  .metronome-signature-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .metronome-signature-row .mic-select {
+    min-width: 88px;
+    text-align: center;
+  }
+
+  .metronome-signature-slash {
+    color: #9fc2e6;
+    font-weight: 700;
+  }
+
+  .metronome-signature-hint {
+    font-size: 0.74rem;
+    color: #9fc2e6;
+  }
+
+  .metronome-signature-warning {
+    font-size: 0.74rem;
+    color: #ffb4a8;
+    background: rgba(179, 38, 30, 0.2);
+    border: 1px solid rgba(255, 140, 127, 0.4);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
+
+  .metronome-speed-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .metronome-speed-value {
+    min-width: 92px;
+    text-align: center;
+    font-size: 0.78rem;
+    color: #cfe8ff;
+    font-weight: 600;
   }
 
   .seg-regen-global-blocker {
