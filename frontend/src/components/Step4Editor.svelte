@@ -3826,6 +3826,22 @@
     return Math.round(playbackBeat || 0);
   }
 
+  function openContextMenu(nextMenu) {
+    contextMenu = { ...nextMenu, visible: true };
+    tick().then(() => {
+      if (!contextMenu.visible || !contextMenuEl) return;
+      const margin = 10;
+      const rect = contextMenuEl.getBoundingClientRect();
+      const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
+      const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
+      const x = Math.max(margin, Math.min(contextMenu.x, maxX));
+      const y = Math.max(margin, Math.min(contextMenu.y, maxY));
+      if (x !== contextMenu.x || y !== contextMenu.y) {
+        contextMenu = { ...contextMenu, x, y };
+      }
+    });
+  }
+
   // ──── Context Menu ──────────────────────────
   function handleContextMenu(event) {
     event.preventDefault();
@@ -3840,8 +3856,7 @@
       const menuW = 220, menuH = 110;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = {
-        visible: true,
+      openContextMenu({
         x: posX,
         y: posY,
         noteId: null,
@@ -3857,7 +3872,7 @@
         ms: null,
         pitch: 0,
         traceFrame: null,
-      };
+      });
       return;
     }
     const rect = canvasEl.getBoundingClientRect();
@@ -3887,8 +3902,7 @@
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
       if (hit) {
         selectedCleanupSegment = hit.id;
-        contextMenu = {
-          visible: true,
+        openContextMenu({
           x: posX,
           y: posY,
           noteId: null,
@@ -3904,10 +3918,9 @@
           ms: clickMs,
           pitch: 0,
           traceFrame: null,
-        };
+        });
       } else {
-        contextMenu = {
-          visible: true,
+        openContextMenu({
           x: posX,
           y: posY,
           noteId: null,
@@ -3923,7 +3936,7 @@
           ms: clickMs,
           pitch: 0,
           traceFrame: null,
-        };
+        });
       }
       draw();
       return;
@@ -3970,8 +3983,7 @@
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = {
-        visible: true,
+      openContextMenu({
         x: posX,
         y: posY,
         noteId: found.id,
@@ -3987,7 +3999,7 @@
         ms: null,
         pitch: 0,
         traceFrame: null,
-      };
+      });
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -4031,8 +4043,7 @@
         if (Math.abs(beatToX(flag.beat) - mx) <= 8) { flagHit = flag; break; }
       }
       if (flagHit) {
-        contextMenu = {
-          visible: true,
+        openContextMenu({
           x: posX,
           y: posY,
           noteId: null,
@@ -4048,10 +4059,9 @@
           ms: null,
           pitch: 0,
           traceFrame: null,
-        };
+        });
       } else {
-        contextMenu = {
-          visible: true,
+        openContextMenu({
           x: posX,
           y: posY,
           noteId: null,
@@ -4067,7 +4077,7 @@
           ms: null,
           pitch,
           traceFrame,
-        };
+        });
       }
     }
   }
