@@ -4212,6 +4212,12 @@
     const raw = (lines || []).map(v => String(v || '').trim()).filter(Boolean);
     if (raw.length === 0) return [];
 
+    console.log('[SegmentAI] Hyphenate start', {
+      silent,
+      lineCount: raw.length,
+      language: segRegenLanguage,
+    });
+
     segRegenHyphenateLoading = true;
     try {
       const fd = new FormData();
@@ -4222,6 +4228,7 @@
         method: 'POST',
         body: fd,
       });
+      console.log('[SegmentAI] Hyphenate response', { status: resp.status, ok: resp.ok });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         throw new Error(data?.detail || data?.message || 'Hyphenation failed');
@@ -4236,9 +4243,11 @@
 
       if (hyphenated.length === 0) hyphenated = raw;
       segRegenPreviewHyphenated = true;
+      console.log('[SegmentAI] Hyphenate success', { lineCount: hyphenated.length });
       if (!silent) showToast('Hyphenation applied');
       return hyphenated;
     } catch (e) {
+      console.error('[SegmentAI] Hyphenate failed', e);
       if (!silent) showToast(String(e?.message || 'Hyphenation failed'));
       throw e;
     } finally {
@@ -4247,12 +4256,28 @@
   }
 
   async function generateNotesFromSegmentPreview() {
-    if (segRegenGenerateLoading) return;
+    if (segRegenGenerateLoading) {
+      console.warn('[SegmentAI] Generate aborted: already loading');
+      return;
+    }
     if (segRegenPreviewLines.length === 0) {
+      console.warn('[SegmentAI] Generate aborted: no preview lines');
       showToast('Run Preview Lyrics first');
       return;
     }
-    if (!$sessionId) return;
+    if (!$sessionId) {
+      console.warn('[SegmentAI] Generate aborted: missing session id');
+      return;
+    }
+
+    console.log('[SegmentAI] Generate start', {
+      sessionId: $sessionId,
+      range: { ...segRegenRange },
+      language: segRegenLanguage,
+      audioSource: getSegRegenAudioSourceForApi(),
+      previewLineCount: segRegenPreviewLines.length,
+      previewHyphenated: segRegenPreviewHyphenated,
+    });
 
     segRegenGenerateLoading = true;
     try {
@@ -4275,12 +4300,19 @@
         }),
       });
 
+      console.log('[SegmentAI] Generate response', { status: resp.status, ok: resp.ok });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         throw new Error(data?.detail || data?.message || 'Segment generation failed');
       }
 
-      const newNotes = Array.isArray(data?.notes) ? data.notes : [];
+      let newNotes = Array.isArray(data?.notes) ? data.notes.map(n => ({ ...n })) : [];
+      const timingRows = Array.isArray(data?.syllable_timings) ? data.syllable_timings : [];
+      console.log('[SegmentAI] Generate payload parsed', {
+        returnedNotes: newNotes.length,
+        returnedBreaks: newNotes.filter(n => n?.type === 'break').length,
+        returnedTimings: timingRows.length,
+      });
       if (newNotes.length === 0) {
         showToast('No notes returned from segment generation');
         return;
@@ -4289,6 +4321,85 @@
       // Convert ms range to beats so we can remove old notes
       const rangeStartBeat = timeToBeat(segRegenRange.startMs / 1000);
       const rangeEndBeat   = timeToBeat(segRegenRange.endMs   / 1000);
+      console.log('[SegmentAI] Generate beat range', {
+        rangeStartBeat,
+        rangeEndBeat,
+      });
+
+      // Normalize generated note placement to the editor's current bpm/gap grid
+      // using absolute syllable timings returned by backend.
+      const generatedNoteIdx = [];
+      for (let i = 0; i < newNotes.length; i++) {
+        if (newNotes[i]?.type !== 'break') generatedNoteIdx.push(i);
+      }
+      if (timingRows.length >= generatedNoteIdx.length && generatedNoteIdx.length > 0) {
+        let remappedCount = 0;
+        generatedNoteIdx.forEach((noteArrayIndex, timingIndex) => {
+          const row = timingRows[timingIndex] || {};
+          const s = Number(row.start);
+          const e = Number(row.end);
+          if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return;
+          const startBeat = Math.round(timeToBeat(s));
+          const endBeat = Math.max(startBeat + 1, Math.round(timeToBeat(e)));
+          const duration = Math.max(1, endBeat - startBeat);
+          const note = newNotes[noteArrayIndex];
+          newNotes[noteArrayIndex] = {
+            ...note,
+            startBeat,
+            duration,
+            original: {
+              ...(note.original || {}),
+              startBeat,
+              duration,
+              pitch: note.pitch,
+            },
+          };
+          remappedCount += 1;
+        });
+        console.log('[SegmentAI] Generate remap from timings', {
+          remappedCount,
+          totalGeneratedNotes: generatedNoteIdx.length,
+        });
+      }
+
+      // If generated beats still sit completely outside requested range,
+      // shift them into the segment window as a safety fallback.
+      const generatedStarts = newNotes.map(n => Number(n.startBeat)).filter(Number.isFinite);
+      const generatedEnds = newNotes
+        .map(n => (n?.type === 'break' ? Number(n.endBeat ?? (n.startBeat + 1)) : Number(n.startBeat) + Number(n.duration ?? 1)))
+        .filter(Number.isFinite);
+      const generatedStartBeat = generatedStarts.length ? Math.min(...generatedStarts) : null;
+      const generatedEndBeat = generatedEnds.length ? Math.max(...generatedEnds) : null;
+      if (generatedStartBeat !== null && generatedEndBeat !== null) {
+        const overlapsRange = generatedEndBeat > rangeStartBeat && generatedStartBeat < rangeEndBeat;
+        if (!overlapsRange) {
+          const shift = Math.round(rangeStartBeat - generatedStartBeat);
+          console.warn('[SegmentAI] Generated notes outside target range, applying beat shift', {
+            generatedStartBeat,
+            generatedEndBeat,
+            rangeStartBeat,
+            rangeEndBeat,
+            shift,
+          });
+          newNotes = newNotes.map(n => {
+            const shiftedStart = Number(n.startBeat) + shift;
+            const shiftedEnd = n?.type === 'break'
+              ? Number(n.endBeat ?? (n.startBeat + 1)) + shift
+              : undefined;
+            return {
+              ...n,
+              startBeat: shiftedStart,
+              ...(n?.type === 'break' ? { endBeat: shiftedEnd } : {}),
+              original: n.original
+                ? {
+                    ...n.original,
+                    startBeat: Number(n.original.startBeat ?? n.startBeat) + shift,
+                  }
+                : n.original,
+            };
+          });
+        }
+      }
 
       // Snapshot for undo before any mutation
       pushUndo();
@@ -4301,14 +4412,28 @@
 
       // Re-assign IDs on incoming notes so they don't collide with kept notes
       const maxId = kept.reduce((m, n) => Math.max(m, n.id ?? 0), -1);
+      const insertedNotes = newNotes.map((n, i) => ({ ...n, id: maxId + 1 + i }));
       const merged = [
         ...kept,
-        ...newNotes.map((n, i) => ({ ...n, id: maxId + 1 + i })),
+        ...insertedNotes,
       ].sort((a, b) => a.startBeat - b.startBeat);
 
+      console.log('[SegmentAI] Generate merge stats', {
+        oldCount: notes.length,
+        keptCount: kept.length,
+        insertedCount: newNotes.length,
+        mergedCount: merged.length,
+      });
+
       notes = merged;
-      selectedNote = null;
-      selectedNotes = new Set();
+      if (insertedNotes.length > 0) {
+        selectedNote = insertedNotes[0].id;
+        selectedNotes = new Set([insertedNotes[0].id]);
+        ensureBeatVisible(insertedNotes[0].startBeat);
+      } else {
+        selectedNote = null;
+        selectedNotes = new Set();
+      }
       markUnsaved();
       updatePitchRange();
       computeTotalBeats();
@@ -4317,6 +4442,7 @@
       closeSegmentRegenerateModal();
       showToast(`Generated ${newNotes.filter(n => n.type !== 'break').length} notes for segment`);
     } catch (e) {
+      console.error('[SegmentAI] Generate failed', e);
       showToast(String(e?.message || 'Segment generation failed'));
     } finally {
       segRegenGenerateLoading = false;
@@ -4328,7 +4454,18 @@
   }
 
   async function previewSegmentLyrics() {
-    if (!$sessionId) return;
+    if (!$sessionId) {
+      console.warn('[SegmentAI] Preview aborted: missing session id');
+      return;
+    }
+    console.log('[SegmentAI] Preview start', {
+      sessionId: $sessionId,
+      range: { ...segRegenRange },
+      language: segRegenLanguage,
+      modelPreset: segRegenPreset,
+      audioSource: getSegRegenAudioSourceForApi(),
+      sourceType: segRegenRange.sourceType,
+    });
     segRegenPreviewLoading = true;
     segRegenPreviewError = '';
     segRegenPreviewLines = [];
@@ -4347,6 +4484,7 @@
           source_type: segRegenRange.sourceType,
         }),
       });
+      console.log('[SegmentAI] Preview response', { status: resp.status, ok: resp.ok });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         throw new Error(data?.detail || data?.message || 'Preview lyrics failed');
@@ -4368,6 +4506,11 @@
         segRegenPreviewConfidence = data.confidence_summary.avg;
       }
 
+      console.log('[SegmentAI] Preview parsed', {
+        lineCount: segRegenPreviewLines.length,
+        confidence: segRegenPreviewConfidence,
+      });
+
       if (segRegenAutoHyphenate && segRegenPreviewLines.length > 0) {
         try {
           segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines, true);
@@ -4377,6 +4520,7 @@
       }
       showToast('Lyrics preview loaded');
     } catch (e) {
+      console.error('[SegmentAI] Preview failed', e);
       segRegenPreviewError = String(e?.message || e || 'Preview failed');
       showToast('Lyrics preview failed');
     } finally {

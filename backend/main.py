@@ -1631,6 +1631,12 @@ async def segment_preview(session_id: str, request: Request):
     source_type = str(body.get("source_type") or "loop")
     requested_source = str(body.get("audio_source") or "vocals")
 
+    log_step(
+        "SEGMENT_PREVIEW",
+        f"Request session={session_id} source_type={source_type} source={requested_source} "
+        f"range={start_ms:.0f}-{end_ms:.0f}ms lang={language}",
+    )
+
     source_path, resolved_source = _resolve_segment_audio_source(session, requested_source)
     if not source_path or not os.path.exists(source_path):
         raise HTTPException(status_code=404, detail=f"Audio source not found for '{requested_source}'")
@@ -1794,6 +1800,12 @@ async def segment_generate(session_id: str, request: Request):
 
     language = str(body.get("language") or "en")
     audio_source = str(body.get("audio_source") or "vocals")
+
+    log_step(
+        "SEG_GEN",
+        f"Request session={session_id} source={audio_source} range={start_ms:.0f}-{end_ms:.0f}ms "
+        f"lang={language} lyrics_chars={len(lyrics)}",
+    )
 
     bpm = float(result["bpm"])
     gap_ms = float(result["gap_ms"])
