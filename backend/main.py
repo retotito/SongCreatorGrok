@@ -190,6 +190,73 @@ def _cleanup_session_temp_dir(session_id: str, max_age_sec: int = 3600):
             pass
 
 
+def _prune_patched_vocal_files(session_id: str, keep_last: int = 1):
+    """Keep only the most recent patched vocal snapshots for a session.
+
+    Preserves the current vocal source, the original demucs baseline, and the
+    newest `keep_last` historical patched files. Older snapshots are deleted
+    from disk and removed from session metadata.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        return
+
+    vocal_audio = session.get("vocal_audio")
+    original_demucs_vocal = session.get("original_demucs_vocal")
+    patched_files = [p for p in session.get("patched_vocal_files", []) if p]
+
+    keep_paths = set()
+    for path in (vocal_audio, original_demucs_vocal):
+        if path:
+            keep_paths.add(os.path.abspath(path))
+
+    if keep_last > 0 and patched_files:
+        for path in patched_files[-keep_last:]:
+            keep_paths.add(os.path.abspath(path))
+
+    pruned_files = []
+    kept_files = []
+    for path in patched_files:
+        abs_path = os.path.abspath(path)
+        if abs_path in keep_paths:
+            kept_files.append(path)
+            continue
+        if abs_path.startswith(os.path.abspath(SESSIONS_DIR) + os.sep):
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+                    pruned_files.append(os.path.basename(abs_path))
+            except OSError:
+                pass
+
+    # Deduplicate while preserving order, then persist trimmed history.
+    deduped_kept = []
+    seen = set()
+    for path in kept_files:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped_kept.append(path)
+    session["patched_vocal_files"] = deduped_kept
+    save_session(session_id)
+
+    if pruned_files:
+        log_step(
+            "CLEANUP",
+            f"Session {session_id}: pruned {len(pruned_files)} patched vocal snapshot(s) ({', '.join(pruned_files[:3])}{'...' if len(pruned_files) > 3 else ''})",
+        )
+
+
+def _prune_all_sessions_patched_vocals(keep_last: int = 1):
+    """Apply patched-vocal retention policy to every loaded session."""
+    for sid in list(sessions.keys()):
+        try:
+            _prune_patched_vocal_files(sid, keep_last=keep_last)
+        except Exception:
+            # Keep storage reporting resilient even if one session is malformed.
+            pass
+
+
 def _resolve_segment_audio_source(session: dict, audio_source: str) -> tuple[str, str]:
     result = session.get("result") or {}
     src = (audio_source or "vocals").lower()
@@ -783,6 +850,9 @@ async def delete_session_endpoint(session_id: str):
 async def get_storage_info():
     """Return per-session disk usage and data directory paths for the storage manager."""
     import glob as _glob
+
+    # Enforce retention before reporting so storage manager reflects compacted state.
+    _prune_all_sessions_patched_vocals(keep_last=1)
 
     def _dir_size(path: str) -> int:
         total = 0
@@ -3402,6 +3472,7 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
         result["cleaned_vocal_path"] = None
         result["cleaned_vocal_file"] = None
         save_session(session_id)
+        _prune_patched_vocal_files(session_id, keep_last=1)
 
         log_step("SPLICE", f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
 
@@ -3473,6 +3544,7 @@ async def restore_segment(session_id: str, request: Request):
     result["cleaned_vocal_path"] = None
     result["cleaned_vocal_file"] = None
     save_session(session_id)
+    _prune_patched_vocal_files(session_id, keep_last=1)
 
     log_step("RESTORE", f"Session {session_id}: restored original @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
     return {"status": "ok", "patched_vocal_file": patched_filename}
