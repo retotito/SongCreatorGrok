@@ -4132,6 +4132,18 @@
     segRegenAudioSource = (segRegenCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
       ? 'edited'
       : 'vocals';
+
+    // Loop policy for Segment AI modal entry:
+    // - loop source: preserve user's existing loop as-is
+    // - cleanup source: force loop to selected cleanup segment range
+    if (segRegenRange.sourceType === 'cleanup') {
+      const segStartBeat = timeToBeat(segRegenRange.startMs / 1000);
+      const segEndBeat = timeToBeat(segRegenRange.endMs / 1000);
+      loopStartBeat = Math.min(segStartBeat, segEndBeat);
+      loopEndBeat = Math.max(segStartBeat, segEndBeat);
+      loopEnabled = true;
+    }
+
     console.log('[SegmentAI] Modal range applied:', {
       sourceType: segRegenRange.sourceType,
       cleanupId: segRegenRange.cleanupId,
