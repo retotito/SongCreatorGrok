@@ -5781,22 +5781,20 @@
     const canvasWidth = canvasEl?.width || 800;
     const minScrollX = getMinBeat() * zoom;
     if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
-      // During loop: auto-scroll but clamp to loop boundaries
-      const loopWidthPx = (loopEndBeat - loopStartBeat) * zoom;
-      if (loopWidthPx > canvasWidth) {
-        // Loop wider than viewport — scroll with playback, clamped to loop region
-        const loopMinScroll = loopStartBeat * zoom - canvasWidth * 0.1;
-        const loopMaxScroll = loopEndBeat * zoom - canvasWidth * 0.9;
-        if (scrollMode) {
-          scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, playbackBeat * zoom - canvasWidth * 0.3));
-        } else {
-          const cursorX = beatToX(playbackBeat);
-          if (cursorX >= canvasWidth || cursorX < 0) {
-            scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, Math.floor(playbackBeat * zoom / canvasWidth) * canvasWidth));
-          }
+      // Keep normal page/follow behavior during loops too, but clamp scroll so
+      // the active viewport stays anchored to the loop region.
+      const loopMinScroll = Math.max(minScrollX, loopStartBeat * zoom);
+      const loopMaxScroll = Math.max(loopMinScroll, (loopEndBeat * zoom) - canvasWidth);
+      if (scrollMode) {
+        const targetScroll = playbackBeat * zoom - canvasWidth * 0.3;
+        scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, targetScroll));
+      } else {
+        const cursorX = beatToX(playbackBeat);
+        if (cursorX >= canvasWidth || cursorX < 0) {
+          const targetScroll = Math.floor(playbackBeat * zoom / canvasWidth) * canvasWidth;
+          scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, targetScroll));
         }
       }
-      // If loop fits in viewport, no scrolling needed — user can see everything
     } else if (scrollMode) {
       // Fixed cursor: cursor stays at 30%, notes scroll
       scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.3);
