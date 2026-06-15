@@ -53,10 +53,13 @@
   let editCreator = '';
   let editVocals = '';
   let editInstrumental = '';
+  let hasEditedVocals = false;
+  let editedVocalsProbeSession = '';
   let saving = false;
 
   // ZIP export options (all off by default)
   let zipIncludeVocals = false;
+  let zipIncludeEditedVocals = false;
   let zipIncludeInstrumental = false;
   let zipIncludeSummary = false;
   let zipIncludeMidi = false;
@@ -102,6 +105,11 @@
   // Try to load existing assets when session is known
   $: if ($sessionId) loadExistingAssets();
 
+  $: if (!$sessionId) {
+    hasEditedVocals = false;
+    editedVocalsProbeSession = '';
+  }
+
   async function loadExistingAssets() {
     // Probe cover
     try {
@@ -127,6 +135,26 @@
       if (meta?.vocals_header != null) editVocals = meta.vocals_header;
       if (meta?.instrumental_header != null) editInstrumental = meta.instrumental_header;
     } catch (_) {}
+
+    if (editedVocalsProbeSession !== $sessionId) {
+      editedVocalsProbeSession = $sessionId;
+      void probeEditedVocals($sessionId);
+    }
+  }
+
+  async function probeEditedVocals(id) {
+    try {
+      // /cleaned is produced by editor cleanup workflow; 404 means not available yet.
+      const res = await fetch(getAudioUrl(id, 'cleaned'), {
+        method: 'GET',
+        headers: { Range: 'bytes=0-1' },
+      });
+      if (editedVocalsProbeSession !== id) return;
+      hasEditedVocals = res.ok;
+    } catch (_) {
+      if (editedVocalsProbeSession !== id) return;
+      hasEditedVocals = false;
+    }
   }
 
   // ── Cover crop ────────────────────────────────
@@ -409,6 +437,7 @@
   async function downloadZip() {
     const params = new URLSearchParams({
       include_vocals: zipIncludeVocals ? '1' : '0',
+      include_edited_vocals: zipIncludeEditedVocals ? '1' : '0',
       include_instrumental: zipIncludeInstrumental ? '1' : '0',
       include_summary: zipIncludeSummary ? '1' : '0',
       include_midi: zipIncludeMidi ? '1' : '0',
@@ -451,7 +480,14 @@
   async function downloadAudio(type) {
     const url = getAudioUrl($sessionId, type);
     const base = getBaseFilename();
-    const suffix = type === 'vocals' ? ' [Vocals]' : type === 'instrumental' ? ' [Instrumental]' : '';
+    const suffix = type === 'vocals'
+      ? ' [Vocals]'
+      : type === 'instrumental'
+        ? ' [Instrumental]'
+        : type === 'cleaned'
+          ? ' [Edited Vocals]'
+          : '';
+    const blob = await fetch(url).then(r => r.blob());
     // Vocals are always .mp3 (Demucs --mp3 output).
     // For original, derive extension from the uploaded filename.
     let ext;
@@ -461,12 +497,21 @@
       ext = vocalsExtMatch ? vocalsExtMatch[0] : '.mp3';
     } else if (type === 'instrumental') {
       ext = '.mp3';
+    } else if (type === 'cleaned') {
+      const mimeToExt = {
+        'audio/mpeg': '.mp3',
+        'audio/wav': '.wav',
+        'audio/x-wav': '.wav',
+        'audio/flac': '.flac',
+        'audio/ogg': '.ogg',
+        'audio/mp4': '.m4a',
+      };
+      ext = mimeToExt[blob.type] || '.mp3';
     } else {
       const origFilename = $uploadData?.filename || '';
       const extMatch = origFilename.match(/\.\w+$/);
       ext = extMatch ? extMatch[0] : '.mp3';
     }
-    const blob = await fetch(url).then(r => r.blob());
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = base + suffix + ext;
@@ -490,6 +535,10 @@
     // Download available audio
     if ($uploadData.hasVocals && zipIncludeVocals) {
       downloadAudio('vocals');
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (hasEditedVocals && zipIncludeEditedVocals) {
+      downloadAudio('cleaned');
       await new Promise(r => setTimeout(r, 300));
     }
     if (editInstrumental && zipIncludeInstrumental) {
@@ -627,7 +676,7 @@
               on:drop={onBgDrop}
               on:click={() => document.getElementById('bg-file-input').click()}
             >
-              <span class="dropzone-icon">{bgUploading ? '⏳' : '🌄'}</span>
+              <span class="dropzone-icon">{bgUploading ? '⏳' : '🖼'}</span>
               <span class="dropzone-hint">{bgUploading ? 'Uploading…' : 'Drop image or click'}<br>{#if !bgUploading}<small>16:9 crop tool · 1920×1080</small>{/if}</span>
             </div>
           {/if}
@@ -708,6 +757,21 @@
           </label>
         </div>
 
+        <div class="asset-row">
+          <span class="asset-label">Edited Vocals</span>
+          <div class="video-inputs" style="padding-top: 10px;">
+            {#if hasEditedVocals}
+              <span class="asset-value">{baseFilename} [Edited Vocals].mp3</span>
+            {:else}
+              <small style="color:#888;font-size:0.72rem">Not available — create edited vocals in Step 4.</small>
+            {/if}
+          </div>
+          <label class="asset-include">
+            <input type="checkbox" bind:checked={zipIncludeEditedVocals} disabled={!hasEditedVocals} />
+            Include
+          </label>
+        </div>
+
         <!-- Instrumental file (#INSTRUMENTAL) -->
         <div class="asset-row">
           <span class="asset-label">Instrumental</span>
@@ -783,6 +847,12 @@
           <span class="file-icon">🎤</span>
           <span class="file-name">Vocals</span>
           <span class="file-desc">{$uploadData.hasVocals ? 'Separated vocal track' : 'Not available'}</span>
+        </button>
+
+        <button class="download-btn" on:click={() => downloadAudio('cleaned')} disabled={!hasEditedVocals}>
+          <span class="file-icon">✨</span>
+          <span class="file-name">Edited Vocals</span>
+          <span class="file-desc">{hasEditedVocals ? 'Edited/cleaned vocal track from editor' : 'Not available'}</span>
         </button>
 
         <button class="download-btn" on:click={() => downloadAudio('instrumental')} disabled={!editInstrumental}>

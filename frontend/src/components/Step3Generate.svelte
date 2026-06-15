@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { sessionId, generationResult, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationShowPreview, generationModalOpen } from '../stores/appStore.js';
+  import { sessionId, generationResult, currentStep, isProcessing, processingStatus, errorMessage, generationLog, generationShowPreview, generationModalOpen, generationUseCleaned } from '../stores/appStore.js';
   import { generateUltrastar, cancelGeneration, pollGenerate } from '../services/api.js';
 
   $: logMessages = $generationLog;
@@ -39,7 +39,7 @@
     try {
       const result = await pollGenerate($sessionId, (status) => {
         processingStatus.set(`Generating… (${status})`);
-      }, abortController.signal);
+      }, abortController.signal, $generationUseCleaned);
 
       generationResult.set(result);
 

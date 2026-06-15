@@ -4,6 +4,10 @@
 
   let audioPlayerMix;
   let audioPlayerVocals;
+  let audioPlayerInstrumental;
+  let hasInstrumental = false;
+  let instrumentalProbeKey = '';
+  let instrumentalProbeSeq = 0;
 
 
 
@@ -26,6 +30,34 @@
 
   $: mixUrl    = $sessionId && $uploadData.hasOriginal ? getAudioUrl($sessionId, 'original') + '?t=' + Date.now() : null;
   $: vocalsUrl = $sessionId && $uploadData.hasVocals   ? getAudioUrl($sessionId, 'vocals')   + '?t=' + Date.now() : null;
+  $: instrumentalUrl = $sessionId && hasInstrumental ? getAudioUrl($sessionId, 'instrumental') + '?t=' + Date.now() : null;
+
+  $: {
+    const probeKey = `${$sessionId || ''}|${$uploadData.hasOriginal}|${$uploadData.hasVocals}`;
+    if (!$sessionId || (!$uploadData.hasOriginal && !$uploadData.hasVocals)) {
+      hasInstrumental = false;
+      instrumentalProbeKey = '';
+    } else if (probeKey !== instrumentalProbeKey) {
+      instrumentalProbeKey = probeKey;
+      void probeInstrumentalExists($sessionId);
+    }
+  }
+
+  async function probeInstrumentalExists(id) {
+    const seq = ++instrumentalProbeSeq;
+    try {
+      // The preview endpoint is GET-only; use a tiny range request for existence check.
+      const res = await fetch(getAudioUrl(id, 'instrumental'), {
+        method: 'GET',
+        headers: { Range: 'bytes=0-1' },
+      });
+      if (seq !== instrumentalProbeSeq) return;
+      hasInstrumental = res.ok;
+    } catch {
+      if (seq !== instrumentalProbeSeq) return;
+      hasInstrumental = false;
+    }
+  }
 
   // ── Mix upload ──────────────────────────────────────────
   async function handleMixFile(file) {
@@ -99,6 +131,7 @@
           hasVocals: true,
           vocalUrl: getAudioUrl($sessionId, 'vocals'),
         }));
+        void probeInstrumentalExists($sessionId);
         extractDone = true;
         if (stopExtractStream) { stopExtractStream(); stopExtractStream = null; }
         setTimeout(() => { extractModalOpen = false; }, 1800);
@@ -130,6 +163,8 @@
       await deleteAudio($sessionId, type);
       if (type === 'original') {
         uploadData.update(d => ({ ...d, hasOriginal: false, filename: null }));
+      } else if (type === 'instrumental') {
+        hasInstrumental = false;
       } else {
         uploadData.update(d => ({ ...d, hasVocals: false, vocalUrl: null }));
       }
@@ -153,6 +188,7 @@
         hasOriginal: result.has_original === true,
         vocalUrl: getAudioUrl(result.session_id, 'vocals'),
       });
+      void probeInstrumentalExists(result.session_id);
       if (result.has_lyrics) {
         lyricsData.set({
           text: result.lyrics,
@@ -265,6 +301,30 @@
         {/if}
       {/if}
     </div>
+
+    <!-- ── Instrumental Card (auto-created if available) ── -->
+    {#if hasInstrumental}
+    <div class="audio-card has-file">
+      <div class="card-header">
+        <span class="card-title">🥁 Instrumental</span>
+        <span class="card-badge optional">auto</span>
+      </div>
+
+        <div class="file-info">
+          <span class="file-name">✅ Instrumental ready</span>
+        </div>
+        {#if instrumentalUrl}
+          <div class="audio-preview">
+            <audio bind:this={audioPlayerInstrumental} controls src={instrumentalUrl}></audio>
+          </div>
+        {/if}
+        <div class="card-actions">
+          <button class="btn btn-delete" on:click={() => handleDeleteAudio('instrumental')} disabled={$isProcessing}>
+            🗑 Delete
+          </button>
+        </div>
+    </div>
+    {/if}
 
   </div>
 

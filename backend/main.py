@@ -71,6 +71,7 @@ def _fix_frozen_path():
 
 _fix_frozen_path()
 import time
+import math
 import json
 import uuid
 import shutil
@@ -154,6 +155,199 @@ def save_session(session_id: str):
             json.dump(session, f, default=str)
     except Exception as e:
         log_step("PERSIST", f"Failed to save session {session_id}: {e}")
+
+
+def _safe_unlink(path: str):
+    if not path:
+        return
+    try:
+        if os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _safe_unlink_download_name(name: str):
+    if not name:
+        return
+    _safe_unlink(os.path.join(DOWNLOADS_DIR, os.path.basename(name)))
+
+
+def _cleanup_session_temp_dir(session_id: str, max_age_sec: int = 3600):
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    if not os.path.isdir(temp_dir):
+        return
+    now = time.time()
+    for name in os.listdir(temp_dir):
+        path = os.path.join(temp_dir, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            age = now - os.path.getmtime(path)
+            if age > max_age_sec:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _prune_patched_vocal_files(session_id: str, keep_last: int = 1):
+    """Keep only the most recent patched vocal snapshots for a session.
+
+    Preserves the current vocal source, the original demucs baseline, and the
+    newest `keep_last` historical patched files. Older snapshots are deleted
+    from disk and removed from session metadata.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        return
+
+    vocal_audio = session.get("vocal_audio")
+    original_demucs_vocal = session.get("original_demucs_vocal")
+    patched_files = [p for p in session.get("patched_vocal_files", []) if p]
+
+    keep_paths = set()
+    for path in (vocal_audio, original_demucs_vocal):
+        if path:
+            keep_paths.add(os.path.abspath(path))
+
+    if keep_last > 0 and patched_files:
+        for path in patched_files[-keep_last:]:
+            keep_paths.add(os.path.abspath(path))
+
+    pruned_files = []
+    kept_files = []
+    for path in patched_files:
+        abs_path = os.path.abspath(path)
+        if abs_path in keep_paths:
+            kept_files.append(path)
+            continue
+        if abs_path.startswith(os.path.abspath(SESSIONS_DIR) + os.sep):
+            try:
+                if os.path.exists(abs_path):
+                    os.remove(abs_path)
+                    pruned_files.append(os.path.basename(abs_path))
+            except OSError:
+                pass
+
+    # Deduplicate while preserving order, then persist trimmed history.
+    deduped_kept = []
+    seen = set()
+    for path in kept_files:
+        if path in seen:
+            continue
+        seen.add(path)
+        deduped_kept.append(path)
+    session["patched_vocal_files"] = deduped_kept
+    save_session(session_id)
+
+    if pruned_files:
+        log_step(
+            "CLEANUP",
+            f"Session {session_id}: pruned {len(pruned_files)} patched vocal snapshot(s) ({', '.join(pruned_files[:3])}{'...' if len(pruned_files) > 3 else ''})",
+        )
+
+
+def _prune_all_sessions_patched_vocals(keep_last: int = 1):
+    """Apply patched-vocal retention policy to every loaded session."""
+    for sid in list(sessions.keys()):
+        try:
+            _prune_patched_vocal_files(sid, keep_last=keep_last)
+        except Exception:
+            # Keep storage reporting resilient even if one session is malformed.
+            pass
+
+
+def _resolve_segment_audio_source(session: dict, audio_source: str) -> tuple[str, str]:
+    result = session.get("result") or {}
+    src = (audio_source or "vocals").lower()
+
+    if src == "edited":
+        # Prefer cleaned vocals when present, otherwise use patched vocal timeline.
+        path = result.get("cleaned_vocal_path") or session.get("vocal_audio")
+        return path, "edited"
+
+    if src == "original":
+        return session.get("original_audio"), "original"
+
+    # 'vocals' should reflect the unedited demucs baseline when available.
+    return session.get("original_demucs_vocal") or session.get("vocal_audio"), "vocals"
+
+
+def _extract_segment_clip_to_wav(source_path: str, start_ms: float, end_ms: float, out_path: str):
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    start_sec = max(0.0, float(start_ms) / 1000.0)
+    duration_sec = max(0.05, (float(end_ms) - float(start_ms)) / 1000.0)
+
+    # Load only the requested range to keep memory bounded.
+    clip, sr = librosa.load(source_path, sr=None, mono=False, offset=start_sec, duration=duration_sec)
+    if clip is None:
+        raise ServiceError("Segment extraction failed", "Failed to decode source audio clip")
+    if getattr(clip, "size", 0) == 0:
+        raise ServiceError("Segment extraction failed", "Selected range produced an empty clip")
+    if clip.ndim == 1:
+        clip = np.expand_dims(clip, axis=0)
+
+    sf.write(out_path, clip.T, sr, subtype="PCM_16")
+
+
+def _transcribe_preview_clip(audio_path: str, language: str = "en") -> tuple[list[str], Optional[float], str]:
+    lang = (language or "en").strip().lower()
+    whisper_lang = None if lang in ("", "auto") else lang
+
+    # Try WhisperX first to match the main alignment stack.
+    try:
+        import whisperx
+
+        device = "cpu"
+        compute_type = "int8"
+        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        audio = whisperx.load_audio(audio_path)
+        result = model.transcribe(audio, batch_size=4, language=whisper_lang)
+        segments = result.get("segments", []) or []
+
+        lines = [str(seg.get("text", "")).strip() for seg in segments if str(seg.get("text", "")).strip()]
+        scores = [seg.get("avg_logprob") for seg in segments if isinstance(seg.get("avg_logprob"), (int, float))]
+        confidence = None
+        if scores:
+            # avg_logprob is <= 0 in practice; exp maps to [0, 1].
+            vals = [math.exp(min(0.0, float(v))) for v in scores]
+            confidence = float(sum(vals) / len(vals))
+
+        return lines, confidence, "whisperx"
+    except Exception as wx_err:
+        log_step("SEGMENT_PREVIEW", f"WhisperX preview failed, fallback to Whisper: {wx_err}")
+
+    try:
+        import whisper
+
+        model = whisper.load_model("medium")
+        result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=False)
+        segments = result.get("segments", []) or []
+
+        lines = [str(seg.get("text", "")).strip() for seg in segments if str(seg.get("text", "")).strip()]
+        scores = [seg.get("avg_logprob") for seg in segments if isinstance(seg.get("avg_logprob"), (int, float))]
+        confidence = None
+        if scores:
+            vals = [math.exp(min(0.0, float(v))) for v in scores]
+            confidence = float(sum(vals) / len(vals))
+
+        return lines, confidence, "whisper"
+    except Exception as w_err:
+        raise ServiceError("Lyrics preview failed", f"Transcription unavailable: {w_err}")
+
+
+def _resolve_transcribe_model_name(model_preset: str) -> str:
+    """Map UI preset name to Whisper model size."""
+    preset = (model_preset or "balanced").strip().lower()
+    if preset == "fast":
+        return "small"
+    if preset == "balanced":
+        return "medium"
+    # default and unknown values use highest quality
+    return "large-v3"
 
 
 def safe_json(data):
@@ -573,10 +767,14 @@ async def delete_session_endpoint(session_id: str):
     # Remove generated files tracked in result
     result = session.get("result", {})
     tracked = set()
-    for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+    for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file", "cleaned_vocal_file"):
         fname = result.get(key) if isinstance(result, dict) else None
         if fname:
             tracked.add(fname)
+    # cleaned_vocal_path may be absolute; remove by basename from downloads
+    cleaned_path = result.get("cleaned_vocal_path") if isinstance(result, dict) else None
+    if cleaned_path:
+        tracked.add(os.path.basename(cleaned_path))
     # Also remove all filenames accumulated across multiple generation runs
     for fname in session.get("generated_files", []):
         tracked.add(fname)
@@ -584,6 +782,25 @@ async def delete_session_endpoint(session_id: str):
         fpath = os.path.join(DOWNLOADS_DIR, fname)
         if os.path.exists(fpath):
             os.remove(fpath)
+
+    # Remove session-owned patched vocal files living under backend/sessions
+    # (current vocal_audio plus any historical patched files tracked on session)
+    audio_candidates = [
+        session.get("vocal_audio"),
+        session.get("original_demucs_vocal"),
+    ]
+    for fpath in session.get("patched_vocal_files", []):
+        audio_candidates.append(fpath)
+
+    for fpath in audio_candidates:
+        if not fpath:
+            continue
+        try:
+            abs_path = os.path.abspath(fpath)
+            if abs_path.startswith(os.path.abspath(SESSIONS_DIR) + os.sep) and os.path.exists(abs_path):
+                os.remove(abs_path)
+        except OSError:
+            pass
 
     # Remove orphaned downloads: files prefixed with session_id or session_id[:8]
     # Covers mic_trail_*, mic_audio_* (prefixed with session_id[:8])
@@ -602,8 +819,244 @@ async def delete_session_endpoint(session_id: str):
                 pass
 
     del sessions[session_id]
+
+    # Sweep orphaned patched vocals from previous versions that did not track them.
+    referenced = set()
+    for s in sessions.values():
+        for key in ("vocal_audio", "original_demucs_vocal"):
+            p = s.get(key)
+            if p:
+                referenced.add(os.path.abspath(p))
+        for p in s.get("patched_vocal_files", []):
+            if p:
+                referenced.add(os.path.abspath(p))
+
+    for name in os.listdir(SESSIONS_DIR):
+        if not name.startswith("vocal_patched_"):
+            continue
+        p = os.path.abspath(os.path.join(SESSIONS_DIR, name))
+        if p in referenced:
+            continue
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
     log_step("SESSION", f"Deleted session {session_id}")
     return {"status": "ok"}
+
+
+@app.get("/api/storage-info")
+async def get_storage_info():
+    """Return per-session disk usage and data directory paths for the storage manager."""
+    import glob as _glob
+
+    # Enforce retention before reporting so storage manager reflects compacted state.
+    _prune_all_sessions_patched_vocals(keep_last=1)
+
+    def _dir_size(path: str) -> int:
+        total = 0
+        try:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    def _file_size(path: str) -> int:
+        try:
+            return os.path.getsize(path) if path and os.path.exists(path) else 0
+        except OSError:
+            return 0
+
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
+    session_rows = []
+    for sid, s in sessions.items():
+        result = s.get("result") or {}
+        files = []
+
+        # Upload dir
+        upload_dir = os.path.join(UPLOAD_DIR, sid)
+        upload_size = _dir_size(upload_dir) if os.path.isdir(upload_dir) else 0
+
+        # Audio files
+        for key in ("original_audio", "vocal_audio", "original_demucs_vocal"):
+            p = s.get(key)
+            if p and os.path.exists(p):
+                files.append({"label": key, "path": p, "size": _file_size(p)})
+
+        # Patched vocals
+        for p in s.get("patched_vocal_files", []):
+            if p and os.path.exists(p):
+                files.append({"label": "patched_vocal", "path": p, "size": _file_size(p)})
+
+        # Cleaned vocal
+        cp = result.get("cleaned_vocal_path")
+        if cp and os.path.exists(cp):
+            files.append({"label": "cleaned_vocal", "path": cp, "size": _file_size(cp)})
+
+        # Generated files
+        for key in ("txt_file", "midi_file", "summary_file"):
+            fname = result.get(key)
+            if fname:
+                p = os.path.join(DOWNLOADS_DIR, fname)
+                if os.path.exists(p):
+                    files.append({"label": key, "path": p, "size": _file_size(p)})
+
+        total_size = upload_size + sum(f["size"] for f in files)
+
+        session_rows.append({
+            "id": sid,
+            "artist": s.get("artist", "Unknown"),
+            "title": s.get("title", "Untitled"),
+            "status": "generated" if result else s.get("status", "unknown"),
+            "created_at": s.get("created_at", 0),
+            "total_size_bytes": total_size,
+            "files": files,
+        })
+
+    session_rows.sort(key=lambda x: x["created_at"], reverse=True)
+
+    # Orphan scan: downloads files not referenced by any session
+    all_referenced = set()
+    for s in sessions.values():
+        r = s.get("result") or {}
+        for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            fname = r.get(key)
+            if fname:
+                all_referenced.add(fname)
+        cp = r.get("cleaned_vocal_path")
+        if cp:
+            all_referenced.add(os.path.basename(cp))
+        for fn in s.get("generated_files", []):
+            all_referenced.add(fn)
+
+    orphan_files = []
+    orphan_size = 0
+    debug_files = []
+    debug_size = 0
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if _is_debug_download_file(fname):
+                sz = _file_size(fpath)
+                debug_files.append({"path": fpath, "name": fname, "size": sz})
+                debug_size += sz
+                continue
+            if fname not in all_referenced:
+                sz = _file_size(fpath)
+                orphan_files.append({"path": fpath, "name": fname, "size": sz})
+                orphan_size += sz
+    except OSError:
+        pass
+
+    return {
+        "status": "ok",
+        "data_dir": _DATA_DIR,
+        "sessions_dir": SESSIONS_DIR,
+        "downloads_dir": DOWNLOADS_DIR,
+        "uploads_dir": UPLOAD_DIR,
+        "sessions": session_rows,
+        "orphan_files": orphan_files,
+        "orphan_size_bytes": orphan_size,
+        "debug_files": debug_files,
+        "debug_size_bytes": debug_size,
+    }
+
+
+@app.post("/api/cleanup-orphans")
+async def cleanup_orphans():
+    """Delete download files not referenced by any active session."""
+    all_referenced = set()
+    for s in sessions.values():
+        r = s.get("result") or {}
+        for key in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            fname = r.get(key)
+            if fname:
+                all_referenced.add(fname)
+        cp = r.get("cleaned_vocal_path")
+        if cp:
+            all_referenced.add(os.path.basename(cp))
+        for fn in s.get("generated_files", []):
+            all_referenced.add(fn)
+
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
+    deleted = []
+    errors = []
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if _is_debug_download_file(fname):
+                continue
+            if fname not in all_referenced:
+                try:
+                    os.remove(fpath)
+                    deleted.append(fname)
+                except OSError as e:
+                    errors.append({"file": fname, "error": str(e)})
+    except OSError:
+        pass
+
+    log_step("CLEANUP", f"Orphan cleanup: deleted {len(deleted)} files, {len(errors)} errors")
+    return {"status": "ok", "deleted": deleted, "errors": errors}
+
+
+@app.post("/api/cleanup-debug")
+async def cleanup_debug_files():
+    """Delete known debug artifacts from downloads."""
+
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
+    deleted = []
+    errors = []
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not _is_debug_download_file(fname):
+                continue
+            try:
+                os.remove(fpath)
+                deleted.append(fname)
+            except OSError as e:
+                errors.append({"file": fname, "error": str(e)})
+    except OSError:
+        pass
+
+    log_step("CLEANUP", f"Debug cleanup: deleted {len(deleted)} files, {len(errors)} errors")
+    return {"status": "ok", "deleted": deleted, "errors": errors}
 
 
 @app.post("/api/resume/{session_id}")
@@ -1134,7 +1587,7 @@ async def upload_mix_audio(session_id: str, audio: UploadFile = File(...)):
 
 @app.delete("/api/delete-audio/{session_id}/{audio_type}")
 async def delete_audio(session_id: str, audio_type: str):
-    """Delete an audio file (original or vocals) from a session."""
+    """Delete an audio file (original, vocals, or instrumental) from a session."""
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1153,8 +1606,15 @@ async def delete_audio(session_id: str, audio_type: str):
         session["vocals_header"] = ""
         session["status"] = "uploaded" if session.get("original_audio") else "created"
         log_step("DELETE", f"Session {session_id}: deleted vocals")
+    elif audio_type == "instrumental":
+        path = session.get("instrumental_audio")
+        if path and os.path.exists(path):
+            os.remove(path)
+        session["instrumental_audio"] = None
+        session["instrumental_header"] = ""
+        log_step("DELETE", f"Session {session_id}: deleted instrumental")
     else:
-        raise HTTPException(status_code=400, detail="Invalid audio type. Use 'original' or 'vocals'.")
+        raise HTTPException(status_code=400, detail="Invalid audio type. Use 'original', 'vocals', or 'instrumental'.")
 
     _update_txt_asset_headers(session)
     save_session(session_id)
@@ -1178,6 +1638,13 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
         path = session.get("vocal_audio")
     elif audio_type == "instrumental":
         path = session.get("instrumental_audio")
+    elif audio_type == "cleaned":
+        # Cleaned audio from cleanup segments
+        result = session.get("result")
+        path = result.get("cleaned_vocal_path") if result else None
+    elif audio_type == "demucs":
+        # Original demucs vocal before any splice edits
+        path = session.get("original_demucs_vocal") or session.get("vocal_audio")
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type")
     
@@ -1263,6 +1730,601 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
     return FileResponse(path, filename=download_name, headers={'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store'})
 
 
+@app.post("/api/segment-preview/{session_id}")
+async def segment_preview(session_id: str, request: Request):
+    """Transcribe an isolated local clip for Step4 segment preview.
+
+    Request JSON:
+      - start_ms, end_ms
+      - language (optional, e.g. en/de/auto)
+      - audio_source (optional: vocals|edited|original)
+      - source_type (optional: cleanup|loop)
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    try:
+        start_ms = float(body.get("start_ms"))
+        end_ms = float(body.get("end_ms"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+
+    duration_ms = end_ms - start_ms
+    if duration_ms > 180000:  # safety: 3 minutes max per local preview
+        raise HTTPException(status_code=400, detail="Selected range is too long for preview (max 180s)")
+
+    language = str(body.get("language") or "en")
+    source_type = str(body.get("source_type") or "loop")
+    requested_source = str(body.get("audio_source") or "vocals")
+
+    log_step(
+        "SEGMENT_PREVIEW",
+        f"Request session={session_id} source_type={source_type} source={requested_source} "
+        f"range={start_ms:.0f}-{end_ms:.0f}ms lang={language}",
+    )
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, requested_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{requested_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"segment_preview_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+        lines, confidence, engine = _transcribe_preview_clip(clip_path, language=language)
+        if not lines:
+            lines = ["(no speech recognized)"]
+
+        log_step(
+            "SEGMENT_PREVIEW",
+            f"Session {session_id}: {source_type} {start_ms:.0f}-{end_ms:.0f}ms src={resolved_source} -> {len(lines)} line(s) via {engine}",
+        )
+
+        return {
+            "status": "ok",
+            "lyrics_lines": lines,
+            "confidence": confidence,
+            "engine": engine,
+            "source_type": source_type,
+            "audio_source": resolved_source,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "duration_ms": round(duration_ms, 1),
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
+@app.post("/api/segment-preview-upload/{session_id}")
+async def segment_preview_upload(
+    session_id: str,
+    recording: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    """Transcribe an uploaded temporary recording clip for Step4 review modal.
+
+    This endpoint is used before splicing so users can verify recognized lyrics
+    immediately after recording.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    ext = os.path.splitext(recording.filename or "recording.webm")[1] or ".webm"
+    upload_name = f"segment_preview_upload_{int(time.time() * 1000)}{ext}"
+    upload_path = os.path.join(temp_dir, upload_name)
+
+    try:
+        with open(upload_path, "wb") as f:
+            shutil.copyfileobj(recording.file, f)
+
+        lines, confidence, engine = _transcribe_preview_clip(upload_path, language=language)
+        if not lines:
+            lines = ["(no speech recognized)"]
+
+        log_step(
+            "SEGMENT_PREVIEW",
+            f"Upload preview session={session_id} file={os.path.basename(upload_path)} -> {len(lines)} line(s) via {engine}",
+        )
+
+        return {
+            "status": "ok",
+            "lyrics_lines": lines,
+            "confidence": confidence,
+            "engine": engine,
+            "source_type": "recording_upload",
+            "audio_source": "recording_upload",
+        }
+    finally:
+        _safe_unlink(upload_path)
+
+
+def _transcribe_clip_for_alignment(audio_path: str, language: str = "en") -> tuple:
+    """Transcribe a short clip and return word-level (and optionally char-level) timestamps.
+
+    Returns:
+        (whisper_words, whisper_chars)
+        whisper_words: list of {word, start, end, score}  — clip-relative seconds
+        whisper_chars: list of {char, start, end}          — empty if unavailable
+    """
+    lang = (language or "en").strip().lower()
+    whisper_lang = None if lang in ("", "auto") else lang
+
+    try:
+        import whisperx
+
+        device = "cpu"
+        compute_type = "int8"
+        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        audio = whisperx.load_audio(audio_path)
+        result = model.transcribe(audio, batch_size=4, language=whisper_lang)
+        segments = result.get("segments", []) or []
+
+        try:
+            align_model, align_metadata = whisperx.load_align_model(
+                language_code=result.get("language", whisper_lang or "en"),
+                device=device,
+            )
+            aligned = whisperx.align(
+                segments, align_model, align_metadata, audio, device, return_char_alignments=True
+            )
+            whisper_words = [
+                {
+                    "word": w.get("word", "").strip(),
+                    "start": round(w.get("start", 0), 4),
+                    "end": round(w.get("end", 0), 4),
+                    "score": round(w.get("score", 0), 4),
+                }
+                for w in aligned.get("word_segments", [])
+            ]
+            whisper_chars = []
+            for seg in aligned.get("segments", []):
+                for w in seg.get("words", []):
+                    for ch in w.get("chars", []):
+                        if ch.get("start") is not None and ch.get("end") is not None:
+                            whisper_chars.append(
+                                {"char": ch.get("char", ""), "start": round(ch["start"], 4), "end": round(ch["end"], 4)}
+                            )
+            return whisper_words, whisper_chars
+        except Exception as align_err:
+            log_step("SEG_GEN", f"Forced char alignment failed: {align_err}, using word timestamps only")
+            whisper_words = [
+                {
+                    "word": w.get("word", "").strip(),
+                    "start": round(w.get("start", 0), 4),
+                    "end": round(w.get("end", 0), 4),
+                    "score": 0.0,
+                }
+                for seg in segments
+                for w in seg.get("words", [])
+            ]
+            return whisper_words, []
+    except Exception as wx_err:
+        log_step("SEG_GEN", f"WhisperX unavailable ({wx_err}), trying vanilla Whisper")
+
+    try:
+        import whisper
+
+        model = whisper.load_model("medium")
+        result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=True)
+        segments = result.get("segments", []) or []
+        whisper_words = [
+            {
+                "word": (w.get("word") or "").strip(),
+                "start": round(w.get("start", 0), 4),
+                "end": round(w.get("end", 0), 4),
+                "score": round(w.get("probability", 0), 4),
+            }
+            for seg in segments
+            for w in seg.get("words", [])
+        ]
+        return whisper_words, []
+    except Exception as w_err:
+        raise ServiceError("Segment generation failed", f"Transcription unavailable: {w_err}")
+
+
+@app.post("/api/segment-generate/{session_id}")
+async def segment_generate(session_id: str, request: Request):
+    """Generate Ultrastar notes for a local time range from user-confirmed (hyphenated) lyrics.
+
+    Request JSON:
+      - start_ms, end_ms        — time range in the session audio
+      - lyrics                  — hyphenated plain text (newline-separated lines)
+      - language                — ISO code, default "en"
+      - audio_source            — "vocals" | "edited" | "original"
+
+    Returns:
+      - notes                   — array of note objects ready to splice into the editor
+      - syllable_timings        — absolute-time timings for rawTimings sync (optional)
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise HTTPException(status_code=400, detail="No generation result — run generation first")
+
+    body = await request.json()
+    try:
+        start_ms = float(body["start_ms"])
+        end_ms = float(body["end_ms"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+    if (end_ms - start_ms) > 180_000:
+        raise HTTPException(status_code=400, detail="Range too long for segment generate (max 180s)")
+
+    lyrics = str(body.get("lyrics") or "").strip()
+    if not lyrics:
+        raise HTTPException(status_code=400, detail="lyrics is required")
+
+    language = str(body.get("language") or "en")
+    audio_source = str(body.get("audio_source") or "vocals")
+
+    log_step(
+        "SEG_GEN",
+        f"Request session={session_id} source={audio_source} range={start_ms:.0f}-{end_ms:.0f}ms "
+        f"lang={language} lyrics_chars={len(lyrics)}",
+    )
+
+    bpm = float(result["bpm"])
+    gap_ms = float(result["gap_ms"])
+    gap_sec = gap_ms / 1000.0
+    offset_sec = start_ms / 1000.0
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, audio_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{audio_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"seg_gen_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+
+        # Transcribe clip to get word/char timestamps (clip-relative, starting at 0)
+        whisper_words, whisper_chars = _transcribe_clip_for_alignment(clip_path, language)
+
+        # Pitch detection on the clip (clip-relative times)
+        from services.pitch_detection import detect_pitches, get_pitch_for_segment, get_pitch_subsegments
+        pitch_data = detect_pitches(clip_path)
+
+        # Align hyphenated lyrics to ASR word timestamps
+        from services.alignment_whisper import align_whisper
+        from services.alignment import align_lyrics_to_audio
+
+        syllable_timings = None
+        if whisper_words:
+            syllable_timings = align_whisper(
+                lyrics,
+                whisper_words,
+                language,
+                char_timestamps=whisper_chars or None,
+                audio_path=clip_path,
+            )
+
+        if not syllable_timings:
+            log_step("SEG_GEN", "Falling back to energy-based alignment for segment")
+            syllable_timings = align_lyrics_to_audio(clip_path, lyrics, language)
+
+        log_step(
+            "SEG_GEN",
+            f"Session {session_id}: {start_ms:.0f}–{end_ms:.0f}ms → {len(syllable_timings)} syllables, "
+            f"bpm={bpm}, gap={gap_ms}ms, src={resolved_source}",
+        )
+
+        # Build note objects (IDs are 0-based within this batch; frontend re-IDs on merge)
+        notes = []
+        note_id = 0
+        prev_line_index = None
+        last_end_beat = -1
+
+        for timing in syllable_timings:
+            abs_start = timing["start"] + offset_sec
+            abs_end = timing["end"] + offset_sec
+            line_index = timing.get("line_index", 0)
+            is_rap = timing.get("is_rap", False)
+
+            # Insert break between lyric lines
+            if prev_line_index is not None and line_index != prev_line_index:
+                break_start_beat = last_end_beat + 2
+                next_beat = max(break_start_beat + 1, int(((abs_start - gap_sec) * bpm) / 15))
+                break_end_beat = max(break_start_beat + 1, next_beat - 2)
+                notes.append(
+                    {"id": note_id, "type": "break", "startBeat": break_start_beat, "endBeat": break_end_beat}
+                )
+                note_id += 1
+                last_end_beat = break_start_beat
+
+            # Pitch from clip-relative times. For long syllables with clear pitch
+            # movement, split into continuation notes to preserve vibrato shape.
+            subnotes = []
+            if is_rap:
+                subnotes = [{"start": timing["start"], "end": timing["end"], "pitch": 0, "syllable": timing["syllable"]}]
+            else:
+                pitch_segments = get_pitch_subsegments(pitch_data, timing["start"], timing["end"])
+
+                if pitch_segments:
+                    for idx, seg in enumerate(pitch_segments):
+                        subnotes.append(
+                            {
+                                "start": seg["start"],
+                                "end": seg["end"],
+                                "pitch": int(seg["pitch"]),
+                                "syllable": timing["syllable"] if idx == 0 else "~",
+                            }
+                        )
+                else:
+                    pitch = get_pitch_for_segment(pitch_data, timing["start"], timing["end"])
+                    if pitch == 0:
+                        mid = (timing["start"] + timing["end"]) / 2
+                        pitch = get_pitch_for_segment(pitch_data, mid - 0.1, mid + 0.1)
+                    if pitch == 0:
+                        pitch = 60  # C4 fallback
+                    subnotes = [{"start": timing["start"], "end": timing["end"], "pitch": pitch, "syllable": timing["syllable"]}]
+
+            for sub in subnotes:
+                sub_abs_start = sub["start"] + offset_sec
+                sub_abs_end = sub["end"] + offset_sec
+
+                start_beat = max(0, int(((sub_abs_start - gap_sec) * bpm) / 15))
+                end_beat = max(start_beat + 1, int(((sub_abs_end - gap_sec) * bpm) / 15))
+                duration = max(1, end_beat - start_beat)
+
+                if start_beat <= last_end_beat and notes:
+                    start_beat = last_end_beat + 1
+                    end_beat = max(start_beat + 1, end_beat)
+                    duration = max(1, end_beat - start_beat)
+
+                notes.append(
+                    {
+                        "id": note_id,
+                        "startBeat": start_beat,
+                        "duration": duration,
+                        "pitch": int(sub["pitch"]),
+                        "syllable": sub["syllable"],
+                        "isRap": is_rap,
+                        "confidence": timing.get("confidence", 1.0),
+                        "original": {"startBeat": start_beat, "duration": duration, "pitch": int(sub["pitch"])},
+                    }
+                )
+                note_id += 1
+                last_end_beat = start_beat + duration
+
+            prev_line_index = line_index
+
+        # Absolute-time syllable timings for frontend rawTimings sync
+        abs_timings = [
+            {**t, "start": round(t["start"] + offset_sec, 4), "end": round(t["end"] + offset_sec, 4)}
+            for t in syllable_timings
+        ]
+
+        return {
+            "status": "ok",
+            "notes": notes,
+            "syllable_timings": abs_timings,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "audio_source": resolved_source,
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
+@app.post("/api/vibrato-suggest/{session_id}")
+async def vibrato_suggest(session_id: str, request: Request):
+    """Suggest vibrato-style pitch subsegments for a selected note range.
+
+    Request JSON:
+      - start_ms, end_ms       required range in session audio timeline
+      - audio_source           optional: vocals|edited|original (default vocals)
+      - min_duration_sec       optional float, default 0.9
+      - target_slice_sec       optional float, default 0.18
+      - max_segments           optional int, default 8
+      - min_pitch_span         optional int semitones, default 2
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    try:
+        start_ms = float(body["start_ms"])
+        end_ms = float(body["end_ms"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+    if (end_ms - start_ms) > 30_000:
+        raise HTTPException(status_code=400, detail="Range too long for vibrato suggest (max 30s)")
+
+    audio_source = str(body.get("audio_source") or "vocals")
+    min_duration_sec = float(body.get("min_duration_sec", 0.9))
+    target_slice_sec = float(body.get("target_slice_sec", 0.18))
+    max_segments = int(body.get("max_segments", 8))
+    min_pitch_span = int(body.get("min_pitch_span", 2))
+    min_run_frames = int(body.get("min_run_frames", 1))
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, audio_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{audio_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"vibrato_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+
+        from services.pitch_detection import (
+            CONFIDENCE_THRESHOLD,
+            detect_pitches,
+            get_pitch_at_time,
+            get_pitch_for_segment,
+            get_pitch_subsegments,
+            midi_to_note_name,
+        )
+        import numpy as np
+
+        pitch_data = detect_pitches(clip_path)
+        clip_start_sec = start_ms / 1000.0
+        clip_end_sec = end_ms / 1000.0
+        clip_duration_sec = max(0.001, clip_end_sec - clip_start_sec)
+
+        log_step(
+            "VIBRATO",
+            (
+                f"session={session_id[:8]} src={resolved_source} range={start_ms:.0f}-{end_ms:.0f}ms "
+                f"dur={clip_duration_sec:.3f}s sens(min_dur={min_duration_sec:.2f}, "
+                f"slice={target_slice_sec:.2f}, max_seg={max_segments}, span={min_pitch_span}, "
+                f"min_run={min_run_frames})"
+            ),
+        )
+
+        times = pitch_data.get("times")
+        midi_notes = pitch_data.get("midi_notes")
+        confidences = pitch_data.get("confidences")
+        voiced_mask = (times >= 0.0) & (times <= clip_duration_sec)
+        voiced_mask &= (midi_notes > 0) & (confidences >= CONFIDENCE_THRESHOLD)
+        voiced_times = times[voiced_mask]
+        voiced_notes = midi_notes[voiced_mask]
+        voiced_conf = confidences[voiced_mask]
+
+        start_pitch = get_pitch_at_time(pitch_data, 0.0, window=0.08)
+        end_pitch = get_pitch_at_time(pitch_data, clip_duration_sec, window=0.08)
+        edge_window = min(0.15, clip_duration_sec / 3)
+        start_edge_pitch = get_pitch_for_segment(pitch_data, 0.0, edge_window)
+        end_edge_pitch = get_pitch_for_segment(pitch_data, max(0.0, clip_duration_sec - edge_window), clip_duration_sec)
+
+        log_step(
+            "VIBRATO",
+            (
+                f"edge_pitch start={start_pitch}({midi_to_note_name(start_pitch)}) "
+                f"end={end_pitch}({midi_to_note_name(end_pitch)}) "
+                f"start_edge={start_edge_pitch}({midi_to_note_name(start_edge_pitch)}) "
+                f"end_edge={end_edge_pitch}({midi_to_note_name(end_edge_pitch)})"
+            ),
+        )
+
+        if len(voiced_notes) > 0:
+            note_min = int(np.min(voiced_notes))
+            note_max = int(np.max(voiced_notes))
+            note_med = int(np.median(voiced_notes))
+            unique_count = int(len(np.unique(voiced_notes)))
+            log_step(
+                "VIBRATO",
+                (
+                    f"voiced_frames={len(voiced_notes)}/{len(times)} conf>={CONFIDENCE_THRESHOLD:.2f} "
+                    f"span={note_max - note_min}st min={note_min}({midi_to_note_name(note_min)}) "
+                    f"med={note_med}({midi_to_note_name(note_med)}) max={note_max}({midi_to_note_name(note_max)}) "
+                    f"unique={unique_count}"
+                ),
+            )
+
+            head = [
+                f"{float(t):.3f}s:{int(n)}({midi_to_note_name(int(n))})@{float(c):.2f}"
+                for t, n, c in zip(voiced_times[:8], voiced_notes[:8], voiced_conf[:8])
+            ]
+            tail = [
+                f"{float(t):.3f}s:{int(n)}({midi_to_note_name(int(n))})@{float(c):.2f}"
+                for t, n, c in zip(voiced_times[-8:], voiced_notes[-8:], voiced_conf[-8:])
+            ]
+            if head:
+                log_step("VIBRATO", f"voiced_head {', '.join(head)}")
+            if tail:
+                log_step("VIBRATO", f"voiced_tail {', '.join(tail)}")
+        else:
+            log_step("VIBRATO", f"voiced_frames=0/{len(times)} conf>={CONFIDENCE_THRESHOLD:.2f}")
+
+        segments = get_pitch_subsegments(
+            pitch_data,
+            0.0,
+            clip_duration_sec,
+            min_duration_sec=max(0.2, min_duration_sec),
+            target_slice_sec=max(0.05, target_slice_sec),
+            max_segments=max(2, min(16, max_segments)),
+            min_pitch_span_semitones=max(1, min_pitch_span),
+            min_run_frames=max(1, min(8, min_run_frames)),
+        )
+
+        if not segments:
+            fallback_pitch = get_pitch_for_segment(pitch_data, 0.0, clip_duration_sec)
+            if fallback_pitch == 0:
+                fallback_pitch = 60
+            log_step(
+                "VIBRATO",
+                f"subsegments=0 -> fallback pitch {fallback_pitch} ({midi_to_note_name(fallback_pitch)})",
+            )
+            segments = [{"start": 0.0, "end": max(0.001, clip_end_sec - clip_start_sec), "pitch": int(fallback_pitch)}]
+        else:
+            seg_preview = [
+                f"{float(s['start']):.3f}-{float(s['end']):.3f}s:{int(s['pitch'])}({midi_to_note_name(int(s['pitch']))})"
+                for s in segments
+            ]
+            log_step("VIBRATO", f"subsegments={len(segments)} {', '.join(seg_preview)}")
+
+        abs_segments = [
+            {
+                "start_sec": round(clip_start_sec + float(s["start"]), 4),
+                "end_sec": round(clip_start_sec + float(s["end"]), 4),
+                "pitch": int(s["pitch"]),
+            }
+            for s in segments
+            if float(s.get("end", 0)) > float(s.get("start", 0))
+        ]
+
+        if abs_segments:
+            abs_segments[0]["start_sec"] = round(clip_start_sec, 4)
+            abs_segments[-1]["end_sec"] = round(clip_end_sec, 4)
+
+        abs_preview = [
+            f"{s['start_sec']:.3f}-{s['end_sec']:.3f}s:{int(s['pitch'])}({midi_to_note_name(int(s['pitch']))})"
+            for s in abs_segments
+        ]
+        log_step("VIBRATO", f"return_segments={len(abs_segments)} {', '.join(abs_preview)}")
+
+        return {
+            "status": "ok",
+            "audio_source": resolved_source,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "segments": abs_segments,
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
 # ────────────────────────────────────────────────────────────
 # Step 2a: WhisperX ASR Transcription + Forced Alignment
 # ────────────────────────────────────────────────────────────
@@ -1277,7 +2339,7 @@ async def cancel_transcribe(session_id: str):
 
 
 @app.get("/api/transcribe-stream/{session_id}")
-async def transcribe_stream(session_id: str, language: str = "en"):
+async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: bool = False, model_preset: str = "balanced"):
     """SSE stream for transcription — keeps connection alive during long Whisper runs."""
     # Normalize full language names to ISO codes (e.g. "English" -> "en")
     _LANG_MAP = {
@@ -1303,7 +2365,14 @@ async def transcribe_stream(session_id: str, language: str = "en"):
         return f"data: {json.dumps(data)}\n\n"
 
     async def event_generator():
-        audio_path = session.get("vocal_audio") or session.get("original_audio")
+        if use_cleaned:
+            result = session.get("result") or {}
+            audio_path = result.get("cleaned_vocal_path")
+            if not audio_path or not os.path.exists(audio_path):
+                yield _send("error", "No cleaned audio found. Generate a cleaned preview first.")
+                return
+        else:
+            audio_path = session.get("vocal_audio") or session.get("original_audio")
         if not audio_path or not os.path.exists(audio_path):
             yield _send("error", "No audio file found. Upload audio first.")
             return
@@ -1323,7 +2392,8 @@ async def transcribe_stream(session_id: str, language: str = "en"):
                 "nl": "Dutch", "ja": "Japanese", "ko": "Korean",
                 "zh": "Chinese",
             }
-            log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
+            model_name = _resolve_transcribe_model_name(model_preset)
+            log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language}, preset={model_preset}, model={model_name})...")
 
             # Try WhisperX first
             try:
@@ -1331,7 +2401,6 @@ async def transcribe_stream(session_id: str, language: str = "en"):
                 import torch
                 device = "cpu"
                 compute_type = "int8"
-                model_name = "medium"
                 log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
                 model = whisperx.load_model(model_name, device, compute_type=compute_type)
                 log_step("WHISPERX", "Loading audio...")
@@ -1381,7 +2450,6 @@ async def transcribe_stream(session_id: str, language: str = "en"):
             # Fallback: vanilla Whisper
             try:
                 import whisper
-                model_name = "medium"
                 log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
                 model = whisper.load_model(model_name)
                 log_step("WHISPER", "Running transcription...")
@@ -1441,7 +2509,7 @@ async def transcribe_stream(session_id: str, language: str = "en"):
 
 
 @app.post("/api/transcribe/{session_id}")
-def transcribe_audio(session_id: str, language: str = Form("en")):
+def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: str = Form("balanced")):
     """Transcribe vocal audio using WhisperX with phoneme-level forced alignment.
     
     WhisperX provides ~50ms word boundaries (vs ~200ms for vanilla Whisper)
@@ -1467,7 +2535,8 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
         "zh": "Chinese",
     }
     
-    log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language})...")
+    model_name = _resolve_transcribe_model_name(model_preset)
+    log_step("WHISPER", f"Transcribing {os.path.basename(audio_path)} (lang={language}, preset={model_preset}, model={model_name})...")
     
     # --- Try WhisperX first (phoneme-level forced alignment) ---
     try:
@@ -1476,8 +2545,6 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
         
         device = "cpu"  # MPS has limited WhisperX support
         compute_type = "int8"  # Efficient for CPU
-        model_name = "medium"
-        
         log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
         model = whisperx.load_model(model_name, device, compute_type=compute_type)
         
@@ -1611,7 +2678,6 @@ def transcribe_audio(session_id: str, language: str = Form("en")):
     try:
         import whisper
         
-        model_name = "medium"
         log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
         model = whisper.load_model(model_name)
         
@@ -2123,11 +3189,16 @@ def generate_ultrastar_files(session_id: str):
         
         # Store result in session
         session["status"] = "generated"
-        # Track all generated filenames for cleanup on session delete
-        session.setdefault("generated_files", [])
-        for _fn in (txt_filename, midi_filename, summary_filename):
-            if _fn not in session["generated_files"]:
-                session["generated_files"].append(_fn)
+        # Preserve cleanup state across regeneration (segments stored in ms — no BPM/GAP conversion needed)
+        _old_result = session.get("result") or {}
+        # Aggressive cleanup: remove superseded generation artifacts immediately.
+        for _k in ("txt_file", "midi_file", "summary_file", "corrected_txt_file"):
+            _safe_unlink_download_name(_old_result.get(_k))
+        for _fn in session.get("generated_files", []):
+            _safe_unlink_download_name(_fn)
+
+        _preserved_cleanup_segments = _old_result.get("cleanup_segments", [])
+        _preserved_cleaned_vocal_path = _old_result.get("cleaned_vocal_path")
         session["result"] = {
             "txt_file": txt_filename,
             "midi_file": midi_filename,
@@ -2143,7 +3214,11 @@ def generate_ultrastar_files(session_id: str):
             "syllable_timings": syllable_timings,
             "ultrastar_content": txt_content,
             "pitch_data": pitch_data,
+            "cleanup_segments": _preserved_cleanup_segments,
+            "cleaned_vocal_path": _preserved_cleaned_vocal_path,
         }
+        # Track only latest generation artifacts.
+        session["generated_files"] = [txt_filename, midi_filename, summary_filename]
         save_session(session_id)
         _update_txt_asset_headers(session)
         save_session(session_id)
@@ -2192,9 +3267,10 @@ def generate_ultrastar_files(session_id: str):
 
 
 @app.post("/api/generate/start/{session_id}", status_code=202)
-async def generate_start(session_id: str):
+async def generate_start(session_id: str, use_cleaned: bool = False):
     """Start generation in a background thread and return immediately (202 Accepted).
-    Poll /api/generate/result/{session_id} to check progress."""
+    Poll /api/generate/result/{session_id} to check progress.
+    If use_cleaned=true, uses the cleaned vocal file as the audio source."""
     import threading
     session = sessions.get(session_id)
     if not session:
@@ -2202,11 +3278,22 @@ async def generate_start(session_id: str):
     # Avoid double-starting if already running
     if session.get("status") == "generating":
         return {"status": "already_running"}
+    if use_cleaned:
+        result = session.get("result") or {}
+        cleaned_path = result.get("cleaned_vocal_path")
+        if not cleaned_path or not os.path.exists(cleaned_path):
+            raise HTTPException(status_code=400, detail="No cleaned audio found. Generate a cleaned preview first.")
     def run_generation():
+        original_vocal = session.get("vocal_audio")
         try:
+            if use_cleaned:
+                session["vocal_audio"] = cleaned_path
             generate_ultrastar_files(session_id)
         except Exception:
             pass
+        finally:
+            if use_cleaned:
+                session["vocal_audio"] = original_vocal
     thread = threading.Thread(target=run_generation, daemon=True)
     thread.start()
     return {"status": "started"}
@@ -2284,6 +3371,81 @@ async def get_generation_result(session_id: str):
 
 
 # ────────────────────────────────────────────────────────────
+# Step 3: Generate empty Ultrastar file (no notes, just header)
+# ────────────────────────────────────────────────────────────
+@app.post("/api/generate/empty/{session_id}")
+async def generate_empty(session_id: str):
+    """Generate a minimal Ultrastar result with header only and no notes.
+    Useful for skipping straight to the editor when note generation is not needed."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    info = session.get("song_info") or {}
+    vocal = session.get("vocal_audio") or session.get("original_audio")
+    original = session.get("original_audio")
+
+    from services.bpm_detection import detect_bpm, get_audio_duration
+
+    audio_duration = 0.0
+    bpm = 120.0
+    gap_ms = 0
+
+    if vocal and os.path.exists(vocal):
+        try:
+            bpm = detect_bpm(vocal, original_audio_path=original)
+        except Exception as exc:
+            log_step("EMPTY_GEN", f"BPM detection failed, falling back to 120.0: {exc}")
+        try:
+            audio_duration = get_audio_duration(vocal)
+        except Exception:
+            pass
+
+    mp3_filename = os.path.basename(original or vocal or "audio.mp3")
+    vocals_filename = os.path.basename(vocal or "")
+
+    header = (
+        f"#TITLE:{info.get('title', 'Unknown')}\n"
+        f"#ARTIST:{info.get('artist', 'Unknown')}\n"
+        f"#LANGUAGE:{info.get('language', '')}\n"
+        f"#MP3:{mp3_filename}\n"
+        f"#VOCALS:{vocals_filename}\n"
+        f"#BPM:{bpm:.2f}\n"
+        f"#GAP:{gap_ms}\n"
+        f"#YEAR:{info.get('year', '')}\n"
+    )
+    ultrastar_content = header + "E\n"
+
+    result = {
+        "bpm": bpm,
+        "gap_ms": gap_ms,
+        "beat_phase_sec": 0.0,
+        "audio_duration": audio_duration,
+        "syllable_timings": [],
+        "ultrastar_content": ultrastar_content,
+        "notes": [],
+        "pitch_data": [],
+        "has_edits": False,
+        "edit_count": 0,
+        "cleanup_segments": [],
+        "cleaned_vocal_path": None,
+    }
+    session["result"] = result
+    session["status"] = "generated"
+    save_session(session_id)
+
+    log_step("EMPTY_GEN", f"Session {session_id}: generated empty Ultrastar file")
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "bpm": bpm,
+        "gap_ms": gap_ms,
+        "audio_duration": audio_duration,
+        "ultrastar_preview": ultrastar_content,
+    }
+
+
+# ────────────────────────────────────────────────────────────
 # Step 4: Editor data
 # ────────────────────────────────────────────────────────────
 @app.get("/api/editor-data/{session_id}")
@@ -2325,6 +3487,12 @@ async def get_editor_data(session_id: str):
         "has_edits": result.get("has_edits", False),
         "edit_count": result.get("edit_count", 0),
         "last_saved": result.get("last_saved"),
+        "cleanup_segments": result.get("cleanup_segments", []),
+        "cleaned_audio_available": bool(result.get("cleaned_vocal_path")),
+        "has_vocal_splice": bool(session.get("original_demucs_vocal")) or (
+            vocal is not None and "vocal_patched_" in os.path.basename(vocal)
+        ),
+        "has_original_demucs": bool(session.get("original_demucs_vocal")),
     }
 
 
@@ -2355,11 +3523,35 @@ async def save_editor_state(session_id: str, request: Request):
     editor_bpm = body.get("bpm")
     editor_gap = body.get("gap_ms")
     extra_headers = body.get("extra_headers", [])
+    cleanup_segments = body.get("cleanup_segments", [])
 
-    if not editor_notes:
+    if editor_notes is None:
         raise ServiceError("No notes provided")
     if editor_bpm is None or editor_gap is None:
         raise ServiceError("BPM and gap_ms are required")
+
+    normalized_cleanup_segments = []
+    if isinstance(cleanup_segments, list):
+        for seg in cleanup_segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                start_ms = float(seg.get("start_ms"))
+                end_ms = float(seg.get("end_ms"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+                continue
+            if end_ms < start_ms:
+                start_ms, end_ms = end_ms, start_ms
+            if end_ms - start_ms < 50:
+                end_ms = start_ms + 50
+            patched = bool(seg.get("patched", False))
+            normalized_cleanup_segments.append({
+                "start_ms": round(start_ms, 1),
+                "end_ms": round(end_ms, 1),
+                "patched": patched,
+            })
 
     # Reconstruct Ultrastar .txt content from the editor notes
     lines = []
@@ -2406,13 +3598,29 @@ async def save_editor_state(session_id: str, request: Request):
     result["has_edits"] = True
     result["edit_count"] = result.get("edit_count", 0) + 1
     result["last_saved"] = time.time()
+    # Invalidate cleaned audio if cleanup segments changed
+    old_segments = result.get("cleanup_segments", [])
+    if old_segments != normalized_cleanup_segments:
+        _safe_unlink(result.get("cleaned_vocal_path"))
+        _safe_unlink_download_name(result.get("cleaned_vocal_file"))
+        result["cleaned_vocal_path"] = None
+        result["cleaned_vocal_file"] = None
+    result["cleanup_segments"] = normalized_cleanup_segments
 
     # Also write the file to downloads
+    old_txt = result.get("txt_file")
+    old_corrected = result.get("corrected_txt_file")
     timestamp = int(time.time())
     txt_filename = f"song_{timestamp}.txt"
     txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(ultrastar_content)
+
+    if old_txt and old_txt != txt_filename:
+        _safe_unlink_download_name(old_txt)
+    if old_corrected and old_corrected != txt_filename:
+        _safe_unlink_download_name(old_corrected)
+
     result["txt_file"] = txt_filename
     result["corrected_txt_file"] = txt_filename  # ensure downloads always use latest saved file
 
@@ -2435,7 +3643,237 @@ async def save_editor_state(session_id: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
-# Step 4: Save corrections (legacy)
+# Step 4: Splice a mic recording into the vocal track
+# ────────────────────────────────────────────────────────────
+@app.post("/api/splice-recording/{session_id}")
+async def splice_recording(session_id: str, recording: UploadFile = File(...), start_ms: float = Form(...), end_ms: float = Form(...)):
+    """Splice a mic recording into the session vocal track at the given ms range.
+    
+    Replaces the audio between start_ms and end_ms in the vocal file with the
+    provided recording clip, then stores the patched file as the new vocal source.
+    """
+    import tempfile, shutil
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    vocal_path = session.get("vocal_audio") or session.get("original_audio")
+    if not vocal_path or not os.path.isfile(vocal_path):
+        raise ServiceError("No vocal audio found", "Upload audio first")
+
+    # Save uploaded recording to a temp file
+    suffix = os.path.splitext(recording.filename or "rec.webm")[1] or ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        shutil.copyfileobj(recording.file, tmp)
+        tmp_path = tmp.name
+
+    try:
+        # Load both files
+        vocal, sr = librosa.load(vocal_path, sr=None, mono=False)
+        if vocal.ndim == 1:
+            vocal = np.expand_dims(vocal, axis=0)
+
+        clip, clip_sr = librosa.load(tmp_path, sr=sr, mono=False)
+        if clip.ndim == 1:
+            clip = np.expand_dims(clip, axis=0)
+
+        # Ensure same channel count
+        if clip.shape[0] < vocal.shape[0]:
+            clip = np.repeat(clip, vocal.shape[0], axis=0)
+        elif clip.shape[0] > vocal.shape[0]:
+            clip = clip[:vocal.shape[0]]
+
+        start_sample = max(0, int(start_ms / 1000.0 * sr))
+        end_sample   = min(vocal.shape[1], int(end_ms   / 1000.0 * sr))
+        region_len   = end_sample - start_sample
+
+        if region_len <= 0:
+            raise ServiceError("Invalid range", "start_ms must be before end_ms")
+
+        # Trim or pad clip to exactly fit the region
+        if clip.shape[1] >= region_len:
+            clip_fit = clip[:, :region_len]
+        else:
+            pad = np.zeros((vocal.shape[0], region_len - clip.shape[1]), dtype=np.float32)
+            clip_fit = np.concatenate([clip, pad], axis=1)
+
+        # Splice in
+        patched = vocal.copy()
+        patched[:, start_sample:end_sample] = clip_fit
+
+        # Save as new vocal file
+        timestamp = int(time.time())
+        patched_filename = f"vocal_patched_{timestamp}.wav"
+        patched_path = os.path.join(SESSIONS_DIR, patched_filename)
+        sf.write(patched_path, patched.T, sr, subtype='PCM_16')
+
+        # Preserve original demucs vocal before first splice
+        if not session.get("original_demucs_vocal"):
+            session["original_demucs_vocal"] = session.get("vocal_audio")
+        # Update session to use patched vocal
+        session["vocal_audio"] = patched_path
+        session.setdefault("patched_vocal_files", []).append(patched_path)
+        # Invalidate cleaned audio — it was generated from the old vocal
+        result = session.get("result") or {}
+        _safe_unlink(result.get("cleaned_vocal_path"))
+        _safe_unlink_download_name(result.get("cleaned_vocal_file"))
+        result["cleaned_vocal_path"] = None
+        result["cleaned_vocal_file"] = None
+        save_session(session_id)
+        _prune_patched_vocal_files(session_id, keep_last=1)
+
+        log_step("SPLICE", f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
+
+        return {"status": "ok", "patched_vocal_file": patched_filename}
+    finally:
+        os.unlink(tmp_path)
+
+
+# ────────────────────────────────────────────────────────────
+# Step 4: Restore a segment from original vocal
+# ────────────────────────────────────────────────────────────
+@app.post("/api/restore-segment/{session_id}")
+async def restore_segment(session_id: str, request: Request):
+    """Restore a time range in the current vocal from the original demucs vocal.
+
+    Accepts JSON body:
+        start_ms: float
+        end_ms: float
+    """
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    start_ms = float(body.get("start_ms", 0))
+    end_ms = float(body.get("end_ms", 0))
+
+    original_path = session.get("original_demucs_vocal")
+    vocal_path = session.get("vocal_audio")
+
+    if not original_path or not os.path.isfile(original_path):
+        raise ServiceError(
+            "No original vocal baseline to restore from",
+            "This session has no saved original demucs vocal. Regenerate vocals or start a fresh session."
+        )
+
+    if not vocal_path or not os.path.isfile(vocal_path):
+        raise ServiceError("No vocal audio found", "Upload audio first")
+
+    original, sr = librosa.load(original_path, sr=None, mono=False)
+    if original.ndim == 1:
+        original = np.expand_dims(original, axis=0)
+
+    vocal, _ = librosa.load(vocal_path, sr=sr, mono=False)
+    if vocal.ndim == 1:
+        vocal = np.expand_dims(vocal, axis=0)
+
+    start_sample = max(0, int(start_ms / 1000.0 * sr))
+    end_sample = min(vocal.shape[1], int(end_ms / 1000.0 * sr))
+    orig_end = min(original.shape[1], end_sample)
+
+    patched = vocal.copy()
+    patched[:, start_sample:orig_end] = original[:, start_sample:orig_end]
+
+    timestamp = int(time.time())
+    patched_filename = f"vocal_patched_{timestamp}.wav"
+    patched_path = os.path.join(SESSIONS_DIR, patched_filename)
+    sf.write(patched_path, patched.T, sr, subtype='PCM_16')
+
+    session["vocal_audio"] = patched_path
+    session.setdefault("patched_vocal_files", []).append(patched_path)
+    result = session.get("result") or {}
+    _safe_unlink(result.get("cleaned_vocal_path"))
+    _safe_unlink_download_name(result.get("cleaned_vocal_file"))
+    result["cleaned_vocal_path"] = None
+    result["cleaned_vocal_file"] = None
+    save_session(session_id)
+    _prune_patched_vocal_files(session_id, keep_last=1)
+
+    log_step("RESTORE", f"Session {session_id}: restored original @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
+    return {"status": "ok", "patched_vocal_file": patched_filename}
+
+
+# ────────────────────────────────────────────────────────────
+# Step 4: Generate cleaned audio preview
+# ────────────────────────────────────────────────────────────
+@app.post("/api/generate-cleaned-audio/{session_id}")
+async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
+    """Generate cleaned audio by muting specified beat ranges.
+    
+    Accepts JSON body with:
+        cleanup_segments: list of {start_beat, end_beat}
+    
+    Mutes the specified ranges in the vocal track while preserving total duration,
+    then saves to session for later use in regeneration.
+    """
+    from services.audio_cleanup import generate_cleaned_audio, merge_overlapping_segments
+    
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = session.get("result")
+    if not result:
+        raise ServiceError("No generation result", "Run generation first")
+
+    body = await request.json()
+    cleanup_segments = body.get("cleanup_segments", [])
+
+    if not cleanup_segments:
+        raise ServiceError("No cleanup segments provided")
+
+    # Get audio and timing info from session
+    vocal_audio_path = session.get("vocal_audio") or result.get("vocal_file")
+    if not vocal_audio_path or not os.path.isfile(vocal_audio_path):
+        raise ServiceError("Vocal audio not found", "No vocal track in session")
+
+    bpm = result.get("bpm")
+    gap_ms = result.get("gap_ms")
+
+    # Generate cleaned audio
+    _safe_unlink(result.get("cleaned_vocal_path"))
+    _safe_unlink_download_name(result.get("cleaned_vocal_file"))
+    timestamp = int(time.time())
+    cleaned_filename = f"cleaned_vocals_{timestamp}.wav"
+    cleaned_path = os.path.join(DOWNLOADS_DIR, cleaned_filename)
+
+    try:
+        cleanup_result = generate_cleaned_audio(
+            vocal_audio_path=vocal_audio_path,
+            cleanup_segments=cleanup_segments,
+            output_path=cleaned_path
+        )
+    except Exception as e:
+        raise ServiceError(f"Audio cleanup failed: {str(e)}")
+
+    # Store cleaned audio path in result for later regeneration
+    result["cleaned_vocal_file"] = cleaned_filename
+    result["cleaned_vocal_path"] = cleaned_path
+    result["cleanup_audio_generated_at"] = time.time()
+    save_session(session_id)
+
+    merged_count = len(merge_overlapping_segments(cleanup_segments))
+    log_step("CLEANUP", f"Session {session_id}: Generated cleaned audio ({merged_count} muted ranges)")
+
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "cleaned_audio_file": cleaned_filename,
+        "sample_rate": cleanup_result["sample_rate"],
+        "num_samples": cleanup_result["num_samples"],
+        "segments_muted": cleanup_result["segments_count"],
+    }
+
+
 # ────────────────────────────────────────────────────────────
 @app.post("/api/corrections/{session_id}")
 async def save_corrections(session_id: str, corrections: dict = None):
@@ -2490,12 +3928,16 @@ async def export_with_corrections(
     
     if corrected_content:
         # Save corrected version
+        old_corrected = result.get("corrected_txt_file")
         timestamp = int(time.time())
         corrected_filename = f"song_corrected_{timestamp}.txt"
         corrected_path = os.path.join(DOWNLOADS_DIR, corrected_filename)
         
         with open(corrected_path, "w", encoding="utf-8") as f:
             f.write(corrected_content)
+
+        if old_corrected and old_corrected != corrected_filename:
+            _safe_unlink_download_name(old_corrected)
         
         result["corrected_txt_file"] = corrected_filename
         log_step("EXPORT", f"Saved corrected file: {corrected_filename}")
@@ -2989,6 +4431,7 @@ async def save_assets_meta(session_id: str, request: Request):
 async def download_zip(
     session_id: str,
     include_vocals: str = "1",
+    include_edited_vocals: str = "1",
     include_instrumental: str = "1",
     include_summary: str = "1",
     include_midi: str = "1",
@@ -3094,6 +4537,18 @@ async def download_zip(
         if vocal_path and os.path.exists(vocal_path) and include_vocals == "1":
             ext = os.path.splitext(vocal_path)[1]
             zf.write(vocal_path, f"{base} [Vocals]{ext}")
+
+        # Edited vocals audio (cleanup output from editor)
+        cleaned_path = result.get("cleaned_vocal_path")
+        if (not cleaned_path or not os.path.exists(cleaned_path)):
+            cleaned_file = result.get("cleaned_vocal_file")
+            if cleaned_file:
+                candidate = os.path.join(DOWNLOADS_DIR, cleaned_file)
+                if os.path.exists(candidate):
+                    cleaned_path = candidate
+        if cleaned_path and os.path.exists(cleaned_path) and include_edited_vocals == "1":
+            ext = os.path.splitext(cleaned_path)[1]
+            zf.write(cleaned_path, f"{base} [Edited Vocals]{ext}")
 
         # Instrumental audio (no_vocals from Demucs)
         instrumental_path = session.get("instrumental_audio")

@@ -30,7 +30,22 @@
     }
   }
 
-  async function handleSubmit() {
+  async function handleGenerateEmpty() {
+    if (!$sessionId) { errorMessage.set('No session. Please upload audio first.'); return; }
+    isProcessing.set(true);
+    processingStatus.set('Creating empty Ultrastar file…');
+    try {
+      const result = await generateEmptyUltrastar($sessionId);
+      generationResult.set(result);
+      currentStep.set(4);
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isProcessing.set(false);
+    }
+  }
+
+  async function handleSubmit(useCleaned = false) {
     if (!lyricsText.trim()) {
       errorMessage.set('Please enter lyrics');
       return;
@@ -54,6 +69,7 @@
         preview: result.preview,
       });
       processingStatus.set(`✅ ${result.syllable_count} syllables across ${result.line_count} lines`);
+      generationUseCleaned.set(useCleaned);
       generationModalOpen.set(true);
     } catch (err) {
       errorMessage.set(err.message);
@@ -76,9 +92,9 @@
     }
   }
   import { onDestroy } from 'svelte';
-  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen } from '../stores/appStore.js';
+  import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned, generationResult } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata } from '../services/api.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar } from '../services/api.js';
 
   async function syncMetadata() {
     if (!$sessionId || !$lyricsData.syllableCount) return; // only if a result exists
@@ -106,6 +122,13 @@
   let whisperFallbackWarning = false;
   let transcribeAbortController = null;
   let transcribeTicker = null;
+  const transcribeModelPreset = 'balanced';
+
+  // Cleanup segments
+  let cleanupSegments = [];
+  let isGeneratingCleaned = false;
+  let cleanedAudioAvailable = false;
+  let cleanedAudioFilename = '';
 
   function startTranscribeTicker() {
     transcribeElapsed = 0;
@@ -113,6 +136,79 @@
   }
   function stopTranscribeTicker() {
     if (transcribeTicker) { clearInterval(transcribeTicker); transcribeTicker = null; }
+  }
+
+  // Load cleanup segments from editor when entering Step 2
+  async function loadCleanupSegments() {
+    if (!$sessionId || !$generationResult) return; // no result yet — nothing to load
+    try {
+      const editorData = await getEditorData($sessionId);
+      const newSegments = editorData.cleanup_segments || [];
+      cleanupSegments = newSegments;
+      // Restore cleaned audio state from backend (only reset if segments changed)
+      cleanedAudioAvailable = editorData.cleaned_audio_available || false;
+      if (!cleanedAudioAvailable) cleanedAudioFilename = '';
+    } catch (e) {
+      console.error('[Step2] Failed to load cleanup segments:', e);
+      cleanupSegments = [];
+    }
+  }
+
+  // Handler for "Generate Lyrics from Cleaned Vocals" button
+  async function handleTranscribeFromCleaned() {
+    if (!$sessionId) return;
+    errorMessage.set('');
+    isTranscribing = true;
+    transcribePhase = 'loading';
+    transcribeStatus = 'Loading Whisper model…';
+    transcribeElapsed = 0;
+    transcribeModalOpen = true;
+    transcribeAbortController = new AbortController();
+    try {
+      transcribePhase = 'transcribing';
+      transcribeStatus = 'Transcribing cleaned vocals with Whisper…';
+      startTranscribeTicker();
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, true, transcribeModelPreset);
+      stopTranscribeTicker();
+      lyricsText = result.text;
+      transcribeInfo = result;
+      transcribePhase = 'done';
+      transcribeStatus = `${result.lines} lines, ${result.words} words (${result.language_name}, ${result.model})`;
+      processingStatus.set('✅ Transcription from cleaned vocals complete');
+      if (result.model && !result.model.startsWith('whisperx-')) {
+        whisperFallbackWarning = true;
+      }
+      setTimeout(() => { transcribeModalOpen = false; }, 1800);
+    } catch (err) {
+      stopTranscribeTicker();
+      if (err.name === 'AbortError') return;
+      transcribePhase = 'error';
+      transcribeStatus = err.message;
+      errorMessage.set(err.message);
+    } finally {
+      isTranscribing = false;
+    }
+  }
+
+  // Handler for "Generate Cleaned Preview" button
+  async function handleGenerateCleanedAudio() {
+    if (!$sessionId || cleanupSegments.length === 0) {
+      errorMessage.set('No cleanup segments to process');
+      return;
+    }
+    errorMessage.set('');
+    isGeneratingCleaned = true;
+    processingStatus.set('Generating cleaned audio preview...');
+    try {
+      const result = await generateCleanedAudio($sessionId, cleanupSegments);
+      cleanedAudioFilename = result.cleaned_audio_file;
+      cleanedAudioAvailable = true;
+      processingStatus.set('✅ Cleaned audio preview generated');
+    } catch (err) {
+      errorMessage.set(err.message);
+    } finally {
+      isGeneratingCleaned = false;
+    }
   }
 
   // Keep lyricsData in sync with local fields
@@ -152,6 +248,7 @@
 
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
+    loadCleanupSegments();
   }
 
   onDestroy(() => {
@@ -178,7 +275,7 @@
       transcribePhase = 'transcribing';
       transcribeStatus = 'Transcribing vocals with Whisper…';
       startTranscribeTicker();
-      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal);
+      const result = await transcribeAudio($sessionId, language, transcribeAbortController.signal, false, transcribeModelPreset);
       stopTranscribeTicker();
       console.log('[Step2] Whisper result:', result);
       lyricsText = result.text;
@@ -262,6 +359,51 @@
       </div>
     {/if}
 
+    {#if cleanupSegments.length > 0}
+      <div class="cleanup-banner">
+        <div class="cleanup-banner-content">
+          <span class="cleanup-banner-icon">🧹</span>
+          <div class="cleanup-banner-text">
+            <strong>Cleanup segments detected in Step 4</strong>
+            <p class="cleanup-banner-hint">You've marked {cleanupSegments.length} vocal {cleanupSegments.length === 1 ? 'region' : 'regions'} for cleanup. Generate a cleaned audio preview to hear the effect before regenerating the song.</p>
+          </div>
+          <div class="cleanup-status">
+            {#if isGeneratingCleaned}
+              <div class="cleanup-status-badge generating">⏳ Generating...</div>
+            {:else if cleanedAudioAvailable}
+              <div class="cleanup-status-badge ready">✓ Preview Ready</div>
+            {:else}
+              <button
+                class="btn btn-cleanup"
+                on:click={handleGenerateCleanedAudio}
+                disabled={$isProcessing}
+              >
+                Generate Cleaned Preview
+              </button>
+            {/if}
+          </div>
+        </div>
+        {#if cleanedAudioAvailable && $sessionId}
+          <div class="cleanup-audio-compare">
+            <div class="audio-label">✨ Cleaned Vocals (Preview)</div>
+            <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
+              Your browser does not support the audio element.
+            </audio>
+            <div class="cleanup-transcribe-row">
+              <button
+                class="btn btn-transcribe"
+                on:click={handleTranscribeFromCleaned}
+                disabled={isTranscribing || $isProcessing}
+              >
+                🎙️ Generate Lyrics from Cleaned Vocals
+              </button>
+              <p class="transcribe-hint">Use AI to re-transcribe the cleaned audio. This will replace the current lyrics.</p>
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="form-row">
       <div class="form-group half">
         <label for="artist">Artist <span class="required">*</span></label>
@@ -292,9 +434,17 @@
       </button>
     </div>
     <div class="generate-row">
-      <button class="btn btn-primary btn-generate" on:click={handleSubmit} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
-        🚀 Generate Ultrastar Files
+      <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
+        🚀 Generate Ultrastar File
       </button>
+      <button class="btn btn-secondary btn-generate" on:click={handleGenerateEmpty} disabled={$isProcessing || !$sessionId} title="Skip note alignment — open editor with empty file">
+        📄 Generate Empty Ultrastar File
+      </button>
+      {#if cleanedAudioAvailable}
+        <button class="btn btn-generate-cleaned btn-generate" on:click={() => handleSubmit(true)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
+          ✨ Generate from Cleaned Vocals
+        </button>
+      {/if}
     </div>
     {#if !$isProcessing}
       {@const missing = [!artist.trim() && 'Artist', !title.trim() && 'Title', !lyricsText.trim() && 'Lyrics'].filter(Boolean)}
@@ -336,6 +486,8 @@
     <div class="error-bar">❌ {$errorMessage}</div>
   {/if}
 </div>
+
+      {#if false}{/if}
 
 {#if whisperFallbackWarning}
   <div class="warning-modal-overlay" on:click={() => whisperFallbackWarning = false}>
@@ -381,10 +533,6 @@
 {/if}
 
 <style>
-  .step-content {
-    
-  }
-
   .warning-modal-overlay {
     position: fixed;
     inset: 0;
@@ -507,16 +655,44 @@
   }
 
   .btn-transcribe { background: #6a1b9a; color: white; font-size: 0.85rem; padding: 0.5rem 1rem; }
+  .btn-transcribe { white-space: nowrap; }
   .btn-transcribe:hover:not(:disabled) { background: #8e24aa; }
   .btn-transcribe:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .audio-section {
-    margin-bottom: 1.25rem;
+    background: linear-gradient(135deg, #1a3a3a 0%, #1a2e3a 100%);
+    border: 1px solid #2a7a7a;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
   }
 
   .audio-section audio {
     width: 100%;
     margin-bottom: 0.75rem;
+  }
+
+  .cleanup-audio-compare {
+    margin-top: 1rem;
+    border-top: 1px solid #2a4a2a;
+    padding-top: 0.75rem;
+  }
+
+  .cleanup-audio-compare audio {
+    width: 100%;
+    margin-bottom: 0.5rem;
+  }
+
+  .cleanup-transcribe-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .cleanup-transcribe-row .transcribe-hint {
+    margin: 0;
+    padding-top: 0.6rem;
   }
 
   .transcribe-area {
@@ -577,6 +753,99 @@
     margin-bottom: 1rem;
   }
 
+  .cleanup-banner {
+    background: linear-gradient(135deg, #1a3a3a 0%, #1a2e3a 100%);
+    border: 1px solid #2a7a7a;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .cleanup-banner-content {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .cleanup-banner-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .cleanup-banner-text {
+    flex: 1;
+  }
+
+  .cleanup-banner-text strong {
+    display: block;
+    color: #4fc3f7;
+    font-size: 0.95rem;
+    margin-bottom: 0.3rem;
+  }
+
+  .cleanup-banner-hint {
+    color: #aaa;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  .btn-cleanup {
+    background: #00897b;
+    color: white;
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .btn-cleanup:hover:not(:disabled) {
+    background: #00a89a;
+  }
+
+  .btn-cleanup:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .cleanup-status {
+    display: flex;
+    align-items: center;
+  }
+
+  .cleanup-status-badge {
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .cleanup-status-badge.generating {
+    background: #1a3a1a;
+    color: #4fc3f7;
+    border: 1px solid #2a7a2a;
+  }
+
+  .cleanup-status-badge.ready {
+    background: #1a3a1a;
+    color: #81c784;
+    border: 1px solid #2a7a2a;
+  }
+
+  .audio-label {
+    color: #aaa;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    margin-top: 1rem;
+  }
+
+  .audio-label:first-child {
+    margin-top: 0;
+  }
+
   .action-row {
     display: flex;
     gap: 0.5rem;
@@ -587,12 +856,24 @@
   .generate-row {
     display: flex;
     justify-content: flex-end;
-    margin-top: 0.75rem;
+    gap: 0.75rem;
+    margin-top: 28px;
+    flex-wrap: wrap;
   }
 
   .btn-generate {
     padding: 0.9rem 2rem;
     font-size: 1rem;
+  }
+
+  .btn-generate-cleaned {
+    background: #1a3a1a;
+    color: #81c784;
+    border: 1px solid #2a7a2a;
+  }
+
+  .btn-generate-cleaned:hover:not(:disabled) {
+    background: #2a4a2a;
   }
 
   .btn {

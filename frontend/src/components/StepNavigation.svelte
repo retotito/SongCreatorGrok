@@ -1,6 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentStep, steps, canGoToStep, uploadData } from '../stores/appStore.js';
+  import { currentStep, steps, canGoToStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
+  import StorageManager from './StorageManager.svelte';
+
+  let showStorage = false;
 
   export let backendStatus = 'checking';
   export let goHome = () => {};
@@ -30,9 +33,13 @@
   });
   onDestroy(() => {
     window.removeEventListener('scroll', handleScroll);
+    storageManagerOpen.set(false);
   });
 
+  $: storageManagerOpen.set(showStorage);
+
   function goToStep(num) {
+    if ($recordingActive) return;
     if (!$canGoToStep(num)) return;
 
     // Warn before entering Step 4 if no audio files are present
@@ -62,7 +69,7 @@
 
 <div class="topbar" class:topbar-hidden={!topbarVisible}>
   <div class="topbar-left">
-    <button class="home-btn" on:click={goHome} title="Back to Home">🏠</button>
+    <button class="home-btn" on:click={() => { if ($recordingActive) return; goHome(); }} disabled={$recordingActive} title={$recordingActive ? 'Disabled during recording' : 'Back to Home'}>🏠</button>
   </div>
 
   <nav class="step-nav">
@@ -71,9 +78,9 @@
         class="step-btn"
         class:active={$currentStep === step.num}
         class:completed={$currentStep > step.num}
-        class:disabled={!$canGoToStep(step.num)}
+        class:disabled={!$canGoToStep(step.num) || $recordingActive}
         on:click={() => goToStep(step.num)}
-        disabled={!$canGoToStep(step.num)}
+        disabled={!$canGoToStep(step.num) || $recordingActive}
       >
         <span class="step-icon">{step.icon}</span>
         <span class="step-label">{step.label}</span>
@@ -95,8 +102,13 @@
         {/if}
       </div>
     {/if}
+    <button class="gear-btn" on:click={() => showStorage = !showStorage} title="Storage Manager">⚙️</button>
   </div>
 </div>
+
+{#if showStorage}
+  <StorageManager on:close={() => showStorage = false} />
+{/if}
 
 <!--
 <div class="step-actions">
@@ -254,7 +266,26 @@
   .topbar-right {
     min-width: 160px;
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .gear-btn {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0.2rem 0.35rem;
+    line-height: 1;
+    color: #888;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .gear-btn:hover {
+    background: #1e2040;
+    border-color: #333;
+    color: #ccc;
   }
 
   .backend-status {

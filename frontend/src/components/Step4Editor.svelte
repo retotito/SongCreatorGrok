@@ -1,7 +1,8 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState } from '../services/api.js';
+  import { onMount, onDestroy, tick } from 'svelte';
+  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
+  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato } from '../services/api.js';
+  import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
 
@@ -15,6 +16,7 @@
   let gapMs = 0;
   let audioDuration = 0;
   let vocalUrl = '';
+  let currentAudioUrl = ''; // drives the <audio> src — updated by switchAudioSource
 
   // Raw ms timings for BPM re-quantization
   let rawTimings = [];   // syllable_timings from backend (start/end in seconds)
@@ -31,6 +33,11 @@
   let autosaveInterval = null;
   let toastMsg = '';        // brief status message shown as a toast
   let toastTimer = null;
+  let toastCenter = false;
+  let uiBusy = false;
+  let editedAudioLoading = false;
+  let waveformLoading = false;
+  let waveformLoadToken = 0;
 
   // View state
   let scrollX = 0;
@@ -70,6 +77,24 @@
     return Math.min(maxX, Math.max(minX, x));
   }
 
+  // Keep a target beat visible with a small edge padding while preserving current context.
+  function ensureBeatVisible(beat, edgePaddingPx = 56) {
+    const w = canvasEl?.width || canvasW || 800;
+    const x = beatToX(beat);
+    let next = scrollX;
+    if (x < edgePaddingPx) {
+      next = clampScrollX(scrollX - (edgePaddingPx - x));
+    } else if (x > w - edgePaddingPx) {
+      next = clampScrollX(scrollX + (x - (w - edgePaddingPx)));
+    }
+    if (next !== scrollX) scrollX = next;
+  }
+
+  function nudgeViewport(deltaPx) {
+    scrollX = clampScrollX(scrollX + deltaPx);
+    draw();
+  }
+
   // While dragging loop boundaries, auto-scroll only when the pointer is outside the canvas.
   function autoScrollAtCanvasEdge(mx) {
     const w = canvasEl?.width || canvasW || 800;
@@ -98,6 +123,36 @@
   function clampDragXToCanvas(mx) {
     const w = canvasEl?.width || canvasW || 800;
     return Math.max(1, Math.min(w - 1, mx));
+  }
+
+  function getVisibleBeatBounds() {
+    const w = canvasEl?.width || canvasW || 800;
+    return {
+      minBeat: xToBeat(0),
+      maxBeat: xToBeat(w),
+    };
+  }
+
+  function clampValue(value, min, max) {
+    if (max < min) return min;
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function clampNoteStartToVisibleCanvas(startBeat, duration) {
+    const { minBeat, maxBeat } = getVisibleBeatBounds();
+    const minStart = Math.ceil(minBeat);
+    const maxStart = Math.floor(maxBeat - duration);
+    return clampValue(startBeat, minStart, maxStart);
+  }
+
+  function clampSelectedMoveDeltaToVisibleCanvas(moveDelta, selection) {
+    if (!selection?.length) return moveDelta;
+    const { minBeat, maxBeat } = getVisibleBeatBounds();
+    const selectionStart = Math.min(...selection.map(note => note.startBeat));
+    const selectionEnd = Math.max(...selection.map(note => note.startBeat + note.duration));
+    const minDelta = Math.ceil(minBeat - selectionStart);
+    const maxDelta = Math.floor(maxBeat - selectionEnd);
+    return clampValue(moveDelta, minDelta, maxDelta);
   }
 
   // Rubber-band (box) selection
@@ -135,13 +190,41 @@
   let flagIdCounter = 1;
   let selectedFlag = null;
 
+  function normalizeFlag(flag) {
+    const beat = Math.round(Number(flag?.beat) || 0);
+    const parsedTimeMs = Number(flag?.timeMs);
+    const timeMs = Number.isFinite(parsedTimeMs)
+      ? Math.max(0, parsedTimeMs)
+      : Math.max(0, beatToTime(beat) * 1000);
+    return {
+      id: Number(flag?.id),
+      beat: Math.round(timeToBeat(timeMs / 1000)),
+      timeMs,
+    };
+  }
+
+  function resyncFlagsToGrid() {
+    if (!flags.length) return;
+    flags = flags.map(normalizeFlag);
+    saveFlags();
+  }
+
+  // Vocal cleanup segments (waveform-only helper ranges)
+  let cleanupSegments = []; // { id, startMs, endMs }
+  let cleanupSegmentIdCounter = 1;
+  let selectedCleanupSegment = null;
+  let cleanupDrag = null; // { id, mode, startMs, endMs, mouseStartMs }
+  let cleanupKeyboardSaveTimer = null;
+  const cleanupJoinMaxGapMs = 150;
+  let cleanupSegmentsHavePatchedMetadata = false;
+
   function loadFlags() {
     if (!$sessionId) return;
     try {
       const raw = localStorage.getItem(`editor_flags_${$sessionId}`);
       if (raw) {
         const parsed = JSON.parse(raw);
-        flags = parsed.flags || [];
+        flags = (parsed.flags || []).map(normalizeFlag);
         flagIdCounter = (parsed.counter || 0) + 1;
       }
     } catch { /* ignore */ }
@@ -153,7 +236,16 @@
   }
 
   function addFlagAt(beat) {
-    flags = [...flags, { id: flagIdCounter++, beat: Math.round(beat) }];
+    const snappedBeat = Math.round(beat);
+    const newFlagId = flagIdCounter++;
+    flags = [...flags, {
+      id: newFlagId,
+      beat: snappedBeat,
+      timeMs: Math.max(0, beatToTime(snappedBeat) * 1000),
+    }];
+    selectedFlag = newFlagId;
+    selectedNote = null;
+    selectedNotes = new Set();
     saveFlags();
     closeContextMenu();
     draw();
@@ -167,10 +259,544 @@
     draw();
   }
 
+  function getGridNudgeStep() {
+    return zoom >= 4 ? 1 : BEATS_PER_QUARTER / 2;
+  }
+
+  function clampBeatToSongBounds(beat) {
+    const minBeat = snapBeatValue(timeToBeat(0));
+    const maxBeat = snapBeatValue(timeToBeat(Math.max(0, audioDuration || 0)));
+    return Math.max(minBeat, Math.min(maxBeat, beat));
+  }
+
+  function nudgeFlag(id, delta) {
+    const flag = flags.find(f => f.id === id);
+    if (!flag) return;
+    const step = getGridNudgeStep();
+    flag.beat = clampBeatToSongBounds(
+      snapBeatValue(flag.beat + (delta < 0 ? -step : step))
+    );
+    flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
+    flags = [...flags];
+    ensureBeatVisible(flag.beat);
+    selectedFlag = flag.id;
+    saveFlags();
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function nudgeBreak(noteId, delta) {
+    const step = getGridNudgeStep();
+    let moved = false;
+    let movedBeat = null;
+    pushUndo();
+    notes = notes.map(n => {
+      if (n.id !== noteId || n.type !== 'break') return n;
+      moved = true;
+      movedBeat = clampBeatToSongBounds(
+        snapBeatValue(n.startBeat + (delta < 0 ? -step : step))
+      );
+      return {
+        ...n,
+        startBeat: movedBeat,
+      };
+    });
+    if (!moved) return;
+    if (movedBeat !== null) ensureBeatVisible(movedBeat);
+    markUnsaved();
+    closeContextMenu();
+    draw();
+  }
+
+  function clearMarkerSelection() {
+    selectedFlag = null;
+    selectedNote = null;
+    selectedNotes = new Set();
+  }
+
+  function clearCleanupKeyboardSaveTimer() {
+    if (cleanupKeyboardSaveTimer) {
+      clearTimeout(cleanupKeyboardSaveTimer);
+      cleanupKeyboardSaveTimer = null;
+    }
+  }
+
+  function scheduleCleanupKeyboardSave() {
+    clearCleanupKeyboardSaveTimer();
+    cleanupKeyboardSaveTimer = setTimeout(() => {
+      cleanupKeyboardSaveTimer = null;
+      if (hasUnsavedChanges || cleanedAudioDirty) handleSave();
+    }, 500);
+  }
+
+  function getCleanupKeyboardStepMs(largeStep = false) {
+    const beatStep = getGridNudgeStep() * (largeStep ? 4 : 1);
+    return (15000 / bpm) * beatStep;
+  }
+
+  function adjustSelectedCleanupSegment(mode, direction, largeStep = false) {
+    if (selectedCleanupSegment === null) return false;
+    const seg = cleanupSegments.find(s => s.id === selectedCleanupSegment);
+    if (!seg || segRecPatched.has(seg.id)) return false;
+
+    const stepMs = getCleanupKeyboardStepMs(largeStep) * (direction > 0 ? 1 : -1);
+    const CLAMP_GAP = 10;
+    const sortedOthers = cleanupSegments.filter(s => s.id !== seg.id).sort((a, b) => a.startMs - b.startMs);
+    const prevN = [...sortedOthers].reverse().find(s => s.endMs <= seg.startMs);
+    const nextN = sortedOthers.find(s => s.startMs >= seg.endMs);
+    const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
+    const songEndMs = Math.max(0, (audioEl?.duration || audioDuration || 0) * 1000);
+    const maxEndBound = songEndMs > 0 ? songEndMs : Infinity;
+    const maxEnd = nextN ? Math.min(nextN.startMs - CLAMP_GAP, maxEndBound) : maxEndBound;
+
+    let changed = false;
+    pushUndo();
+    cleanupSegments = cleanupSegments.map(current => {
+      if (current.id !== seg.id) return current;
+
+      if (mode === 'move') {
+        const duration = current.endMs - current.startMs;
+        let newStart = current.startMs + stepMs;
+        newStart = Math.max(minStart, newStart);
+        if (isFinite(maxEnd)) newStart = Math.min(maxEnd - duration, newStart);
+        if (newStart === current.startMs) return current;
+        changed = true;
+        return { ...current, startMs: newStart, endMs: newStart + duration };
+      }
+
+      if (mode === 'start') {
+        let newStart = current.startMs + stepMs;
+        newStart = Math.max(minStart, newStart);
+        newStart = Math.min(current.endMs - 50, newStart);
+        if (newStart === current.startMs) return current;
+        changed = true;
+        return { ...current, startMs: newStart };
+      }
+
+      if (mode === 'end') {
+        let newEnd = current.endMs + stepMs;
+        if (isFinite(maxEnd)) newEnd = Math.min(maxEnd, newEnd);
+        newEnd = Math.max(current.startMs + 50, newEnd);
+        if (newEnd === current.endMs) return current;
+        changed = true;
+        return { ...current, endMs: newEnd };
+      }
+
+      return current;
+    }).map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+
+    if (!changed) return false;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    scheduleCleanupKeyboardSave();
+    draw();
+    return true;
+  }
+
+  function normalizeCleanupSegment(seg) {
+    const a = Number(seg.startMs);
+    const b = Number(seg.endMs);
+    const startMs = Math.min(a, b);
+    const endMs = Math.max(a, b);
+    if (endMs - startMs < 50) {
+      return { ...seg, startMs, endMs: startMs + 50 };
+    }
+    return { ...seg, startMs, endMs };
+  }
+
+  function findCleanupOverlap(startMs, endMs, excludeId = null) {
+    const rangeStart = Math.min(startMs, endMs);
+    const rangeEnd = Math.max(startMs, endMs);
+    return cleanupSegments.find(seg => {
+      if (excludeId !== null && seg.id === excludeId) return false;
+      return rangeStart < seg.endMs && rangeEnd > seg.startMs;
+    }) || null;
+  }
+
+  function serializeCleanupSegments() {
+    return cleanupSegments
+      .map(s => ({
+        start_ms: s.startMs,
+        end_ms: s.endMs,
+        patched: segRecPatched.has(s.id),
+      }))
+      .sort((a, b) => a.start_ms - b.start_ms);
+  }
+
+  function serializeCleanupSegmentsForCleaning() {
+    // Do not mute regions that were replaced by user recordings.
+    return cleanupSegments
+      .filter(s => !segRecPatched.has(s.id))
+      .map(s => ({ start_ms: s.startMs, end_ms: s.endMs }))
+      .sort((a, b) => a.start_ms - b.start_ms);
+  }
+
+  function setCleanupSegmentsFromApi(segments = []) {
+    const parsed = [];
+    let hasPatchedField = false;
+    const patchedIds = new Set();
+    for (const seg of segments) {
+      // Support both ms format (new) and beat format (legacy)
+      let startMs, endMs;
+      if (seg?.start_ms != null) {
+        startMs = Number(seg.start_ms);
+        endMs = Number(seg.end_ms);
+      } else if (seg?.start_beat != null) {
+        // Legacy: convert beats to ms using current bpm/gapMs
+        startMs = (beatToTime(Number(seg.start_beat))) * 1000;
+        endMs = (beatToTime(Number(seg.end_beat))) * 1000;
+      } else continue;
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
+      const parsedSeg = normalizeCleanupSegment({
+        id: cleanupSegmentIdCounter++,
+        startMs,
+        endMs,
+      });
+      parsed.push(parsedSeg);
+      if (Object.prototype.hasOwnProperty.call(seg || {}, 'patched')) {
+        hasPatchedField = true;
+        if (seg?.patched) patchedIds.add(parsedSeg.id);
+      }
+    }
+    cleanupSegments = parsed.sort((a, b) => a.startMs - b.startMs);
+    cleanupSegmentsHavePatchedMetadata = hasPatchedField;
+    segRecPatched = hasPatchedField ? patchedIds : new Set();
+    selectedCleanupSegment = null;
+    cleanupDrag = null;
+  }
+
+  function addCleanupSegmentAtMs(startMs) {
+    pushUndo();
+    let segStartMs = startMs;
+    let segEndMs = startMs + Math.max(500, (15000 / bpm));
+
+    // If user adds a cleanup segment from within an active loop,
+    // default the segment to exactly match loop boundaries.
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      const loopStartMs = beatToTime(Math.min(loopStartBeat, loopEndBeat)) * 1000;
+      const loopEndMs = beatToTime(Math.max(loopStartBeat, loopEndBeat)) * 1000;
+      if (startMs >= loopStartMs && startMs <= loopEndMs) {
+        segStartMs = loopStartMs;
+        segEndMs = loopEndMs;
+      }
+    }
+
+    const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs: segStartMs, endMs: segEndMs });
+    const overlap = findCleanupOverlap(seg.startMs, seg.endMs);
+    if (overlap) {
+      showToast('Cleanup segments cannot overlap', 4000, true);
+      return;
+    }
+    console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${seg.startMs.toFixed(0)} endMs=${seg.endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
+    cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
+    selectedCleanupSegment = seg.id;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
+  async function restoreSegmentRangeFromSource(startMs, endMs) {
+    const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_ms: startMs, end_ms: endMs })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data?.detail || data?.message || 'Restore request failed');
+    }
+    if (data?.note === 'no original vocal to restore from') {
+      throw new Error('This session has no vocals source baseline to restore from.');
+    }
+    const cacheBust = `?v=${Date.now()}`;
+    vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+    return data;
+  }
+
+  async function deleteCleanupSegment(id) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
+    console.log(`[CleanupSeg] Delete segment id=${id} startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} | remaining=${cleanupSegments.length - 1} | wasSpliced=${segRecPatched.has(id)}`);
+    pushUndo();
+
+    // Always restore source-truth audio for the deleted segment range.
+    try {
+      const data = await restoreSegmentRangeFromSource(seg.startMs, seg.endMs);
+      console.log(`[CleanupSeg] Restored original audio for segment ${id}:`, data);
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+    } catch (e) {
+      console.warn('[CleanupSeg] Restore failed:', e);
+      const msg = String(e?.message || '');
+      // Fresh/unspliced sessions may not have a saved demucs baseline.
+      // For non-recorded segments, deleting is still safe because no splice was applied.
+      if (!(segRecPatched.has(id) === false && msg.includes('no saved original demucs vocal'))) {
+        showToast(e?.message || 'Failed to restore source audio for this segment');
+        return;
+      }
+    }
+
+    cleanupSegments = cleanupSegments.filter(s => s.id !== id);
+    if (serializeCleanupSegmentsForCleaning().length === 0) {
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+    }
+    if (selectedCleanupSegment === id) selectedCleanupSegment = null;
+    if (cleanupSegments.length === 0) {
+      cleanedAudioAvailable = false;
+      // Auto-switch back to vocals (uses updated vocalUrl after restore above)
+      if (audioSource === 'edited') switchAudioSource('vocals');
+    } else if (audioSource === 'edited') {
+      // Refresh edited source using canonical resolver (cleaned preferred).
+      switchAudioSource('edited');
+    }
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
+  async function emptyRecordedCleanupSegment(id) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg || !segRecPatched.has(id)) return;
+    pushUndo();
+    try {
+      const data = await restoreSegmentRangeFromSource(seg.startMs, seg.endMs);
+      console.log(`[CleanupSeg] Emptied recorded segment id=${id}:`, data);
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
+      cleanedAudioAvailable = false;
+      cleanedAudioCacheBust = '';
+      cleanedAudioDirty = true;
+      markUnsaved();
+      closeContextMenu();
+      draw();
+      handleSave();
+    } catch (e) {
+      console.warn('[CleanupSeg] Empty recorded segment failed:', e);
+      showToast(e?.message || 'Failed to empty recorded segment');
+    }
+  }
+
+  function splitCleanupSegmentAtMs(id, splitMs) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
+    if (splitMs <= seg.startMs + 50 || splitMs >= seg.endMs - 50) {
+      showToast('Split point too close to segment edge');
+      return;
+    }
+
+    pushUndo();
+    const rightSeg = normalizeCleanupSegment({
+      id: cleanupSegmentIdCounter++,
+      startMs: splitMs,
+      endMs: seg.endMs,
+    });
+    seg.endMs = splitMs;
+    cleanupSegments = [...cleanupSegments, rightSeg]
+      .map(normalizeCleanupSegment)
+      .sort((a, b) => a.startMs - b.startMs);
+
+    // Splitting a recorded segment means both resulting subranges remain recorded.
+    if (segRecPatched.has(id)) {
+      segRecPatched = new Set([...segRecPatched, rightSeg.id]);
+    }
+
+    selectedCleanupSegment = rightSeg.id;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
+  function getJoinableCleanupPairAtMs(splitMs) {
+    if (!Number.isFinite(splitMs)) return null;
+    const sorted = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const left = sorted[i];
+      const right = sorted[i + 1];
+      if (splitMs <= left.endMs || splitMs >= right.startMs) continue;
+      const gapMs = Math.max(0, right.startMs - left.endMs);
+      if (gapMs > cleanupJoinMaxGapMs) continue;
+      const leftPatched = segRecPatched.has(left.id);
+      const rightPatched = segRecPatched.has(right.id);
+      if (leftPatched !== rightPatched) return null;
+      return { left, right, patched: leftPatched };
+    }
+    return null;
+  }
+
+  function getJoinableCleanupNeighborsForSegment(id) {
+    const sorted = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
+    const idx = sorted.findIndex(s => s.id === id);
+    if (idx === -1) return { left: null, right: null };
+
+    const curr = sorted[idx];
+    const leftSeg = idx > 0 ? sorted[idx - 1] : null;
+    const rightSeg = idx < sorted.length - 1 ? sorted[idx + 1] : null;
+    const leftGapMs = leftSeg ? Math.max(0, curr.startMs - leftSeg.endMs) : Infinity;
+    const rightGapMs = rightSeg ? Math.max(0, rightSeg.startMs - curr.endMs) : Infinity;
+
+    const left = leftSeg && leftGapMs <= cleanupJoinMaxGapMs && segRecPatched.has(leftSeg.id) === segRecPatched.has(curr.id)
+      ? { left: leftSeg, right: curr }
+      : null;
+    const right = rightSeg && rightGapMs <= cleanupJoinMaxGapMs && segRecPatched.has(rightSeg.id) === segRecPatched.has(curr.id)
+      ? { left: curr, right: rightSeg }
+      : null;
+
+    return { left, right };
+  }
+
+  function joinCleanupSegments(leftId, rightId) {
+    const left = cleanupSegments.find(s => s.id === leftId);
+    const right = cleanupSegments.find(s => s.id === rightId);
+    if (!left || !right) return;
+    const gapMs = Math.max(0, right.startMs - left.endMs);
+    if (gapMs > cleanupJoinMaxGapMs) {
+      showToast(`Segments must be touching or within ${cleanupJoinMaxGapMs}ms to join`);
+      return;
+    }
+    const leftPatched = segRecPatched.has(left.id);
+    const rightPatched = segRecPatched.has(right.id);
+    if (leftPatched !== rightPatched) {
+      showToast('Cannot join recorded and clean segments');
+      return;
+    }
+
+    pushUndo();
+    left.endMs = Math.max(left.endMs, right.endMs);
+    cleanupSegments = cleanupSegments
+      .filter(s => s.id !== right.id)
+      .map(normalizeCleanupSegment)
+      .sort((a, b) => a.startMs - b.startMs);
+    if (rightPatched) {
+      segRecPatched = new Set([...segRecPatched].filter(x => x !== right.id));
+    }
+    selectedCleanupSegment = left.id;
+    cleanedAudioDirty = true;
+    markUnsaved();
+    closeContextMenu();
+    draw();
+    handleSave();
+  }
+
+  function getEditedAudioUrl() {
+    // Prefer cleaned audio whenever it exists (it includes latest cleanup muting,
+    // and on backend it is generated from the current vocal source, including splices).
+    if (cleanedAudioAvailable) return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
+    // Fallback to patched vocal when no cleaned file exists yet.
+    if (segRecPatched.size > 0) return vocalUrl;
+    // Last fallback should still be a real vocals source, never /cleaned.
+    return originalVocalUrl || vocalUrl;
+  }
+
+  function nudgeCleanupSegment(id, deltaMs) {
+    const seg = cleanupSegments.find(s => s.id === id);
+    if (!seg) return;
+    pushUndo();
+    const nextStartMs = seg.startMs + deltaMs;
+    const nextEndMs = seg.endMs + deltaMs;
+    if (findCleanupOverlap(nextStartMs, nextEndMs, id)) {
+      showToast('Cleanup segments cannot overlap', 4000, true);
+      return;
+    }
+    seg.startMs = nextStartMs;
+    seg.endMs = nextEndMs;
+    cleanupSegments = [...cleanupSegments].sort((a, b) => a.startMs - b.startMs);
+    markUnsaved();
+    draw();
+    closeContextMenu();
+  }
+
+  function hitTestCleanupSegment(mx, my) {
+    if (!showWaveform || my > waveTop()) return null;
+    for (let i = cleanupSegments.length - 1; i >= 0; i--) {
+      const seg = cleanupSegments[i];
+      const sx = beatToX(timeToBeat(seg.startMs / 1000));
+      const ex = beatToX(timeToBeat(seg.endMs / 1000));
+      const left = Math.min(sx, ex);
+      const right = Math.max(sx, ex);
+      if (Math.abs(mx - left) <= 2) return { id: seg.id, mode: 'start' };
+      if (Math.abs(mx - right) <= 2) return { id: seg.id, mode: 'end' };
+      if (mx >= left && mx <= right) return { id: seg.id, mode: 'move' };
+    }
+    return null;
+  }
+
   // Context menu
-  let contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+  let contextMenu = {
+    visible: false,
+    x: 0,
+    y: 0,
+    noteId: null,
+    isBreak: false,
+    isEmpty: false,
+    isFlag: false,
+    isPasteMenu: false,
+    isCleanup: false,
+    isWaveformEmpty: false,
+    flagId: null,
+    cleanupId: null,
+    beat: 0,
+    ms: null,
+    pitch: 0,
+    traceFrame: null,
+  };
   let editingSyllable = '';
   let contextMenuEl;
+
+  // Segment local regenerate modal (prototype)
+  let segRegenModalOpen = false;
+  let segRegenMode = 'lyrics_first'; // 'lyrics_first' | 'one_go'
+  let segRegenRange = {
+    sourceType: 'cleanup', // 'cleanup' | 'loop'
+    cleanupId: null,
+    startMs: 0,
+    endMs: 0,
+  };
+  let segRegenModalX = 28;
+  let segRegenModalY = 84;
+  let segRegenModalDragging = false;
+  let segRegenModalDragOffsetX = 0;
+  let segRegenModalDragOffsetY = 0;
+  let segRegenLanguage = 'auto';
+  let segRegenPreset = 'balanced';
+  let segRegenAudioSource = 'vocals'; // 'vocals' | 'edited'
+  let segRegenCurrentEditorSource = 'vocals'; // 'vocals' | 'edited' (badge-only)
+  let segRegenPreviewLoading = false;
+  let segRegenPreviewError = '';
+  let segRegenPreviewLines = [];
+  let segRegenPreviewConfidence = null;
+  let segRegenAutoHyphenate = true;
+  let segRegenHyphenateLoading = false;
+  let segRegenPreviewHyphenated = false;
+  let segRegenGenerateLoading = false;
+  $: segRegenModalBlocking = segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading;
+  $: segRegenModalBlockingLabel = segRegenGenerateLoading
+    ? 'Generating notes...'
+    : segRegenHyphenateLoading
+      ? 'Applying hyphenation...'
+      : 'Recognizing lyrics...';
+
+  // Vibrato tool modal
+  let vibratoModalOpen = false;
+  let vibratoModalX = 40;
+  let vibratoModalY = 96;
+  let vibratoModalDragging = false;
+  let vibratoModalDragOffsetX = 0;
+  let vibratoModalDragOffsetY = 0;
+  let vibratoNoteId = null;
+  let vibratoAudioSource = 'vocals'; // 'vocals' | 'edited'
+  let vibratoCurrentEditorSource = 'vocals';
+  let vibratoLoading = false;
+  let vibratoError = '';
+  let vibratoSegments = []; // [{ start_sec, end_sec, pitch }]
+  let vibratoSensitivity = 'balanced'; // 'subtle' | 'balanced' | 'strict'
 
   // Undo/Redo history
   let undoStack = [];
@@ -189,6 +815,72 @@
 
   // Playback speed
   let playbackRate = 1.0;
+
+  function getEditorUiPrefsKey() {
+    return $sessionId ? `editor_ui_prefs_${$sessionId}` : null;
+  }
+
+  function saveEditorUiPrefs(reason = 'unknown') {
+    const key = getEditorUiPrefsKey();
+    if (!key) return;
+    const payload = {
+      scrollMode,
+      playbackRate,
+      audioSource,
+      audioVolume,
+      midiPlayback,
+      metronomeEnabled,
+      waveformHeight,
+      micDeviceId,
+      vibratoModalX,
+      vibratoModalY,
+    };
+    localStorage.setItem(key, JSON.stringify(payload));
+    console.log('[Step4] Saved UI prefs', { reason, ...payload });
+  }
+
+  function restoreEditorUiPrefs() {
+    const key = getEditorUiPrefsKey();
+    if (!key) return null;
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    try {
+      const prefs = JSON.parse(raw);
+      console.log('[Step4] Loaded UI prefs', prefs);
+      return prefs;
+    } catch (err) {
+      console.warn('[Step4] Failed to parse UI prefs, ignoring', err);
+      return null;
+    }
+  }
+
+  function resolvePreferredAudioSource(preferred) {
+    const editedAvailable = hasVocalsAudio && (cleanedAudioAvailable || segRecPatched.size > 0);
+    if (preferred === 'edited' && editedAvailable) return 'edited';
+    if (preferred === 'vocals' && hasVocalsAudio) return 'vocals';
+    if (preferred === 'original' && hasOriginalAudio) return 'original';
+    // Fallback policy: prefer full mix when preferred source is unavailable.
+    if (hasOriginalAudio) return 'original';
+    if (hasVocalsAudio) return editedAvailable ? 'edited' : 'vocals';
+    return 'original';
+  }
+
+  function toggleScrollMode() {
+    scrollMode = !scrollMode;
+    saveEditorUiPrefs('scroll-mode');
+  }
+
+  // Keep AI modal "(current)" source badge in sync with editor source,
+  // but ignore full-mix/original while the modal is open.
+  $: if (segRegenModalOpen) {
+    if (audioSource === 'edited') segRegenCurrentEditorSource = 'edited';
+    else if (audioSource === 'vocals') segRegenCurrentEditorSource = 'vocals';
+  }
+
+  $: if (vibratoModalOpen) {
+    if (audioSource === 'edited') vibratoCurrentEditorSource = 'edited';
+    else if (audioSource === 'vocals') vibratoCurrentEditorSource = 'vocals';
+  }
 
   // MIDI pitch playback during track play
   let midiPlayback = false;
@@ -219,12 +911,171 @@
   let metronomeEnabled = false;
   let metronomeCtx = null;
   let lastMetronomeBeat = -1; // tracks which quarter-note beat we last clicked
-  let metronomeOffset = 0;    // offset in ultrastar beats (0 = on beat, 4 = half beat / 8th note off)
-  let metronomeDivisor = 1;   // 1=quarter note, 2=half note, 4=bar click
+  let metronomeOffset = 0;    // fallback offset when no downbeat anchor is defined
+  let metronomeToolOpen = false;
+  let metronomeToolX = 36;
+  let metronomeToolY = 180;
+  let metronomeToolDragging = false;
+  let metronomeToolDragOffsetX = 0;
+  let metronomeToolDragOffsetY = 0;
+  let metronomePickTarget = 0; // 0 = idle, 1 = set first downbeat, 2 = set second downbeat
+  let metronomePickHoverBeat = null;
+  let metronomeDownbeat1Beat = null;
+  let metronomeDownbeat2Beat = null;
+  let metronomeManualDownbeatAnchorBeat = null;
+  let metronomeManualDownbeatInterval = null;
+  let metronomeManualBeatUnitInterval = null;
+  let metronomeSigNumerator = 4;
+  let metronomeSigDenominator = 4;
+  let metronomeSpeedFactor = 1;
+  const METRONOME_SIGNATURE_NUM_OPTIONS = [2, 3, 4, 5, 6, 7, 9, 12];
+  const METRONOME_SIGNATURE_DEN_OPTIONS = [2, 4, 5, 8, 16];
   // BEATS_PER_QUARTER: US-BPM / 30 = quarter note duration in US beats (Bohning ×4 convention)
   // e.g. BPM=480 → 16, BPM=400 → ~13.3, BPM=200 → ~6.7. Recalculated reactively when bpm changes.
   $: BEATS_PER_QUARTER = bpm > 0 ? Math.round(bpm / 30) : 8;
   $: BEATS_PER_MEASURE = BEATS_PER_QUARTER * 4;
+
+  function getMetronomeSignatureIntervalBeats() {
+    const numerator = Number(metronomeSigNumerator);
+    const denominator = Number(metronomeSigDenominator);
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return null;
+    const unitBeats = (BEATS_PER_QUARTER * 4) / denominator;
+    const interval = unitBeats * numerator;
+    if (!Number.isFinite(interval) || interval <= 0) return null;
+    return interval;
+  }
+
+  function getMetronomeBeatUnitInterval() {
+    if (metronomeManualBeatUnitInterval && metronomeManualBeatUnitInterval > 0) return metronomeManualBeatUnitInterval;
+    return BEATS_PER_QUARTER;
+  }
+
+  function getMetronomeClickInterval() {
+    return getMetronomeBeatUnitInterval();
+  }
+
+  function getMetronomeDownbeatAnchorBeat() {
+    if (metronomeManualDownbeatAnchorBeat !== null) return metronomeManualDownbeatAnchorBeat;
+    if (downbeatFromHeader) {
+      const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
+      return Math.round(exactBeat);
+    }
+    return metronomeOffset;
+  }
+
+  function getMetronomeDownbeatInterval() {
+    return metronomeManualDownbeatInterval || BEATS_PER_MEASURE;
+  }
+
+  function getMetronomeClickOffset() {
+    const clickInterval = getMetronomeClickInterval();
+    const anchorBeat = getMetronomeDownbeatAnchorBeat();
+    return ((anchorBeat % clickInterval) + clickInterval) % clickInterval;
+  }
+
+  function clearMetronomePickTarget() {
+    metronomePickTarget = 0;
+    metronomePickHoverBeat = null;
+    if (canvasEl && !setGapMode) canvasEl.style.cursor = '';
+  }
+
+  function armMetronomeDownbeatPick(target) {
+    console.log(`[MetronomeTool] Arm pick target=${target} bpm=${bpm} BEATS_PER_QUARTER=${BEATS_PER_QUARTER}`);
+    if (!metronomeEnabled) return;
+    if (isPlaying) {
+      showToast('Pause playback before setting downbeats');
+      return;
+    }
+    if (setGapMode || gridAlignMode) {
+      showToast('Exit GAP/Grid align mode first');
+      return;
+    }
+    metronomePickTarget = target;
+    metronomePickHoverBeat = null;
+    if (canvasEl) canvasEl.style.cursor = 'crosshair';
+    showToast(`Metronome: click grid line for downbeat ${target}`);
+    draw();
+  }
+
+  function recalcMetronomeFromControls(reason = 'manual') {
+    const isLoad = reason === 'load';
+    if (metronomeDownbeat1Beat === null) {
+      console.log('[MetronomeTool] Recalc skipped (DB1 not set)', { reason });
+      return false;
+    }
+    const numerator = Number(metronomeSigNumerator);
+    const denominator = Number(metronomeSigDenominator);
+    if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+      showToast('Invalid time signature');
+      return false;
+    }
+    // Compute BEATS_PER_QUARTER directly from current bpm — do NOT use the reactive
+    // $: variable because inside an async load function Svelte may not have re-evaluated
+    // it yet, producing stale (wrong) intervals.
+    const currentBpq = bpm > 0 ? Math.round(bpm / 30) : 8;
+    const beatUnitInterval = (currentBpq * 4) / denominator;
+    const downbeatInterval = beatUnitInterval * numerator;
+    if (!Number.isFinite(beatUnitInterval) || !Number.isFinite(downbeatInterval) || beatUnitInterval <= 0 || downbeatInterval <= 0) {
+      showToast('Cannot calculate metronome intervals from current BPM/signature');
+      return false;
+    }
+    const speed = Math.max(0.25, Number(metronomeSpeedFactor) || 1);
+    const effectiveBeatUnitInterval = beatUnitInterval / speed;
+    const effectiveDownbeatInterval = downbeatInterval / speed;
+    metronomeManualDownbeatAnchorBeat = metronomeDownbeat1Beat;
+    metronomeManualBeatUnitInterval = effectiveBeatUnitInterval;
+    metronomeManualDownbeatInterval = effectiveDownbeatInterval;
+    lastMetronomeBeat = -1;
+    console.log('[MetronomeTool] Recalculated', {
+      reason,
+      db1: metronomeDownbeat1Beat,
+      numerator,
+      denominator,
+      bpm,
+      currentBpq,
+      reactiveBpq: BEATS_PER_QUARTER,
+      beatUnitInterval,
+      downbeatInterval,
+      effectiveBeatUnitInterval,
+      effectiveDownbeatInterval,
+      speedFactor: metronomeSpeedFactor,
+    });
+    if (!isLoad) markUnsaved();
+    draw();
+    return true;
+  }
+
+  function nudgeMetronomeSpeed(direction) {
+    const prev = metronomeSpeedFactor;
+    if (direction === 'faster') {
+      metronomeSpeedFactor = Math.min(8, metronomeSpeedFactor * 2);
+    } else {
+      metronomeSpeedFactor = Math.max(0.25, metronomeSpeedFactor / 2);
+    }
+    if (prev !== metronomeSpeedFactor) {
+      lastMetronomeBeat = -1;
+      showToast(`Metronome speed x${metronomeSpeedFactor}`);
+      recalcMetronomeFromControls('speed-change');
+      markUnsaved();
+    }
+  }
+
+  function clearMetronomeDownbeatReference() {
+    metronomeDownbeat1Beat = null;
+    metronomeDownbeat2Beat = null;
+    metronomeManualDownbeatAnchorBeat = null;
+    metronomeManualDownbeatInterval = null;
+    metronomeManualBeatUnitInterval = null;
+    metronomeSpeedFactor = 1;
+    clearMetronomePickTarget();
+    lastMetronomeBeat = -1;
+    showToast('Metronome downbeats reset');
+    draw();
+  }
+
+  function applyManualMetronomeDownbeats() {
+    return recalcMetronomeFromControls('legacy-apply');
+  }
 
   // Downbeat offset: ms from audio 0s to first downbeat
   let downbeatOffsetMs = 0;
@@ -295,8 +1146,11 @@
   let bpmCalcResult = null; // { bpm, gapMs } computed from linear regression
 
   // Audio source toggle (vocals vs full mix)
-  let audioSource = 'vocals'; // 'vocals' | 'original'
+  let audioSource = 'vocals'; // 'vocals' | 'edited' | 'original'
   let originalUrl = '';
+  let originalVocalUrl = ''; // frozen at load — never changed by splices
+  let cleanedAudioAvailable = false; // true when cleaned_vocal_path exists on backend
+  let cleanedAudioCacheBust = ''; // appended to /cleaned URL to force browser reload
   let hasVocalsAudio = true;
   let hasOriginalAudio = true;
 
@@ -321,7 +1175,15 @@
   let micGainNode = null;   // GainNode for mic volume control
   let pitchTolerance = 1;   // semitone hit tolerance: 1=hard, 2=medium, 3=easy
   let micLevel = 0;         // current mic input level (0-1) for indicator
+  let micPeakLevel = 0;     // peak-hold level for visibility
+  let micOversteering = false;
+  let micOversteerTimer = null;
   let micLevelTimer = null; // interval for level polling
+  let micDisconnectHandled = false;
+  let micTrackEndedHandler = null;
+  let micTrackMuteHandler = null;
+  let mediaDeviceChangeHandler = null;
+  const MIC_EVENT_TOAST_MS = 4000;
   // Sticky prediction state for smoothing
   let micLastPitch = -1;
   let micPitchConfidence = 0;
@@ -330,6 +1192,36 @@
   // USDX-style sung note tracking: Map<noteId, [{beat, sungPitch, isHit}]>
   let micNoteHits = new Map();
   let micShowRawTrail = false; // optional raw pitch trail for debugging
+
+  // ── Segment recording ──
+  // phase: 'idle' | 'armed' | 'preroll' | 'recording' | 'review'
+  let segRecPhase = 'idle';
+  let uiModalGuardActive = false;
+  // Guard selected toolbar controls while any blocking modal/tool is open.
+  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || vibratoModalOpen || metronomeToolOpen;
+  $: recordingActive.set(uiModalGuardActive);
+  let segRecSegmentId = null;       // cleanup segment being recorded
+  let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
+  let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
+  let segRecChunks = [];
+  let segRecBlob = null;            // recorded blob ready for review/upload
+  let segRecObjectUrl = null;       // object URL for review playback
+  let segRecCountdown = 0;          // countdown display during preroll
+  let segRecCountdownTimer = null;
+  let segRecStopTimer = null;       // auto-stop at end of segment
+  let segRecUploading = false;
+  let segRecPatched = new Set();    // segment ids that have been successfully spliced
+  let segRecApplied = false;        // true after successful splice for current modal segment
+  let segRecLyricsLoading = false;
+  let segRecLyricsError = '';
+  let segRecLyricsLines = [];
+  let segRecLyricsHyphenated = false;
+  $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording';
+
+  // Auto-regenerate cleaned audio after cleanup changes
+  let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
+  let isRegeneratingCleaned = false; // blocking modal while regenerating
+  $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading || editedAudioLoading || waveformLoading;
 
   // Vocal trace (simulated mic from vocal audio file)
   let vocalTraceEnabled = false;
@@ -496,6 +1388,10 @@
     return gapSec + (beat * 15) / bpm;
   }
 
+  function xToAudioMs(x) {
+    return Math.max(0, beatToTime(xToBeat(x)) * 1000);
+  }
+
   // Time to beat conversion
   function timeToBeat(timeSec) {
     const gapSec = gapMs / 1000;
@@ -539,7 +1435,7 @@
   // ──── BPM Re-quantization ────────────────────
   // Rebuild notes from raw ms timings using the current bpm/gapMs,
   // preserving pitches from the original Ultrastar parse.
-  function requantizeFromMs(bpmActuallyChanged = false) {
+  function requantizeFromMs(bpmActuallyChanged = false, previousTimingRef = null) {
     if (!rawTimings || rawTimings.length === 0) {
       console.log('[Requantize] No rawTimings, skipping');
       return;
@@ -559,6 +1455,23 @@
     }
 
     const gapSec = gapMs / 1000;
+    // Preserve existing break placements by anchoring them to the previous timing
+    // reference (old GAP/BPM), then mapping them into the current grid.
+    const prevBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
+    const prevGapSec = (Number.isFinite(previousTimingRef?.gapMs)
+      ? Number(previousTimingRef.gapMs)
+      : gapMs) / 1000;
+    const preservedBreaks = notes
+      .filter(n => n.type === 'break')
+      .map(n => {
+        const startBeat = Number(n.startBeat) || 0;
+        const endBeat = n.endBeat == null ? null : Number(n.endBeat);
+        return {
+          startSec: prevGapSec + (startBeat * 15) / prevBpm,
+          endSec: endBeat == null ? null : prevGapSec + (endBeat * 15) / prevBpm,
+        };
+      });
+    const preserveExistingBreaks = preservedBreaks.length > 0;
     let id = 0;
     let prevLineIndex = null;
     let lastEndBeat = 0;
@@ -570,8 +1483,8 @@
       const endSec = timing.end;
       const lineIndex = timing.line_index ?? 0;
 
-      // Insert break between phrases
-      if (prevLineIndex !== null && lineIndex !== prevLineIndex) {
+      // Insert break between phrases only when there are no existing break edits to preserve.
+      if (!preserveExistingBreaks && prevLineIndex !== null && lineIndex !== prevLineIndex) {
         const breakStart = lastEndBeat + 2;
         const nextStartBeat = Math.round(((startSec - gapSec) * bpm) / 15);
         const breakEnd = Math.max(breakStart + 1, nextStartBeat - 2);
@@ -623,7 +1536,25 @@
       prevLineIndex = lineIndex;
     }
 
-    notes = newNotes;
+    if (preserveExistingBreaks) {
+      for (const b of preservedBreaks) {
+        const startBeat = Math.round(((b.startSec - gapSec) * bpm) / 15);
+        let endBeat = null;
+        if (b.endSec !== null) {
+          endBeat = Math.max(startBeat + 1, Math.round(((b.endSec - gapSec) * bpm) / 15));
+        }
+        newNotes.push({ id: id++, type: 'break', startBeat, endBeat });
+      }
+    }
+
+    notes = newNotes.sort((a, b) => {
+      const byBeat = (a.startBeat ?? 0) - (b.startBeat ?? 0);
+      if (byBeat !== 0) return byBeat;
+      const aBreak = a.type === 'break' ? 0 : 1;
+      const bBreak = b.type === 'break' ? 0 : 1;
+      if (aBreak !== bBreak) return aBreak - bBreak;
+      return (a.id ?? 0) - (b.id ?? 0);
+    });
     console.log(`[Requantize] Built ${newNotes.filter(n => n.type !== 'break').length} notes, ${newNotes.filter(n => n.type === 'break').length} breaks`);
     // Keep rawTimings in sync so the next BPM change requantizes from these beat positions
     syncRawTimingsFromNotes();
@@ -642,23 +1573,43 @@
   function snapshot() {
     return {
       notes: JSON.parse(JSON.stringify(notes)),
+      cleanupSegments: JSON.parse(JSON.stringify(cleanupSegments)),
       bpm,
       gapMs,
       downbeatOffsetMs,
       downbeatFromHeader,
       extraHeaders: JSON.parse(JSON.stringify(extraHeaders)),
       rawTimings: JSON.parse(JSON.stringify(rawTimings)),
+      metronomeDownbeat1Beat,
+      metronomeSigNumerator,
+      metronomeSigDenominator,
+      metronomeSpeedFactor,
+      metronomeManualDownbeatAnchorBeat,
+      metronomeManualDownbeatInterval,
+      metronomeManualBeatUnitInterval,
     };
   }
 
   function restoreSnapshot(snap) {
     notes = snap.notes;
+    if (snap.cleanupSegments !== undefined) {
+      cleanupSegments = snap.cleanupSegments.map(seg => normalizeCleanupSegment(seg));
+      selectedCleanupSegment = null;
+      cleanupDrag = null;
+    }
     if (snap.bpm !== undefined) bpm = snap.bpm;
     if (snap.gapMs !== undefined) gapMs = snap.gapMs;
     if (snap.downbeatOffsetMs !== undefined) downbeatOffsetMs = snap.downbeatOffsetMs;
     if (snap.downbeatFromHeader !== undefined) downbeatFromHeader = snap.downbeatFromHeader;
     if (snap.extraHeaders !== undefined) extraHeaders = snap.extraHeaders;
     if (snap.rawTimings !== undefined) rawTimings = snap.rawTimings;
+    if (snap.metronomeDownbeat1Beat !== undefined) metronomeDownbeat1Beat = snap.metronomeDownbeat1Beat;
+    if (snap.metronomeSigNumerator !== undefined) metronomeSigNumerator = snap.metronomeSigNumerator;
+    if (snap.metronomeSigDenominator !== undefined) metronomeSigDenominator = snap.metronomeSigDenominator;
+    if (snap.metronomeSpeedFactor !== undefined) metronomeSpeedFactor = snap.metronomeSpeedFactor;
+    if (snap.metronomeManualDownbeatAnchorBeat !== undefined) metronomeManualDownbeatAnchorBeat = snap.metronomeManualDownbeatAnchorBeat;
+    if (snap.metronomeManualDownbeatInterval !== undefined) metronomeManualDownbeatInterval = snap.metronomeManualDownbeatInterval;
+    if (snap.metronomeManualBeatUnitInterval !== undefined) metronomeManualBeatUnitInterval = snap.metronomeManualBeatUnitInterval;
 
     selectedNote = null;
     selectedNotes = new Set();
@@ -693,6 +1644,10 @@
   async function handleSave() {
     if (!$sessionId || isSaving) return;
     isSaving = true;
+    const cleanTargets = serializeCleanupSegmentsForCleaning();
+    // Show spinner immediately if we know regeneration will follow
+    const willRegenerate = cleanedAudioDirty && cleanTargets.length > 0;
+    if (willRegenerate) isRegeneratingCleaned = true;
     try {
       // Serialize notes for the API
       const noteData = notes.map(n => {
@@ -714,12 +1669,76 @@
       if (downbeatOffsetMs !== 0) {
         headersToSave.push({ key: 'DOWNBEATOFFSET', value: String(Math.round(downbeatOffsetMs)) });
       }
-      const result = await saveEditorState($sessionId, noteData, bpm, gapMs, headersToSave);
+      if (metronomeManualDownbeatAnchorBeat !== null) {
+        const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
+        headersToSave.push({ key: 'METRONOMEANCHOR', value: String(Math.round(anchorMs)) });
+        headersToSave.push({ key: 'METRONOMEIG', value: `${metronomeSigNumerator}/${metronomeSigDenominator}` });
+        headersToSave.push({ key: 'METRONOMESPEED', value: String(metronomeSpeedFactor) });
+        console.log(`%c[MetronomeTool] Saving headers: ANCHOR=${Math.round(anchorMs)} IG=${metronomeSigNumerator}/${metronomeSigDenominator} SPEED=${metronomeSpeedFactor} anchor_beat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`, 'color:#7dd3fc');
+      } else {
+        console.log('[MetronomeTool] No metronome anchor set — not saving METRONOME* headers');
+      }
+      const result = await saveEditorState(
+        $sessionId,
+        noteData,
+        bpm,
+        gapMs,
+        headersToSave,
+        serializeCleanupSegments()
+      );
       editCount = result.edit_count || editCount + 1;
       lastSaveTime = new Date();
       hasUnsavedChanges = false;
       editorState.update(s => ({ ...s, hasChanges: false }));
       console.log(`[Step4] Saved: ${result.note_count} notes, save #${editCount}`);
+
+      // Auto-regenerate cleaned audio only for non-recorded cleanup segments.
+      if (cleanedAudioDirty && cleanTargets.length > 0) {
+        cleanedAudioDirty = false;
+        isRegeneratingCleaned = true;
+        try {
+          await generateCleanedAudio($sessionId, cleanTargets);
+          cleanedAudioAvailable = true;
+          cleanedAudioCacheBust = `?v=${Date.now()}`;
+          console.log('[Step4] Cleaned audio regenerated');
+          // If currently listening to edited source, refresh it.
+          if (audioSource === 'edited') {
+            const newUrl = getEditedAudioUrl();
+            currentAudioUrl = newUrl;
+            await tick();
+            if (audioEl) {
+              editedAudioLoading = true;
+              if (audioEl.src !== newUrl) audioEl.src = newUrl;
+              audioEl.load();
+            }
+            loadWaveform(newUrl);
+          }
+        } catch (e) {
+          cleanedAudioAvailable = false;
+          cleanedAudioCacheBust = '';
+          if (audioSource === 'edited') {
+            switchAudioSource('vocals');
+          }
+          console.warn('[Step4] Cleaned audio regeneration failed:', e);
+        } finally {
+          isRegeneratingCleaned = false;
+        }
+      } else if (cleanedAudioDirty) {
+        cleanedAudioDirty = false;
+        cleanedAudioAvailable = false;
+        cleanedAudioCacheBust = '';
+        if (audioSource === 'edited') {
+          const newUrl = getEditedAudioUrl();
+          currentAudioUrl = newUrl;
+          await tick();
+          if (audioEl) {
+            editedAudioLoading = true;
+            if (audioEl.src !== newUrl) audioEl.src = newUrl;
+            audioEl.load();
+          }
+          loadWaveform(newUrl);
+        }
+      }
     } catch (err) {
       console.error('[Step4] Save error:', err);
       errorMessage.set('Save failed: ' + err.message);
@@ -752,6 +1771,7 @@
 
   function enterSetGapMode() {
     if (isPlaying || gridAlignMode) return;
+    clearMetronomePickTarget();
     setGapMode = true;
     setGapHoverBeat = null;
     if (canvasEl) canvasEl.style.cursor = 'crosshair';
@@ -772,6 +1792,7 @@
   // ── Grid Align mode functions ──
   function enterGridAlignMode() {
     if (isPlaying) return; // don't enter while playing
+    clearMetronomePickTarget();
     gridAlignMode = true;
     gridAlignOffsetMs = 0;
     gridAlignOriginalGapMs = gapMs;
@@ -805,7 +1826,7 @@
     gridAlignOffsetMs = 0;
     gridAlignDragging = false;
     if (canvasEl) canvasEl.style.cursor = '';
-    handleBpmGapChange();
+    handleBpmGapChange(false, { gapMs: gridAlignOriginalGapMs, bpm });
     markUnsaved();
   }
 
@@ -903,12 +1924,16 @@
     // Stop mic and clear trail — hit positions are beat-based at old BPM
     if (micEnabled) { micEnabled = false; stopMic(); }
     clearMicTrail();
+    const previousTimingRef = {
+      gapMs,
+      bpm: Number(rawTimings?.[0]?.syncedBpm) || bpm,
+    };
     snapGapToGrid();
-    handleBpmGapChange(true);
+    handleBpmGapChange(true, previousTimingRef);
     markUnsaved();
   }
 
-  function handleBpmGapChange(bpmActuallyChanged = false) {
+  function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
     console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} (initial: bpm=${initialBpm} gap=${initialGap})`);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
@@ -916,7 +1941,8 @@
       const gapSec = gapMs / 1000;
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
-    requantizeFromMs(bpmActuallyChanged);
+    requantizeFromMs(bpmActuallyChanged, previousTimingRef);
+    resyncFlagsToGrid();
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
@@ -1018,7 +2044,8 @@
 
       // Draw as a single smooth filled path
       const scale = wt / 2;
-      ctx.fillStyle = '#4fc3f7';
+      const waveformColor = audioSource === 'edited' ? '#68d4b0' : '#4fc3f7';
+      ctx.fillStyle = waveformColor;
       ctx.globalAlpha = 0.35;
       ctx.beginPath();
       ctx.moveTo(0, midY);
@@ -1036,6 +2063,35 @@
       ctx.moveTo(0, wt);
       ctx.lineTo(w, wt);
       ctx.stroke();
+
+      // Cleanup segments overlay (multiple loop-like ranges for noisy vocal areas)
+      for (const seg of cleanupSegments) {
+        const sx = beatToX(timeToBeat(seg.startMs / 1000));
+        const ex = beatToX(timeToBeat(seg.endMs / 1000));
+        const left = Math.min(sx, ex);
+        const right = Math.max(sx, ex);
+        const width = right - left;
+        if (right < -8 || left > w + 8) continue;
+        const selected = selectedCleanupSegment === seg.id;
+        const patched = segRecPatched.has(seg.id);
+        const isRecordTarget = segRecSegmentId === seg.id && segRecPhase !== 'idle';
+
+        if (isRecordTarget) {
+          ctx.fillStyle = segRecPhase === 'recording'
+            ? 'rgba(255, 60, 60, 0.45)'   // bright red while recording
+            : 'rgba(255, 200, 0, 0.28)';  // yellow while armed/review
+        } else if (patched) {
+          ctx.fillStyle = selected ? 'rgba(100, 220, 100, 0.38)' : 'rgba(100, 220, 100, 0.22)';
+        } else {
+          ctx.fillStyle = selected ? 'rgba(255, 107, 107, 0.52)' : 'rgba(255, 107, 107, 0.4)';
+        }
+        ctx.fillRect(left, 0, width, wt);
+
+        const handleW = 2;
+        ctx.fillStyle = patched ? '#80e080' : '#ff6b6b';
+        ctx.fillRect(left - handleW / 2, 0, handleW, wt);
+        ctx.fillRect(right - handleW / 2, 0, handleW, wt);
+      }
 
       // Predicted downbeats (red dots) — shown in calibration mode so user can verify grid alignment
       if (beatMarkerMode && bpm > 0) {
@@ -1154,38 +2210,45 @@
     // Quarter note lines (thickest), 8th note lines (medium), fine lines (thinnest)
     // In gridAlignMode, grid lines are offset by gridAlignOffsetMs (preview shift)
     const gridOffsetPx = gridAlignMode ? msToPixels(gridAlignOffsetMs) : 0;
-    const startBeat = Math.floor(xToBeat(0 - gridOffsetPx));
-    const endBeat = Math.ceil(xToBeat(w - gridOffsetPx));
-    const beatsPerMeasure = BEATS_PER_QUARTER * 4; // 4/4 time = 4 quarter notes per measure
-    const beatsPerEighth = BEATS_PER_QUARTER / 2;  // half a quarter note
+    const startBeat = xToBeat(0 - gridOffsetPx);
+    const endBeat = xToBeat(w - gridOffsetPx);
+    const beatsPerMeasure = Math.max(0.0001, getMetronomeDownbeatInterval());
+    const beatsPerBeatUnit = Math.max(0.0001, getMetronomeBeatUnitInterval());
+    const beatsPerSubUnit = Math.max(0.0001, beatsPerBeatUnit / 2);
 
     // Find the downbeat gridline beat — use fractional offset for sub-beat precision
-    let downbeatBeat = -99999;
-    let downbeatFracPx = 0; // sub-beat pixel offset for smooth grid positioning
-    if (downbeatOffsetMs !== 0) {
+    let downbeatBeat = getMetronomeDownbeatAnchorBeat();
+    if (metronomeManualDownbeatAnchorBeat === null && downbeatFromHeader) {
       const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
-      downbeatBeat = Math.round(exactBeat);
-      downbeatFracPx = (exactBeat - downbeatBeat) * zoom;
+      downbeatBeat = exactBeat;
     }
 
-    for (let b = startBeat; b <= endBeat; b++) {
-      const x = beatToX(b) + gridOffsetPx + (downbeatFromHeader ? downbeatFracPx : 0);
-      // When we have a downbeat reference, all grid subdivisions align to it
-      const rel = downbeatFromHeader ? b - downbeatBeat : b;
-      const isMeasure = ((rel % beatsPerMeasure) + beatsPerMeasure) % beatsPerMeasure === 0;
-      const isQuarter = ((rel % BEATS_PER_QUARTER) + BEATS_PER_QUARTER) % BEATS_PER_QUARTER === 0;
-      const isEighth = ((rel % beatsPerEighth) + beatsPerEighth) % beatsPerEighth === 0;
+    const nearMultiple = (value, step) => {
+      const ratio = value / step;
+      return Math.abs(ratio - Math.round(ratio)) < 1e-4;
+    };
+    const firstSubIndex = Math.floor((startBeat - downbeatBeat) / beatsPerSubUnit) - 2;
+    const lastSubIndex = Math.ceil((endBeat - downbeatBeat) / beatsPerSubUnit) + 2;
+
+    for (let i = firstSubIndex; i <= lastSubIndex; i++) {
+      const b = downbeatBeat + i * beatsPerSubUnit;
+      const x = beatToX(b) + gridOffsetPx;
+      if (x < -1 || x > w + 1) continue;
+      const rel = b - downbeatBeat;
+      const isMeasure = nearMultiple(rel, beatsPerMeasure);
+      const isBeatUnit = nearMultiple(rel, beatsPerBeatUnit);
+      const isSubUnit = nearMultiple(rel, beatsPerSubUnit);
       // Highlight the beat level that the metronome is currently clicking on
-      const metronomeInterval = BEATS_PER_QUARTER * metronomeDivisor;
-      const isMetronomeBeat = metronomeEnabled && ((rel % metronomeInterval) + metronomeInterval) % metronomeInterval === 0;
+      const metronomeInterval = getMetronomeClickInterval();
+      const isMetronomeBeat = metronomeEnabled && nearMultiple(rel, metronomeInterval);
 
       if (isMeasure) {
         ctx.strokeStyle = isMetronomeBeat ? '#a0a0ff' : '#7070cc';
         ctx.lineWidth = 2;
-      } else if (isQuarter) {
+      } else if (isBeatUnit) {
         ctx.strokeStyle = isMetronomeBeat ? '#8888ee' : '#404078';
         ctx.lineWidth = 1;
-      } else if (isEighth) {
+      } else if (isSubUnit) {
         ctx.strokeStyle = isMetronomeBeat ? '#6666cc' : '#30305a';
         ctx.lineWidth = 0.5;
       } else {
@@ -1243,6 +2306,54 @@
       }
     }
 
+    // ── Metronome downbeat guide lines ──
+    if (metronomeDownbeat1Beat !== null || metronomeDownbeat2Beat !== null) {
+      const drawDownbeatGuide = (beat, label, color) => {
+        if (beat === null) return;
+        const x = beatToX(beat);
+        if (x < 0 || x > w) return;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = color;
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x, 12);
+        ctx.restore();
+      };
+      drawDownbeatGuide(metronomeDownbeat1Beat, 'DB1', '#7dd3fc');
+      drawDownbeatGuide(metronomeDownbeat2Beat, 'DB2', '#22d3ee');
+    }
+
+    // ── Metronome pick hover: snapped dotted preview line ──
+    if ((metronomePickTarget === 1 || metronomePickTarget === 2) && metronomePickHoverBeat !== null) {
+      const hoverX = beatToX(metronomePickHoverBeat);
+      if (hoverX >= 0 && hoverX <= w) {
+        const label = metronomePickTarget === 1 ? 'Set DB1' : 'Set DB2';
+        ctx.save();
+        ctx.strokeStyle = '#7dd3fc';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 3]);
+        ctx.globalAlpha = 0.95;
+        ctx.beginPath();
+        ctx.moveTo(hoverX, 0);
+        ctx.lineTo(hoverX, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#7dd3fc';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, hoverX, 12);
+        ctx.restore();
+      }
+    }
+
     // ── Time axis (bottom strip) ──
     ctx.fillStyle = '#12121e';
     ctx.fillRect(0, pianoH, w, timeAxisHeight);
@@ -1295,9 +2406,9 @@
         // Draw break line
         const x = beatToX(note.startBeat);
         const isBreakSelected = selectedNote === note.id;
-        ctx.strokeStyle = isBreakSelected ? '#ef5350' : '#c6282855';
-        ctx.lineWidth = isBreakSelected ? 3 : 2;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = isBreakSelected ? '#ff3b30' : '#ef5350';
+        ctx.lineWidth = isBreakSelected ? 4 : 3;
+        ctx.setLineDash(isBreakSelected ? [6, 4] : [5, 3]);
         ctx.beginPath();
         ctx.moveTo(x, wt);
         ctx.lineTo(x, pianoH);
@@ -1306,8 +2417,8 @@
 
         // Draw drag handle (diamond shape at center)
         const handleY = (wt + pianoH) / 2;
-        const hs = isBreakSelected ? 7 : 5;
-        ctx.fillStyle = isBreakSelected ? '#ef5350' : '#c62828aa';
+        const hs = isBreakSelected ? 8 : 6;
+        ctx.fillStyle = isBreakSelected ? '#ff3b30' : '#ef5350';
         ctx.beginPath();
         ctx.moveTo(x, handleY - hs);
         ctx.lineTo(x + hs, handleY);
@@ -1713,18 +2824,18 @@
       const fx = beatToX(flag.beat);
       if (fx < -10 || fx > w + 10) continue;
       const isFlagSelected = selectedFlag === flag.id;
-      ctx.strokeStyle = isFlagSelected ? '#4ade80' : '#4ade8066';
-      ctx.lineWidth = isFlagSelected ? 2 : 1.5;
-      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = isFlagSelected ? '#22c55e' : '#4ade80';
+      ctx.lineWidth = isFlagSelected ? 3.5 : 2.5;
+      ctx.setLineDash(isFlagSelected ? [6, 4] : [5, 3]);
       ctx.beginPath();
       ctx.moveTo(fx, wt);
       ctx.lineTo(fx, pianoH);
       ctx.stroke();
       ctx.setLineDash([]);
       // Diamond handle at vertical center
-      const ths = isFlagSelected ? 7 : 5;
+      const ths = isFlagSelected ? 8 : 6;
       const thy = (wt + pianoH) / 2;
-      ctx.fillStyle = isFlagSelected ? '#4ade80' : '#4ade80aa';
+      ctx.fillStyle = isFlagSelected ? '#22c55e' : '#4ade80';
       ctx.beginPath();
       ctx.moveTo(fx, thy - ths);
       ctx.lineTo(fx + ths, thy);
@@ -1733,7 +2844,7 @@
       ctx.closePath();
       ctx.fill();
       if (isFlagSelected) {
-        ctx.fillStyle = '#4ade80';
+        ctx.fillStyle = '#22c55e';
         ctx.font = '9px monospace';
         ctx.textAlign = 'center';
         ctx.fillText(`flag @${flag.beat}`, fx, thy - ths - 4);
@@ -1756,6 +2867,35 @@
 
     // Ignore right-click — let contextmenu handler deal with it
     if (event.button === 2) return;
+
+    // Waveform cleanup segment drag
+    if (showWaveform && my < waveTop()) {
+      const hit = hitTestCleanupSegment(mx, my);
+      if (hit) {
+        const seg = cleanupSegments.find(s => s.id === hit.id);
+        if (seg) {
+          clearMarkerSelection();
+          // Don't allow dragging segments with recordings
+          if (segRecPatched.has(seg.id)) {
+            selectedCleanupSegment = seg.id;
+            draw();
+            return;
+          }
+          pushUndo();
+          selectedCleanupSegment = seg.id;
+          cleanupDrag = {
+            id: seg.id,
+            mode: hit.mode,
+            startMs: seg.startMs,
+            endMs: seg.endMs,
+            mouseStartMs: xToAudioMs(mx),
+          };
+          draw();
+          return;
+        }
+      }
+      selectedCleanupSegment = null;
+    }
 
     // ── Beat Marker mode: left-click on waveform places a marker ──
     if (beatMarkerMode && showWaveform && my < waveTop()) {
@@ -1796,6 +2936,24 @@
       return;
     }
 
+    // ── Metronome downbeat pick mode ──
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      const target = metronomePickTarget;
+      const pickedBeat = nearestGridBeat(mx);
+      console.log(`[MetronomeTool] Pick target=${target} beat=${pickedBeat} (mx=${mx.toFixed(1)})`);
+      if (target === 1) {
+        metronomeDownbeat1Beat = pickedBeat;
+        metronomeDownbeat2Beat = null;
+        recalcMetronomeFromControls('pick-db1');
+        showToast('Downbeat set and grid recalculated');
+      } else {
+        showToast('Use Set Downbeat only in simplified mode');
+      }
+      clearMetronomePickTarget();
+      draw();
+      return;
+    }
+
     // ── Set GAP mode click ──
     if (setGapMode && setGapHoverBeat !== null) {
       // Compute the new GAP: the absolute time of the hovered grid line becomes the new GAP
@@ -1803,9 +2961,10 @@
       const newGapMs = Math.round(newGapSec * 1000);
       console.log(`[SetGAP] Setting GAP to ${newGapMs}ms (beat ${setGapHoverBeat} → time ${newGapSec.toFixed(3)}s)`);
       pushUndo();
+      const previousGapMs = gapMs;
       gapMs = newGapMs;
       cancelSetGapMode();
-      handleBpmGapChange();
+      handleBpmGapChange(false, { gapMs: previousGapMs, bpm });
       markUnsaved();
       return;
     }
@@ -1831,7 +2990,7 @@
     }
 
     // Check loop handle hit zones first (8px hit zone near boundary lines, full height)
-    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase === 'idle') {
       const lsX = beatToX(loopStartBeat);
       const leX = beatToX(loopEndBeat);
       if (Math.abs(mx - lsX) <= 8) {
@@ -1856,16 +3015,18 @@
         loopStartBeat = loopDragStartBeat;
         loopEndBeat = loopDragStartBeat;
         loopEnabled = true;
-        console.log(`[Loop] Start drag at beat ${loopDragStartBeat}`);
+        console.log(`[Loop] Start drag at beat ${loopDragStartBeat} | ms ${(beatToTime(loopDragStartBeat) * 1000).toFixed(1)} | sec ${beatToTime(loopDragStartBeat).toFixed(3)}`);
         draw();
         return;
       }
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
 
     // Alt+click anywhere → seek playhead
     if (event.altKey) {
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
@@ -1873,13 +3034,32 @@
     // ── No note editing during playback ──
     if (isPlaying) {
       // Only allow seeking (handled above) — block note selection/dragging
+      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
 
+    selectedCleanupSegment = null;
+
     // ── Paste mode: left click seeks normally (use Ctrl+V or right-click to paste) ──
 
     const isMultiKey = event.metaKey || event.ctrlKey;
+
+    // Check flag hit first so flags are selectable even if a note overlaps the same x-position.
+    if (!isMultiKey) {
+      for (const flag of flags) {
+        const fx = beatToX(flag.beat);
+        if (Math.abs(mx - fx) <= 8) {
+          selectedFlag = flag.id;
+          selectedNote = null;
+          selectedNotes = new Set();
+          isDragging = true;
+          dragStart = { x: mx, y: my, beat: flag.beat };
+          draw();
+          return;
+        }
+      }
+    }
 
     // Find clicked note (check regular notes first, then breaks)
     let found = null;
@@ -1913,22 +3093,6 @@
           found = note;
           dragMode = 'move-break';
           break;
-        }
-      }
-    }
-
-    // Check flag hit (8px zone, before note handling)
-    if (!found) {
-      for (const flag of flags) {
-        const fx = beatToX(flag.beat);
-        if (Math.abs(mx - fx) <= 8) {
-          selectedFlag = flag.id;
-          selectedNote = null;
-          selectedNotes = new Set();
-          isDragging = true;
-          dragStart = { x: mx, y: my, beat: flag.beat };
-          draw();
-          return;
         }
       }
     }
@@ -2011,8 +3175,7 @@
         boxSelectEnd = { x: mx, y: my };
         console.log('[Mouse] Start box selection');
       } else {
-        selectedNote = null;
-        selectedNotes = new Set();
+        clearMarkerSelection();
         seekToTime(beatToTime(beat));
         console.log(`[Mouse] No note — seek to beat ${beat.toFixed(1)}`);
       }
@@ -2030,11 +3193,64 @@
     const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
     hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
 
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      metronomePickHoverBeat = insideCanvas ? nearestGridBeat(mx) : null;
+      canvasEl.style.cursor = 'crosshair';
+      draw();
+      return;
+    }
+
+    if (cleanupDrag) {
+      autoScrollAtCanvasEdge(mx);
+      const seg = cleanupSegments.find(s => s.id === cleanupDrag.id);
+      if (!seg) {
+        cleanupDrag = null;
+        return;
+      }
+      const mouseMs = xToAudioMs(mx);
+      const msDelta = mouseMs - cleanupDrag.mouseStartMs;
+      // Non-overlap clamping: find sorted neighbours once, based on original drag positions
+      const CLAMP_GAP = 10; // ms minimum gap between segments
+      const sortedOthers = cleanupSegments.filter(s => s.id !== seg.id).sort((a, b) => a.startMs - b.startMs);
+      // Neighbour immediately before (ends before drag origin start) and after (starts after drag origin end)
+      const prevN = [...sortedOthers].reverse().find(s => s.endMs <= cleanupDrag.startMs);
+      const nextN = sortedOthers.find(s => s.startMs >= cleanupDrag.endMs);
+      const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
+      const maxEnd   = nextN ? nextN.startMs - CLAMP_GAP : Infinity;
+
+      if (cleanupDrag.mode === 'move') {
+        const duration = cleanupDrag.endMs - cleanupDrag.startMs;
+        let newStart = cleanupDrag.startMs + msDelta;
+        newStart = Math.max(minStart, newStart);
+        if (isFinite(maxEnd)) newStart = Math.min(maxEnd - duration, newStart);
+        seg.startMs = newStart;
+        seg.endMs = newStart + duration;
+      } else if (cleanupDrag.mode === 'start') {
+        let newStart = mouseMs;
+        newStart = Math.max(minStart, newStart);          // can't cross prev neighbour
+        newStart = Math.min(cleanupDrag.endMs - 50, newStart); // can't cross own end
+        seg.startMs = newStart;
+        seg.endMs = cleanupDrag.endMs;
+      } else if (cleanupDrag.mode === 'end') {
+        let newEnd = mouseMs;
+        if (isFinite(maxEnd)) newEnd = Math.min(maxEnd, newEnd); // can't cross next neighbour
+        newEnd = Math.max(cleanupDrag.startMs + 50, newEnd);     // can't cross own start
+        seg.startMs = cleanupDrag.startMs;
+        seg.endMs = newEnd;
+      }
+      cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+      cleanedAudioDirty = true;
+      markUnsaved();
+      draw();
+      return;
+    }
+
     // Flag drag
     if (isDragging && selectedFlag !== null) {
       const flag = flags.find(f => f.id === selectedFlag);
       if (flag) {
         flag.beat = Math.round(xToBeat(mx));
+        flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
         flags = [...flags];
         draw();
       }
@@ -2113,12 +3329,28 @@
       return;
     }
 
+    if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+      canvasEl.style.cursor = 'crosshair';
+      return;
+    }
+
     // Cursor style based on hover target
     if (!isDragging && !isSettingLoop && !loopHandleDrag && !playheadDrag) {
       let cursor = '';
 
+      if (showWaveform && my < waveTop()) {
+        const cleanupHit = hitTestCleanupSegment(mx, my);
+        if (cleanupHit && !segRecPatched.has(cleanupHit.id)) {
+          if (cleanupHit.mode === 'start' || cleanupHit.mode === 'end') {
+            cursor = 'col-resize';
+          } else if (cleanupHit.mode === 'move') {
+            cursor = 'move';
+          }
+        }
+      }
+
       // Check playhead handle (when paused)
-      if (!isPlaying && currentTimeSec > 0) {
+      if (!cursor && !isPlaying && currentTimeSec > 0) {
         const cx = beatToX(playbackBeat);
         if (Math.abs(mx - cx) <= 10) {
           cursor = 'col-resize';
@@ -2126,7 +3358,7 @@
       }
 
       // Check loop handles
-      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      if (!cursor && loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
         const lsX = beatToX(loopStartBeat);
         const leX = beatToX(loopEndBeat);
         if (Math.abs(mx - lsX) <= 8 || Math.abs(mx - leX) <= 8) {
@@ -2213,7 +3445,7 @@
 
     // ── Multi-note drag ──
     if (dragMode === 'move' && selectedNotes.size > 1 && selectedNotes.has(note.id)) {
-      const beatDelta = Math.round(dx / zoom);
+      const rawBeatDelta = Math.round(dx / zoom);
       const pitchDelta = yToPitch(dragStart.y + dy) - dragStart.pitch;
       
       if (!dragStart.groupOffsets) {
@@ -2225,6 +3457,12 @@
           }
         }
       }
+
+      const groupSelection = dragStart.groupOffsets.map(offset => ({
+        startBeat: offset.beat,
+        duration: notes.find(nn => nn.id === offset.id)?.duration ?? 1,
+      }));
+      const beatDelta = clampSelectedMoveDeltaToVisibleCanvas(rawBeatDelta, groupSelection);
       
       for (const offset of dragStart.groupOffsets) {
         const n = notes.find(nn => nn.id === offset.id);
@@ -2238,19 +3476,27 @@
         if (dragStart.groupOffsets.length <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'move') {
-      note.startBeat = Math.round(dragStart.beat + dx / zoom);
+      const desiredStartBeat = Math.round(dragStart.beat + dx / zoom);
+      note.startBeat = clampNoteStartToVisibleCanvas(desiredStartBeat, note.duration);
       note.pitch = Math.max(minPitch, Math.min(maxPitch, yToPitch(dragStart.y + dy)));
       // Update pitch preview if pitch changed — only for single note
       if (note.pitch !== dragLastPitch) {
         if (selectedNotes.size <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'resize-right') {
-      note.duration = Math.max(1, Math.round(dragStart.duration + dx / zoom));
+      const { maxBeat } = getVisibleBeatBounds();
+      const maxDuration = Math.max(1, Math.floor(maxBeat - note.startBeat));
+      note.duration = clampValue(Math.round(dragStart.duration + dx / zoom), 1, maxDuration);
     } else if (dragMode === 'resize-left') {
-      const newStart = Math.round(dragStart.beat + dx / zoom);
-      const diff = note.startBeat - newStart;
+      const { minBeat } = getVisibleBeatBounds();
+      const originalEnd = dragStart.beat + dragStart.duration;
+      const newStart = clampValue(
+        Math.round(dragStart.beat + dx / zoom),
+        Math.ceil(minBeat),
+        originalEnd - 1,
+      );
       note.startBeat = newStart;
-      note.duration = Math.max(1, note.duration + diff);
+      note.duration = Math.max(1, originalEnd - newStart);
     }
 
     editorState.update(s => ({ ...s, hasChanges: true }));
@@ -2278,10 +3524,75 @@
   }
 
   function handleMouseUp() {
+    if (cleanupDrag) {
+      const drag = { ...cleanupDrag };
+      cleanupDrag = null;
+      const seg = cleanupSegments.find(s => s.id === drag.id);
+      if (seg && segRecPatched.has(drag.id)) {
+        const movedSegment = drag.mode === 'move' && (
+          Math.abs(seg.startMs - drag.startMs) > 10 ||
+          Math.abs(seg.endMs - drag.endMs) > 10
+        );
+        const expandedStartOutward = drag.mode === 'start' && seg.startMs < drag.startMs - 10;
+        const expandedEndOutward = drag.mode === 'end' && seg.endMs > drag.endMs + 10;
+
+        if (movedSegment || expandedStartOutward || expandedEndOutward) {
+          console.warn('[SegResize] Reverting unsupported recorded segment transform', {
+            id: drag.id,
+            mode: drag.mode,
+            from: { startMs: drag.startMs, endMs: drag.endMs },
+            to: { startMs: seg.startMs, endMs: seg.endMs },
+          });
+          seg.startMs = drag.startMs;
+          seg.endMs = drag.endMs;
+          cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+          draw();
+          showToast('Recorded segments can only be shrunk inward. Use re-record or make empty to change position.');
+          return;
+        }
+
+        draw();
+        // If the dragged segment was spliced and a handle moved inward, restore
+        // the freed audio region from the original demucs vocal before saving.
+        let freedStart = null, freedEnd = null;
+        if (drag.mode === 'start' && seg.startMs > drag.startMs + 10) {
+          freedStart = drag.startMs;
+          freedEnd = seg.startMs;
+        } else if (drag.mode === 'end' && seg.endMs < drag.endMs - 10) {
+          freedStart = seg.endMs;
+          freedEnd = drag.endMs;
+        }
+        if (freedStart !== null) {
+          console.log(`[SegResize] Spliced segment shrunk — restoring freed region ${freedStart.toFixed(0)}–${freedEnd.toFixed(0)}ms`);
+          fetch(`/api/restore-segment/${$sessionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ start_ms: freedStart, end_ms: freedEnd }),
+          }).then(r => r.json()).then(result => {
+            console.log('[SegResize] Restore OK:', result);
+            const cacheBust = `?v=${Date.now()}`;
+            vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+            if (audioSource === 'edited') {
+              currentAudioUrl = vocalUrl;
+              if (audioEl) { audioEl.src = currentAudioUrl; audioEl.load(); }
+              loadWaveform(currentAudioUrl);
+            }
+            handleSave();
+          }).catch(err => {
+            console.error('[SegResize] Restore failed:', err);
+            handleSave();
+          });
+          return;
+        }
+      }
+      draw();
+      if (cleanedAudioDirty) handleSave();
+      return;
+    }
+
     // Finish flag drag
     if (isDragging && selectedFlag !== null) {
       isDragging = false;
-      selectedFlag = null;
       saveFlags();
       draw();
       return;
@@ -2308,7 +3619,9 @@
 
     // Finish loop handle drag
     if (loopHandleDrag) {
-      console.log(`[Loop] Handle drag done: ${loopStartBeat} → ${loopEndBeat}`);
+      const a = Math.min(loopStartBeat, loopEndBeat);
+      const b = Math.max(loopStartBeat, loopEndBeat);
+      console.log(`[Loop] Handle drag done: beat ${a} → ${b} | ms ${(beatToTime(a) * 1000).toFixed(1)} → ${(beatToTime(b) * 1000).toFixed(1)} | sec ${beatToTime(a).toFixed(3)} → ${beatToTime(b).toFixed(3)}`);
       loopHandleDrag = null;
       canvasEl.style.cursor = '';
       draw();
@@ -2331,7 +3644,7 @@
         } else {
           loopStartBeat = a;
           loopEndBeat = b;
-          console.log(`[Loop] Set region: beat ${a} → ${b}`);
+          console.log(`[Loop] Set region: beat ${a} → ${b} | ms ${(beatToTime(a) * 1000).toFixed(1)} → ${(beatToTime(b) * 1000).toFixed(1)} | sec ${beatToTime(a).toFixed(3)} → ${beatToTime(b).toFixed(3)}`);
         }
       }
       loopDragStartBeat = null;
@@ -2548,11 +3861,27 @@
     return Math.round(playbackBeat || 0);
   }
 
+  function openContextMenu(nextMenu) {
+    contextMenu = { ...nextMenu, visible: true };
+    tick().then(() => {
+      if (!contextMenu.visible || !contextMenuEl) return;
+      const margin = 10;
+      const rect = contextMenuEl.getBoundingClientRect();
+      const maxX = Math.max(margin, window.innerWidth - rect.width - margin);
+      const maxY = Math.max(margin, window.innerHeight - rect.height - margin);
+      const x = Math.max(margin, Math.min(contextMenu.x, maxX));
+      const y = Math.max(margin, Math.min(contextMenu.y, maxY));
+      if (x !== contextMenu.x || y !== contextMenu.y) {
+        contextMenu = { ...contextMenu, x, y };
+      }
+    });
+  }
+
   // ──── Context Menu ──────────────────────────
   function handleContextMenu(event) {
     event.preventDefault();
-    // No context menu during playback or grid align
-    if (isPlaying || gridAlignMode) return;
+    // No context menu during playback, grid align, segment recording, or vibrato modal.
+    if (isPlaying || gridAlignMode || segRecPhase !== 'idle' || vibratoModalOpen) return;
 
     // Paste mode: show minimal paste/cancel menu
     if (pasteMode && clipboard) {
@@ -2562,7 +3891,23 @@
       const menuW = 220, menuH = 110;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: true, flagId: null, beat, pitch: 0, traceFrame: null };
+      openContextMenu({
+        x: posX,
+        y: posY,
+        noteId: null,
+        isBreak: false,
+        isEmpty: false,
+        isFlag: false,
+        isPasteMenu: true,
+        isCleanup: false,
+        isWaveformEmpty: false,
+        flagId: null,
+        cleanupId: null,
+        beat,
+        ms: null,
+        pitch: 0,
+        traceFrame: null,
+      });
       return;
     }
     const rect = canvasEl.getBoundingClientRect();
@@ -2579,6 +3924,56 @@
         bpmCalcResult = calcBpmFromMarkers(beatMarkers);
         draw();
       }
+      return;
+    }
+
+    if (showWaveform && my < waveTop()) {
+      const beat = xToBeat(mx);
+      const clickMs = xToAudioMs(mx);
+      const hit = hitTestCleanupSegment(mx, my);
+      const menuW = 260;
+      const menuH = hit ? 180 : 130;
+      const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
+      const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
+      if (hit) {
+        selectedCleanupSegment = hit.id;
+        openContextMenu({
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: true,
+          isWaveformEmpty: false,
+          flagId: null,
+          cleanupId: hit.id,
+          beat,
+          ms: clickMs,
+          pitch: 0,
+          traceFrame: null,
+        });
+      } else {
+        openContextMenu({
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: true,
+          flagId: null,
+          cleanupId: null,
+          beat,
+          ms: clickMs,
+          pitch: 0,
+          traceFrame: null,
+        });
+      }
+      draw();
       return;
     }
 
@@ -2623,7 +4018,23 @@
       const menuW = 220, menuH = isBreak ? 160 : 280;
       const posX = Math.min(event.clientX, window.innerWidth - menuW - 10);
       const posY = Math.min(event.clientY, window.innerHeight - menuH - 10);
-      contextMenu = { visible: true, x: posX, y: posY, noteId: found.id, isBreak, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: clickBeat, pitch: 0, traceFrame: null };
+      openContextMenu({
+        x: posX,
+        y: posY,
+        noteId: found.id,
+        isBreak,
+        isEmpty: false,
+        isFlag: false,
+        isPasteMenu: false,
+        isCleanup: false,
+        isWaveformEmpty: false,
+        flagId: null,
+        cleanupId: null,
+        beat: clickBeat,
+        ms: null,
+        pitch: 0,
+        traceFrame: null,
+      });
       draw();
     } else {
       // Empty space — show canvas context menu
@@ -2667,20 +4078,929 @@
         if (Math.abs(beatToX(flag.beat) - mx) <= 8) { flagHit = flag; break; }
       }
       if (flagHit) {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: false, isFlag: true, isPasteMenu: false, flagId: flagHit.id, beat: flagHit.beat, pitch: 0, traceFrame: null };
+        openContextMenu({
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: false,
+          isFlag: true,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: false,
+          flagId: flagHit.id,
+          cleanupId: null,
+          beat: flagHit.beat,
+          ms: null,
+          pitch: 0,
+          traceFrame: null,
+        });
       } else {
-        contextMenu = { visible: true, x: posX, y: posY, noteId: null, isBreak: false, isEmpty: true, isFlag: false, isPasteMenu: false, flagId: null, beat, pitch, traceFrame };
+        openContextMenu({
+          x: posX,
+          y: posY,
+          noteId: null,
+          isBreak: false,
+          isEmpty: true,
+          isFlag: false,
+          isPasteMenu: false,
+          isCleanup: false,
+          isWaveformEmpty: false,
+          flagId: null,
+          cleanupId: null,
+          beat,
+          ms: null,
+          pitch,
+          traceFrame,
+        });
       }
     }
   }
 
   function closeContextMenu() {
-    contextMenu = { visible: false, x: 0, y: 0, noteId: null, isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false, flagId: null, beat: 0, pitch: 0, traceFrame: null };
+    contextMenu = {
+      visible: false,
+      x: 0,
+      y: 0,
+      noteId: null,
+      isBreak: false,
+      isEmpty: false,
+      isFlag: false,
+      isPasteMenu: false,
+      isCleanup: false,
+      isWaveformEmpty: false,
+      flagId: null,
+      cleanupId: null,
+      beat: 0,
+      ms: null,
+      pitch: 0,
+      traceFrame: null,
+    };
+  }
+
+  function openSegmentRegenerateModal(range) {
+    segRegenRange = {
+      sourceType: range.sourceType,
+      cleanupId: range.cleanupId ?? null,
+      startMs: Math.max(0, Math.round(range.startMs || 0)),
+      endMs: Math.max(0, Math.round(range.endMs || 0)),
+    };
+    if (segRegenRange.endMs <= segRegenRange.startMs) {
+      showToast('Invalid range for segment regenerate');
+      return;
+    }
+    segRegenPreviewLoading = false;
+    segRegenPreviewError = '';
+    segRegenPreviewLines = [];
+    segRegenPreviewConfidence = null;
+    segRegenPreviewHyphenated = false;
+    segRegenLanguage = SUPPORTED_LANGUAGES.some(l => l.code === $lyricsData?.language)
+      ? $lyricsData.language
+      : 'auto';
+    segRegenCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
+    segRegenAudioSource = (segRegenCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+      ? 'edited'
+      : 'vocals';
+
+    // Loop policy for Segment AI modal entry:
+    // - loop source: preserve user's existing loop as-is
+    // - cleanup source: force loop to selected cleanup segment range
+    if (segRegenRange.sourceType === 'cleanup') {
+      const segStartBeat = timeToBeat(segRegenRange.startMs / 1000);
+      const segEndBeat = timeToBeat(segRegenRange.endMs / 1000);
+      loopStartBeat = Math.min(segStartBeat, segEndBeat);
+      loopEndBeat = Math.max(segStartBeat, segEndBeat);
+      loopEnabled = true;
+    }
+
+    console.log('[SegmentAI] Modal range applied:', {
+      sourceType: segRegenRange.sourceType,
+      cleanupId: segRegenRange.cleanupId,
+      startMs: segRegenRange.startMs,
+      endMs: segRegenRange.endMs,
+      durationMs: segRegenRange.endMs - segRegenRange.startMs,
+      startSec: Number((segRegenRange.startMs / 1000).toFixed(3)),
+      endSec: Number((segRegenRange.endMs / 1000).toFixed(3)),
+      audioSourceInEditor: audioSource,
+      analysisSourceSetting: segRegenAudioSource,
+    });
+    segRegenModalOpen = true;
+    closeContextMenu();
+  }
+
+  function openSegmentRegenerateFromCleanup(seg) {
+    if (!seg) return;
+    openSegmentRegenerateModal({
+      sourceType: 'cleanup',
+      cleanupId: seg.id,
+      startMs: seg.startMs,
+      endMs: seg.endMs,
+    });
+  }
+
+  function openSegmentRegenerateFromLoop() {
+    if (loopStartBeat === null || loopEndBeat === null || !loopEnabled) {
+      showToast('Create a loop range first');
+      return;
+    }
+    const range = getActiveLoopRangeMs();
+    if (!range) {
+      showToast('Create a loop range first');
+      return;
+    }
+    console.log('[SegmentAI] Loop source before modal:', {
+      loopEnabled,
+      loopStartBeat,
+      loopEndBeat,
+      loopStartMs: range.startMs,
+      loopEndMs: range.endMs,
+      loopDurationMs: range.endMs - range.startMs,
+      loopStartSec: Number((range.startMs / 1000).toFixed(3)),
+      loopEndSec: Number((range.endMs / 1000).toFixed(3)),
+    });
+    openSegmentRegenerateModal({
+      sourceType: 'loop',
+      cleanupId: null,
+      startMs: range.startMs,
+      endMs: range.endMs,
+    });
+  }
+
+  function hasActiveLoopRange() {
+    return loopEnabled && loopStartBeat !== null && loopEndBeat !== null;
+  }
+
+  function isBeatInsideActiveLoop(beat) {
+    if (!hasActiveLoopRange()) return false;
+    const a = Math.min(loopStartBeat, loopEndBeat);
+    const b = Math.max(loopStartBeat, loopEndBeat);
+    return beat >= a && beat <= b;
+  }
+
+  function getActiveLoopRangeMs() {
+    if (!hasActiveLoopRange()) return null;
+    const a = Math.min(loopStartBeat, loopEndBeat);
+    const b = Math.max(loopStartBeat, loopEndBeat);
+    return {
+      startMs: Math.max(0, beatToTime(a) * 1000),
+      endMs: Math.max(0, beatToTime(b) * 1000),
+    };
+  }
+
+  function openSegmentRegenerateFromLoopContext() {
+    openSegmentRegenerateFromLoop();
+  }
+
+  function closeSegmentRegenerateModal() {
+    segRegenModalOpen = false;
+  }
+
+  function closeVibratoModal() {
+    if (vibratoModalDragging) {
+      vibratoModalMouseUp();
+    }
+    vibratoModalOpen = false;
+    vibratoLoading = false;
+  }
+
+  function openVibratoModal(noteId) {
+    const note = notes.find(n => n.id === noteId);
+    if (!note || note.type === 'break') return;
+    if (note.isRap) {
+      showToast('Vibrato tool is not available for rap notes');
+      return;
+    }
+    if (note.duration < 2) {
+      showToast('Select a longer note for vibrato');
+      return;
+    }
+
+    vibratoNoteId = noteId;
+    vibratoError = '';
+    vibratoSegments = [];
+    vibratoCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
+    vibratoAudioSource = (vibratoCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+      ? 'edited'
+      : 'vocals';
+    vibratoModalOpen = true;
+    closeContextMenu();
+  }
+
+  function getVibratoAudioSourceForApi() {
+    return vibratoAudioSource === 'edited' ? 'edited' : 'vocals';
+  }
+
+  function logDisplayedPitchToolFramesForRange(note, startSec, endSec) {
+    const startBeat = note.startBeat;
+    const endBeat = note.startBeat + note.duration;
+    const rangeFrames = pitchLineFrames
+      .filter(f => Number.isFinite(f?.beat) && Number.isFinite(f?.pitch) && f.beat >= startBeat && f.beat <= endBeat)
+      .sort((a, b) => a.beat - b.beat);
+
+    console.group('[VibratoUI] Displayed pitch-tool frames');
+    console.log('[VibratoUI] note', {
+      id: note.id,
+      startBeat,
+      endBeat,
+      startSec,
+      endSec,
+      durationSec: Math.max(0, endSec - startSec),
+      pitch: note.pitch,
+      pitchName: noteName(note.pitch),
+      vibratoAudioSource,
+      analysisSource: getVibratoAudioSourceForApi(),
+      editorAudioSource: audioSource,
+      pitchLineVisible,
+      pitchLineFramesCount: pitchLineFrames.length,
+      pitchLineSourceUrl,
+    });
+
+    if (rangeFrames.length === 0) {
+      console.warn('[VibratoUI] No displayed pitch-line frames found in selected note range');
+      console.groupEnd();
+      return {
+        frameCount: 0,
+        spanSemitones: 0,
+        uniquePitchCount: 0,
+        runCount: 0,
+        minPitch: null,
+        maxPitch: null,
+      };
+    }
+
+    const pitches = rangeFrames.map(f => f.pitch);
+    const minPitch = Math.min(...pitches);
+    const maxPitch = Math.max(...pitches);
+    const uniquePitches = [...new Set(pitches)];
+    console.log('[VibratoUI] frame_stats', {
+      count: rangeFrames.length,
+      minPitch,
+      minPitchName: noteName(minPitch),
+      maxPitch,
+      maxPitchName: noteName(maxPitch),
+      spanSemitones: maxPitch - minPitch,
+      uniquePitchCount: uniquePitches.length,
+      uniquePitchNames: uniquePitches.slice(0, 16).map(p => `${p}(${noteName(p)})`),
+    });
+
+    // Log compact pitch-change runs so subtle movements are easy to see.
+    const runs = [];
+    let runStart = rangeFrames[0].beat;
+    let runPitch = rangeFrames[0].pitch;
+    let runCount = 1;
+    for (let i = 1; i < rangeFrames.length; i++) {
+      const f = rangeFrames[i];
+      if (f.pitch === runPitch) {
+        runCount += 1;
+        continue;
+      }
+      runs.push({ startBeat: runStart, endBeat: rangeFrames[i - 1].beat, pitch: runPitch, count: runCount });
+      runStart = f.beat;
+      runPitch = f.pitch;
+      runCount = 1;
+    }
+    runs.push({
+      startBeat: runStart,
+      endBeat: rangeFrames[rangeFrames.length - 1].beat,
+      pitch: runPitch,
+      count: runCount,
+    });
+
+    console.log(
+      '[VibratoUI] pitch_runs',
+      runs.map(r => `${r.startBeat.toFixed(2)}-${r.endBeat.toFixed(2)}b:${r.pitch}(${noteName(r.pitch)}) x${r.count}`).join(' | ')
+    );
+
+    // Full run table (all dotted pitch changes grouped into contiguous runs).
+    const runTable = runs.map((r, idx) => ({
+      idx: idx + 1,
+      startBeat: Number(r.startBeat.toFixed(3)),
+      endBeat: Number(r.endBeat.toFixed(3)),
+      pitch: r.pitch,
+      note: noteName(r.pitch),
+      frameCount: r.count,
+    }));
+    console.log('[VibratoUI] all_pitch_change_runs', runTable);
+    console.table(runTable);
+
+    // Full dotted-frame sequence (exactly what the user sees in pitch tool).
+    const fullFrameTable = rangeFrames.map((f, idx) => ({
+      idx: idx + 1,
+      beat: Number(f.beat.toFixed(3)),
+      timeSec: Number(beatToTime(f.beat).toFixed(3)),
+      pitch: f.pitch,
+      note: noteName(f.pitch),
+    }));
+    console.log('[VibratoUI] all_dotted_frames_count', fullFrameTable.length);
+    console.log('[VibratoUI] all_dotted_frames', fullFrameTable);
+
+    const preview = rangeFrames.slice(0, 24).map(f => ({ beat: Number(f.beat.toFixed(3)), pitch: f.pitch, note: noteName(f.pitch) }));
+    console.table(preview);
+    if (rangeFrames.length > preview.length) {
+      const tail = rangeFrames.slice(-12).map(f => ({ beat: Number(f.beat.toFixed(3)), pitch: f.pitch, note: noteName(f.pitch) }));
+      console.log('[VibratoUI] tail preview');
+      console.table(tail);
+    }
+    console.groupEnd();
+
+    return {
+      frameCount: rangeFrames.length,
+      spanSemitones: maxPitch - minPitch,
+      uniquePitchCount: uniquePitches.length,
+      runCount: runs.length,
+      minPitch,
+      maxPitch,
+    };
+  }
+
+  function getVibratoSensitivityParams() {
+    if (vibratoSensitivity === 'subtle') {
+      return {
+        min_duration_sec: 0.55,
+        target_slice_sec: 0.10,
+        max_segments: 12,
+        min_pitch_span: 1,
+        min_run_frames: 1,
+      };
+    }
+    if (vibratoSensitivity === 'strict') {
+      return {
+        min_duration_sec: 1.0,
+        target_slice_sec: 0.22,
+        max_segments: 6,
+        min_pitch_span: 3,
+        min_run_frames: 3,
+      };
+    }
+    return {
+      min_duration_sec: 0.8,
+      target_slice_sec: 0.16,
+      max_segments: 8,
+      min_pitch_span: 2,
+      min_run_frames: 2,
+    };
+  }
+
+  async function analyzeVibratoForSelectedNote() {
+    if (!$sessionId || vibratoNoteId === null || vibratoLoading) return;
+    const note = notes.find(n => n.id === vibratoNoteId && n.type !== 'break');
+    if (!note) {
+      vibratoError = 'Selected note no longer exists';
+      return;
+    }
+
+    const startSec = beatToTime(note.startBeat);
+    const endSec = beatToTime(note.startBeat + note.duration);
+    const startMs = Math.max(0, startSec * 1000);
+    const endMs = Math.max(startMs + 20, endSec * 1000);
+
+    const uiStats = logDisplayedPitchToolFramesForRange(note, startSec, endSec);
+
+    vibratoLoading = true;
+    vibratoError = '';
+    vibratoSegments = [];
+    try {
+      const data = await suggestVibrato($sessionId, {
+        start_ms: startMs,
+        end_ms: endMs,
+        audio_source: getVibratoAudioSourceForApi(),
+        ...getVibratoSensitivityParams(),
+      });
+
+      const segments = Array.isArray(data?.segments)
+        ? data.segments
+            .map(s => ({
+              start_sec: Number(s.start_sec),
+              end_sec: Number(s.end_sec),
+              pitch: Number(s.pitch),
+            }))
+            .filter(s => Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec) && Number.isFinite(s.pitch) && s.end_sec > s.start_sec)
+        : [];
+
+      const backendPitches = segments.map(s => s.pitch);
+      const backendMin = backendPitches.length ? Math.min(...backendPitches) : null;
+      const backendMax = backendPitches.length ? Math.max(...backendPitches) : null;
+      const backendSpan = (backendMin != null && backendMax != null) ? (backendMax - backendMin) : 0;
+      const backendUnique = backendPitches.length ? new Set(backendPitches).size : 0;
+
+      console.group('[VibratoCompare] Frontend vs Backend');
+      console.log('[VibratoCompare] request', {
+        sessionId: $sessionId,
+        noteId: note.id,
+        source: getVibratoAudioSourceForApi(),
+        sensitivity: vibratoSensitivity,
+        params: getVibratoSensitivityParams(),
+        startMs: Math.round(startMs),
+        endMs: Math.round(endMs),
+      });
+      console.log('[VibratoCompare] frontend_ui_pitchtool', uiStats);
+      console.log('[VibratoCompare] backend_segments', {
+        count: segments.length,
+        spanSemitones: backendSpan,
+        uniquePitchCount: backendUnique,
+        minPitch: backendMin,
+        minPitchName: backendMin != null ? noteName(backendMin) : null,
+        maxPitch: backendMax,
+        maxPitchName: backendMax != null ? noteName(backendMax) : null,
+      });
+      if (segments.length > 0) {
+        console.log(
+          '[VibratoCompare] backend_segment_list',
+          segments
+            .map(s => `${s.start_sec.toFixed(3)}-${s.end_sec.toFixed(3)}:${s.pitch}(${noteName(s.pitch)})`)
+            .join(' | ')
+        );
+      }
+      if (uiStats?.frameCount > 0) {
+        console.log('[VibratoCompare] delta', {
+          segmentCountMinusUiRuns: segments.length - (uiStats.runCount || 0),
+          backendSpanMinusUiSpan: backendSpan - (uiStats.spanSemitones || 0),
+          backendUniqueMinusUiUnique: backendUnique - (uiStats.uniquePitchCount || 0),
+        });
+      }
+      console.groupEnd();
+
+      if (segments.length < 2) {
+        vibratoError = 'No clear vibrato detected in this range';
+        return;
+      }
+
+      vibratoSegments = segments;
+      showToast(`Detected ${segments.length} vibrato slices`);
+    } catch (err) {
+      vibratoError = String(err?.message || 'Vibrato analysis failed');
+    } finally {
+      vibratoLoading = false;
+    }
+  }
+
+  function applyVibratoToSelectedNote() {
+    if (vibratoNoteId === null || vibratoSegments.length < 2) return;
+    const idx = notes.findIndex(n => n.id === vibratoNoteId && n.type !== 'break');
+    if (idx === -1) return;
+
+    const note = notes[idx];
+    const noteStart = note.startBeat;
+    const noteEnd = note.startBeat + note.duration;
+    if (note.duration < 2) {
+      showToast('Note too short to split');
+      return;
+    }
+
+    const totalSec = Math.max(0.001, beatToTime(noteEnd) - beatToTime(noteStart));
+    const startSec = beatToTime(noteStart);
+
+    const maxSegmentCount = Math.min(vibratoSegments.length, Math.max(2, note.duration));
+    const useSegments = vibratoSegments.slice(0, maxSegmentCount);
+
+    const boundaries = [noteStart];
+    let prev = noteStart;
+    for (let i = 0; i < useSegments.length - 1; i++) {
+      const proposedRel = (useSegments[i].end_sec - startSec) / totalSec;
+      const proposedBeat = noteStart + Math.round(proposedRel * note.duration);
+      const remaining = (useSegments.length - 1) - i;
+      const minBeat = prev + 1;
+      const maxBeat = noteEnd - remaining;
+      const bounded = Math.max(minBeat, Math.min(maxBeat, proposedBeat));
+      boundaries.push(bounded);
+      prev = bounded;
+    }
+    boundaries.push(noteEnd);
+
+    const maxId = Math.max(0, ...notes.map(n => n.id || 0));
+    const replacements = [];
+    for (let i = 0; i < useSegments.length; i++) {
+      const segStart = boundaries[i];
+      const segEnd = boundaries[i + 1];
+      const dur = Math.max(1, segEnd - segStart);
+      replacements.push({
+        id: maxId + 1 + i,
+        startBeat: segStart,
+        duration: dur,
+        pitch: Math.round(useSegments[i].pitch),
+        syllable: i === 0 ? note.syllable : ' ~',
+        isRap: false,
+        isGolden: !!note.isGolden,
+        confidence: note.confidence ?? 1.0,
+        original: { startBeat: segStart, duration: dur, pitch: Math.round(useSegments[i].pitch) },
+      });
+    }
+
+    pushUndo();
+    notes = [...notes.slice(0, idx), ...replacements, ...notes.slice(idx + 1)];
+    selectedNote = replacements[0]?.id ?? null;
+    selectedNotes = selectedNote !== null ? new Set([selectedNote]) : new Set();
+    markUnsaved();
+    updatePitchRange();
+    computeTotalBeats();
+    closeVibratoModal();
+    draw();
+    showToast(`Applied vibrato split (${replacements.length} notes)`);
+  }
+
+  async function hyphenateSegmentPreviewLines(lines, silent = false) {
+    const raw = (lines || []).map(v => String(v || '').trim()).filter(Boolean);
+    if (raw.length === 0) return [];
+
+    console.log('[SegmentAI] Hyphenate start', {
+      silent,
+      lineCount: raw.length,
+      language: segRegenLanguage,
+    });
+
+    segRegenHyphenateLoading = true;
+    try {
+      const fd = new FormData();
+      fd.append('lyrics', raw.join('\n'));
+      fd.append('language', segRegenLanguage === 'auto' ? 'en' : segRegenLanguage);
+
+      const resp = await fetch('/api/hyphenate', {
+        method: 'POST',
+        body: fd,
+      });
+      console.log('[SegmentAI] Hyphenate response', { status: resp.status, ok: resp.ok });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Hyphenation failed');
+      }
+
+      let hyphenated = [];
+      if (Array.isArray(data?.lines) && data.lines.length > 0) {
+        hyphenated = data.lines.map(l => String(l?.hyphenated || '').trim()).filter(Boolean);
+      } else if (typeof data?.hyphenated === 'string' && data.hyphenated.trim()) {
+        hyphenated = data.hyphenated.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      }
+
+      if (hyphenated.length === 0) hyphenated = raw;
+      segRegenPreviewHyphenated = true;
+      console.log('[SegmentAI] Hyphenate success', { lineCount: hyphenated.length });
+      if (!silent) showToast('Hyphenation applied');
+      return hyphenated;
+    } catch (e) {
+      console.error('[SegmentAI] Hyphenate failed', e);
+      if (!silent) showToast(String(e?.message || 'Hyphenation failed'));
+      throw e;
+    } finally {
+      segRegenHyphenateLoading = false;
+    }
+  }
+
+  async function generateNotesFromSegmentPreview() {
+    if (segRegenGenerateLoading) {
+      console.warn('[SegmentAI] Generate aborted: already loading');
+      return;
+    }
+    if (segRegenPreviewLines.length === 0) {
+      console.warn('[SegmentAI] Generate aborted: no preview lines');
+      showToast('Run Preview Lyrics first');
+      return;
+    }
+    if (!$sessionId) {
+      console.warn('[SegmentAI] Generate aborted: missing session id');
+      return;
+    }
+
+    console.log('[SegmentAI] Generate start', {
+      sessionId: $sessionId,
+      range: { ...segRegenRange },
+      language: segRegenLanguage,
+      audioSource: getSegRegenAudioSourceForApi(),
+      previewLineCount: segRegenPreviewLines.length,
+      previewHyphenated: segRegenPreviewHyphenated,
+    });
+
+    segRegenGenerateLoading = true;
+    try {
+      // Always hyphenate before generation.
+      if (!segRegenPreviewHyphenated) {
+        segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines, true);
+      }
+
+      const lyricsText = segRegenPreviewLines.join('\n');
+
+      const resp = await fetch(`/api/segment-generate/${$sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: segRegenRange.startMs,
+          end_ms: segRegenRange.endMs,
+          lyrics: lyricsText,
+          language: segRegenLanguage,
+          audio_source: getSegRegenAudioSourceForApi(),
+        }),
+      });
+
+      console.log('[SegmentAI] Generate response', { status: resp.status, ok: resp.ok });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Segment generation failed');
+      }
+
+      let newNotes = Array.isArray(data?.notes) ? data.notes.map(n => ({ ...n })) : [];
+      const timingRows = Array.isArray(data?.syllable_timings) ? data.syllable_timings : [];
+      console.log('[SegmentAI] Generate payload parsed', {
+        returnedNotes: newNotes.length,
+        returnedBreaks: newNotes.filter(n => n?.type === 'break').length,
+        returnedTimings: timingRows.length,
+      });
+      if (newNotes.length === 0) {
+        showToast('No notes returned from segment generation');
+        return;
+      }
+
+      // Convert ms range to beats so we can remove old notes
+      const rangeStartBeat = timeToBeat(segRegenRange.startMs / 1000);
+      const rangeEndBeat   = timeToBeat(segRegenRange.endMs   / 1000);
+      console.log('[SegmentAI] Generate beat range', {
+        rangeStartBeat,
+        rangeEndBeat,
+      });
+
+      // Normalize generated note placement to the editor's current bpm/gap grid
+      // using absolute syllable timings returned by backend.
+      const generatedNoteIdx = [];
+      for (let i = 0; i < newNotes.length; i++) {
+        if (newNotes[i]?.type !== 'break') generatedNoteIdx.push(i);
+      }
+      if (timingRows.length >= generatedNoteIdx.length && generatedNoteIdx.length > 0) {
+        let remappedCount = 0;
+        generatedNoteIdx.forEach((noteArrayIndex, timingIndex) => {
+          const row = timingRows[timingIndex] || {};
+          const s = Number(row.start);
+          const e = Number(row.end);
+          if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return;
+          const startBeat = Math.round(timeToBeat(s));
+          const endBeat = Math.max(startBeat + 1, Math.round(timeToBeat(e)));
+          const duration = Math.max(1, endBeat - startBeat);
+          const note = newNotes[noteArrayIndex];
+          newNotes[noteArrayIndex] = {
+            ...note,
+            startBeat,
+            duration,
+            original: {
+              ...(note.original || {}),
+              startBeat,
+              duration,
+              pitch: note.pitch,
+            },
+          };
+          remappedCount += 1;
+        });
+        console.log('[SegmentAI] Generate remap from timings', {
+          remappedCount,
+          totalGeneratedNotes: generatedNoteIdx.length,
+        });
+      }
+
+      // If generated beats still sit completely outside requested range,
+      // shift them into the segment window as a safety fallback.
+      const generatedStarts = newNotes.map(n => Number(n.startBeat)).filter(Number.isFinite);
+      const generatedEnds = newNotes
+        .map(n => (n?.type === 'break' ? Number(n.endBeat ?? (n.startBeat + 1)) : Number(n.startBeat) + Number(n.duration ?? 1)))
+        .filter(Number.isFinite);
+      const generatedStartBeat = generatedStarts.length ? Math.min(...generatedStarts) : null;
+      const generatedEndBeat = generatedEnds.length ? Math.max(...generatedEnds) : null;
+      if (generatedStartBeat !== null && generatedEndBeat !== null) {
+        const overlapsRange = generatedEndBeat > rangeStartBeat && generatedStartBeat < rangeEndBeat;
+        if (!overlapsRange) {
+          const shift = Math.round(rangeStartBeat - generatedStartBeat);
+          console.warn('[SegmentAI] Generated notes outside target range, applying beat shift', {
+            generatedStartBeat,
+            generatedEndBeat,
+            rangeStartBeat,
+            rangeEndBeat,
+            shift,
+          });
+          newNotes = newNotes.map(n => {
+            const shiftedStart = Number(n.startBeat) + shift;
+            const shiftedEnd = n?.type === 'break'
+              ? Number(n.endBeat ?? (n.startBeat + 1)) + shift
+              : undefined;
+            return {
+              ...n,
+              startBeat: shiftedStart,
+              ...(n?.type === 'break' ? { endBeat: shiftedEnd } : {}),
+              original: n.original
+                ? {
+                    ...n.original,
+                    startBeat: Number(n.original.startBeat ?? n.startBeat) + shift,
+                  }
+                : n.original,
+            };
+          });
+        }
+      }
+
+      // Snapshot for undo before any mutation
+      pushUndo();
+
+      // Remove all existing notes (including breaks) that overlap the beat range
+      const kept = notes.filter(n => {
+        const nEnd = n.type === 'break' ? (n.endBeat ?? n.startBeat + 1) : (n.startBeat + (n.duration ?? 1));
+        return nEnd <= rangeStartBeat || n.startBeat >= rangeEndBeat;
+      });
+
+      // Re-assign IDs on incoming notes so they don't collide with kept notes
+      const maxId = kept.reduce((m, n) => Math.max(m, n.id ?? 0), -1);
+      const insertedNotes = newNotes.map((n, i) => ({ ...n, id: maxId + 1 + i }));
+      const merged = [
+        ...kept,
+        ...insertedNotes,
+      ].sort((a, b) => a.startBeat - b.startBeat);
+
+      console.log('[SegmentAI] Generate merge stats', {
+        oldCount: notes.length,
+        keptCount: kept.length,
+        insertedCount: newNotes.length,
+        mergedCount: merged.length,
+      });
+
+      notes = merged;
+      if (insertedNotes.length > 0) {
+        selectedNote = insertedNotes[0].id;
+        selectedNotes = new Set([insertedNotes[0].id]);
+        ensureBeatVisible(insertedNotes[0].startBeat);
+      } else {
+        selectedNote = null;
+        selectedNotes = new Set();
+      }
+      markUnsaved();
+      updatePitchRange();
+      computeTotalBeats();
+      draw();
+
+      closeSegmentRegenerateModal();
+      showToast(`Generated ${newNotes.filter(n => n.type !== 'break').length} notes for segment`);
+    } catch (e) {
+      console.error('[SegmentAI] Generate failed', e);
+      showToast(String(e?.message || 'Segment generation failed'));
+    } finally {
+      segRegenGenerateLoading = false;
+    }
+  }
+
+  function getSegRegenAudioSourceForApi() {
+    return segRegenAudioSource === 'edited' ? 'edited' : 'vocals';
+  }
+
+  async function previewSegmentLyrics() {
+    if (!$sessionId) {
+      console.warn('[SegmentAI] Preview aborted: missing session id');
+      return;
+    }
+    console.log('[SegmentAI] Preview start', {
+      sessionId: $sessionId,
+      range: { ...segRegenRange },
+      language: segRegenLanguage,
+      modelPreset: segRegenPreset,
+      audioSource: getSegRegenAudioSourceForApi(),
+      sourceType: segRegenRange.sourceType,
+    });
+    segRegenPreviewLoading = true;
+    segRegenPreviewError = '';
+    segRegenPreviewLines = [];
+    segRegenPreviewConfidence = null;
+    segRegenPreviewHyphenated = false;
+    try {
+      const resp = await fetch(`/api/segment-preview/${$sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: segRegenRange.startMs,
+          end_ms: segRegenRange.endMs,
+          language: segRegenLanguage,
+          model_preset: segRegenPreset,
+          audio_source: getSegRegenAudioSourceForApi(),
+          source_type: segRegenRange.sourceType,
+        }),
+      });
+      console.log('[SegmentAI] Preview response', { status: resp.status, ok: resp.ok });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.detail || data?.message || 'Preview lyrics failed');
+      }
+
+      if (Array.isArray(data?.lyrics_lines) && data.lyrics_lines.length > 0) {
+        segRegenPreviewLines = data.lyrics_lines.map(v => String(v));
+      } else if (typeof data?.lyrics === 'string' && data.lyrics.trim()) {
+        segRegenPreviewLines = data.lyrics.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else if (typeof data?.text === 'string' && data.text.trim()) {
+        segRegenPreviewLines = data.text.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else {
+        segRegenPreviewLines = ['(No lyrics returned by preview endpoint)'];
+      }
+
+      if (typeof data?.confidence === 'number') {
+        segRegenPreviewConfidence = data.confidence;
+      } else if (typeof data?.confidence_summary?.avg === 'number') {
+        segRegenPreviewConfidence = data.confidence_summary.avg;
+      }
+
+      console.log('[SegmentAI] Preview parsed', {
+        lineCount: segRegenPreviewLines.length,
+        confidence: segRegenPreviewConfidence,
+      });
+
+      if (segRegenAutoHyphenate && segRegenPreviewLines.length > 0) {
+        try {
+          segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines, true);
+        } catch {
+          // Keep raw preview lines if hyphenation fails.
+        }
+      }
+      showToast('Lyrics preview loaded');
+    } catch (e) {
+      console.error('[SegmentAI] Preview failed', e);
+      segRegenPreviewError = String(e?.message || e || 'Preview failed');
+      showToast('Lyrics preview failed');
+    } finally {
+      segRegenPreviewLoading = false;
+    }
+  }
+
+  function runSegmentOneGoRegenerate() {
+    const secs = ((segRegenRange.endMs - segRegenRange.startMs) / 1000).toFixed(2);
+    showToast(`One-go regenerate queued for ${secs}s segment (backend wiring next)`);
+  }
+
+  function segRegenModalMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-regen-modal-title')) return;
+    segRegenModalDragging = true;
+    segRegenModalDragOffsetX = e.clientX - segRegenModalX;
+    segRegenModalDragOffsetY = e.clientY - segRegenModalY;
+    window.addEventListener('mousemove', segRegenModalMouseMove);
+    window.addEventListener('mouseup', segRegenModalMouseUp);
+    e.preventDefault();
+  }
+
+  function segRegenModalMouseMove(e) {
+    if (!segRegenModalDragging) return;
+    segRegenModalX = Math.max(0, Math.min(window.innerWidth - 410, e.clientX - segRegenModalDragOffsetX));
+    segRegenModalY = Math.max(0, Math.min(window.innerHeight - 300, e.clientY - segRegenModalDragOffsetY));
+  }
+
+  function segRegenModalMouseUp() {
+    segRegenModalDragging = false;
+    window.removeEventListener('mousemove', segRegenModalMouseMove);
+    window.removeEventListener('mouseup', segRegenModalMouseUp);
+  }
+
+  function vibratoModalMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-regen-modal-title')) return;
+    vibratoModalDragging = true;
+    vibratoModalDragOffsetX = e.clientX - vibratoModalX;
+    vibratoModalDragOffsetY = e.clientY - vibratoModalY;
+    window.addEventListener('mousemove', vibratoModalMouseMove);
+    window.addEventListener('mouseup', vibratoModalMouseUp);
+    e.preventDefault();
+  }
+
+  function vibratoModalMouseMove(e) {
+    if (!vibratoModalDragging) return;
+    vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, e.clientX - vibratoModalDragOffsetX));
+    vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, e.clientY - vibratoModalDragOffsetY));
+  }
+
+  function vibratoModalMouseUp() {
+    if (!vibratoModalDragging) return;
+    vibratoModalDragging = false;
+    window.removeEventListener('mousemove', vibratoModalMouseMove);
+    window.removeEventListener('mouseup', vibratoModalMouseUp);
+    saveEditorUiPrefs('vibrato-modal-move');
+  }
+
+  function metronomeToolMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.metronome-tool-title')) return;
+    metronomeToolDragging = true;
+    metronomeToolDragOffsetX = e.clientX - metronomeToolX;
+    metronomeToolDragOffsetY = e.clientY - metronomeToolY;
+    window.addEventListener('mousemove', metronomeToolMouseMove);
+    window.addEventListener('mouseup', metronomeToolMouseUp);
+    e.preventDefault();
+  }
+
+  function metronomeToolMouseMove(e) {
+    if (!metronomeToolDragging) return;
+    metronomeToolX = Math.max(0, Math.min(window.innerWidth - 300, e.clientX - metronomeToolDragOffsetX));
+    metronomeToolY = Math.max(0, Math.min(window.innerHeight - 240, e.clientY - metronomeToolDragOffsetY));
+  }
+
+  function metronomeToolMouseUp() {
+    metronomeToolDragging = false;
+    window.removeEventListener('mousemove', metronomeToolMouseMove);
+    window.removeEventListener('mouseup', metronomeToolMouseUp);
   }
 
   function handleGlobalClick(e) {
     if (contextMenu.visible && contextMenuEl && !contextMenuEl.contains(e.target)) {
       closeContextMenu();
+    }
+    if (e.target !== canvasEl && !(contextMenuEl && contextMenuEl.contains(e.target))) {
+      clearMarkerSelection();
+      draw();
     }
   }
 
@@ -2800,7 +5120,9 @@
     });
     if (insertIdx === -1) insertIdx = notes.length;
     notes = [...notes.slice(0, insertIdx), breakNote, ...notes.slice(insertIdx)];
+    selectedFlag = null;
     selectedNote = maxId;
+    selectedNotes = new Set([maxId]);
     markUnsaved();
     closeContextMenu();
     draw();
@@ -2814,7 +5136,7 @@
       startBeat: beat,
       duration,
       pitch: Math.max(minPitch, Math.min(maxPitch, pitch)),
-      syllable: ' ~',
+      syllable: 'word ',
       isRap: false,
       isGolden: false,
       confidence: 1.0,
@@ -2841,24 +5163,69 @@
   function mergeWithNext(noteId) {
     const id = noteId ?? selectedNote;
     if (id === null) return;
-    const realNotes = notes.filter(n => n.type !== 'break');
-    const realIdx = realNotes.findIndex(n => n.id === id);
-    if (realIdx === -1 || realIdx >= realNotes.length - 1) return;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const realIdx = ordered.findIndex(n => n.id === id);
+    if (realIdx === -1 || realIdx >= ordered.length - 1) return;
 
-    const current = realNotes[realIdx];
-    const next = realNotes[realIdx + 1];
+    const current = ordered[realIdx];
+    const next = ordered[realIdx + 1];
+    const mergedDuration = (next.startBeat + next.duration) - current.startBeat;
+    if (mergedDuration <= 0) return;
 
     pushUndo();
-    // Extend current to cover next
-    current.duration = (next.startBeat + next.duration) - current.startBeat;
-    current.syllable = current.syllable.trimEnd() + next.syllable.trimStart();
-
-    // Remove next note
-    notes = notes.filter(n => n.id !== next.id);
-    notes = [...notes];
+    notes = notes
+      .filter(n => n.id !== next.id)
+      .map(n => {
+        if (n.id !== current.id) return n;
+        return {
+          ...n,
+          duration: mergedDuration,
+          syllable: n.syllable.trimEnd() + next.syllable.trimStart(),
+        };
+      });
+    selectedNote = current.id;
+    selectedNotes = new Set([current.id]);
     markUnsaved();
     closeContextMenu();
+    computeTotalBeats();
     draw();
+  }
+
+  function mergeWithPrevious(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const realIdx = ordered.findIndex(n => n.id === id);
+    if (realIdx <= 0) return;
+    mergeWithNext(ordered[realIdx - 1].id);
+  }
+
+  function canMergeWithNext(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return false;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const idx = ordered.findIndex(n => n.id === id);
+    return idx !== -1 && idx < ordered.length - 1;
+  }
+
+  function canMergeWithPrevious(noteId) {
+    const id = noteId ?? selectedNote;
+    if (id === null) return false;
+    const ordered = notes
+      .filter(n => n.type !== 'break')
+      .slice()
+      .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    const idx = ordered.findIndex(n => n.id === id);
+    return idx > 0;
   }
 
   function toggleWordSpace(noteId, hasSpace) {
@@ -2876,10 +5243,14 @@
     draw();
   }
 
-  function showToast(msg, durationMs = 3000) {
+  function showToast(msg, durationMs = 3000, center = false) {
     toastMsg = msg;
+    toastCenter = center;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toastMsg = ''; }, durationMs);
+    toastTimer = setTimeout(() => {
+      toastMsg = '';
+      toastCenter = false;
+    }, durationMs);
   }
 
   function autoFixWordSpaces() {
@@ -2916,8 +5287,11 @@
 
   // ── Audio source toggle ──
   function switchAudioSource(source) {
+    const prevSource = audioSource;
     audioSource = source;
-    const url = source === 'original' ? originalUrl : vocalUrl;
+    const editedUrl = getEditedAudioUrl();
+    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
+    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -2929,8 +5303,9 @@
       stopAllMidiNotes();
     }
 
+    currentAudioUrl = url; // update reactive src — Svelte will update the <audio> element
     if (audioEl) {
-      audioEl.src = url;
+      editedAudioLoading = source === 'edited';
       audioEl.load();
       audioEl.oncanplay = () => {
         audioEl.currentTime = time;
@@ -2942,7 +5317,11 @@
     }
     // Re-load waveform for new source
     loadWaveform(url);
+    if (pitchLineVisible) {
+      computePitchLine();
+    }
     console.log('[Step4] Audio source:', source, 'at', time.toFixed(2) + 's', wasPlaying ? '(resuming)' : '(paused)');
+    saveEditorUiPrefs('audio-source');
   }
 
   async function handleMissingAudio(type) {
@@ -2973,8 +5352,15 @@
     if (downbeatOffsetMs !== 0) {
       lines.push(`#DOWNBEATOFFSET:${Math.round(downbeatOffsetMs)}`);
     }
+    // Metronome tool state
+    if (metronomeManualDownbeatAnchorBeat !== null) {
+      const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
+      lines.push(`#METRONOMEANCHOR:${Math.round(anchorMs)}`);
+      lines.push(`#METRONOMEIG:${metronomeSigNumerator}/${metronomeSigDenominator}`);
+      lines.push(`#METRONOMESPEED:${metronomeSpeedFactor}`);
+    }
     // Extra headers (YOUTUBE, COVER, LANGUAGE, etc.)
-    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET']);
+    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
     for (const h of extraHeaders) {
       if (!standardKeys.has(h.key.toUpperCase())) {
         // Keep #MP3 in sync with current artist/title and original file extension
@@ -3149,7 +5535,7 @@
       console.log('[Play] No audioEl');
       return;
     }
-    if (gridAlignMode || setGapMode) return; // block playback during grid/gap modes
+    if (gridAlignMode || setGapMode || metronomePickTarget !== 0) return; // block playback during transient editing modes
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
@@ -3161,8 +5547,10 @@
       stopAllMidiNotes();
       draw(); // Redraw to show paused cursor
     } else {
-      // If loop active and playhead is outside loop, jump to loop start
-      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      // If loop is active and playhead is outside loop, jump to loop start.
+      // During active segment capture (preroll/recording) we keep loop visual
+      // boundaries but avoid forcing loop jumps.
+      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
         if (playbackBeat < loopStartBeat || playbackBeat >= loopEndBeat) {
           const loopStartTime = beatToTime(loopStartBeat);
           currentTimeSec = loopStartTime;
@@ -3198,8 +5586,8 @@
       if (micEnabled) micShowTrail = true;
       // Initialize metronome to current beat so it doesn't click immediately
       if (metronomeEnabled) {
-        const clickInterval = BEATS_PER_QUARTER * metronomeDivisor;
-        const offsetBeat = playbackBeat - metronomeOffset;
+        const clickInterval = getMetronomeClickInterval();
+        const offsetBeat = playbackBeat - getMetronomeClickOffset();
         lastMetronomeBeat = Math.floor(offsetBeat / clickInterval);
       }
       if (midiPlayback) ensureMidiCtx();
@@ -3358,6 +5746,7 @@
     // Skip all shortcuts when text editor modal is open
     if (showTextEditor) return;
     if (showNotesModal) return;
+    if ($storageManagerOpen) return;
     // Skip shortcuts when typing in a text/number input field (BPM, GAP, context menu, etc.)
     // For range inputs: only block arrow keys (which move the slider); let all other shortcuts through
     if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
@@ -3366,6 +5755,15 @@
     }
 
     console.log(`[Key] code=${e.code} key=${e.key} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
+
+    // Vibrato modal captures keyboard focus; only Escape should close it.
+    if (vibratoModalOpen) {
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        closeVibratoModal();
+      }
+      return;
+    }
 
     // ── Grid Align mode: only allow Enter (confirm), Escape (cancel), Ctrl+G (cancel) ──
     if (gridAlignMode) {
@@ -3455,6 +5853,31 @@
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
       e.preventDefault();
 
+      // Arrow left/right: move editable cleanup segments by one visible grid step.
+      if (selectedCleanupSegment !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        const direction = e.code === 'ArrowRight' ? 1 : -1;
+        const mode = (e.ctrlKey || e.metaKey)
+          ? (e.shiftKey ? 'start' : 'end')
+          : 'move';
+        const largeStep = e.shiftKey && !(e.ctrlKey || e.metaKey);
+        if (adjustSelectedCleanupSegment(mode, direction, largeStep)) return;
+      }
+
+      // Arrow left/right: nudge selected flag by one visible grid line.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedFlag !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        nudgeFlag(selectedFlag, e.code === 'ArrowRight' ? 1 : -1);
+        return;
+      }
+
+      // Arrow left/right: nudge selected breakpoint by one visible grid line.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedNote !== null && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        const selectedBreak = notes.find(n => n.id === selectedNote && n.type === 'break');
+        if (selectedBreak) {
+          nudgeBreak(selectedBreak.id, e.code === 'ArrowRight' ? 1 : -1);
+          return;
+        }
+      }
+
       // Ctrl+Left/Right (single note only): resize duration from right edge
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
           selectedNotes.size <= 1 && selectedNote !== null) {
@@ -3462,7 +5885,9 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const newDur = Math.max(snap, note.duration + delta);
+          const { maxBeat } = getVisibleBeatBounds();
+          const maxDur = Math.max(snap, Math.floor(maxBeat - note.startBeat));
+          const newDur = clampValue(note.duration + delta, snap, maxDur);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, duration: newDur } : n);
@@ -3480,8 +5905,10 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const newStart = note.startBeat + delta;
-          const newDur = Math.max(snap, note.duration - delta);
+          const { minBeat } = getVisibleBeatBounds();
+          const maxStart = note.startBeat + note.duration - snap;
+          const newStart = clampValue(note.startBeat + delta, Math.ceil(minBeat), maxStart);
+          const newDur = note.duration - (newStart - note.startBeat);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
@@ -3494,13 +5921,22 @@
 
       if (hasSelection) {
         const ids = selectedNotes.size > 0 ? selectedNotes : new Set([selectedNote]);
+        const pitchStep = (e.shiftKey || e.ctrlKey || e.metaKey) ? 12 : 1;
+        const isHorizontalMove = e.code === 'ArrowLeft' || e.code === 'ArrowRight';
+        const selectedNoteObjects = notes.filter(n => ids.has(n.id) && n.type !== 'break');
+        const moveDelta = isHorizontalMove
+          ? clampSelectedMoveDeltaToVisibleCanvas(
+              e.code === 'ArrowLeft' ? -(e.shiftKey ? 4 : 1) : (e.shiftKey ? 4 : 1),
+              selectedNoteObjects,
+            )
+          : 0;
+        if (isHorizontalMove && moveDelta === 0) return;
         pushUndo();
         notes = notes.map(n => {
           if (!ids.has(n.id) || n.type === 'break') return n;
-          if (e.code === 'ArrowLeft')  return { ...n, startBeat: n.startBeat - (e.shiftKey ? 4 : 1) };
-          if (e.code === 'ArrowRight') return { ...n, startBeat: n.startBeat + (e.shiftKey ? 4 : 1) };
-          if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + (e.shiftKey ? 12 : 1) };
-          if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - (e.shiftKey ? 12 : 1) };
+          if (isHorizontalMove) return { ...n, startBeat: n.startBeat + moveDelta };
+          if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + pitchStep };
+          if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - pitchStep };
           return n;
         });
         // Play pitch preview on up/down — only for single note
@@ -3517,8 +5953,33 @@
         updatePitchRange();
         draw();
       } else {
-        if (e.code === 'ArrowLeft')  seekPlayback(e.shiftKey ? -1 : -5);
-        if (e.code === 'ArrowRight') seekPlayback(e.shiftKey ? 1 : 5);
+        if (e.code === 'ArrowLeft') {
+          nudgeViewport(e.shiftKey ? -160 : -48);
+          return;
+        }
+        if (e.code === 'ArrowRight') {
+          nudgeViewport(e.shiftKey ? 160 : 48);
+          return;
+        }
+      }
+      return;
+    }
+
+    // Tab / Shift+Tab: select next / previous note (single selection only)
+    if (e.code === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote !== null && selectedNotes.size <= 1) {
+      e.preventDefault();
+      const realNotes = notes
+        .filter(n => n.type !== 'break')
+        .sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+      const idx = realNotes.findIndex(n => n.id === selectedNote);
+      if (idx !== -1) {
+        const targetIdx = e.shiftKey ? idx - 1 : idx + 1;
+        if (targetIdx >= 0 && targetIdx < realNotes.length) {
+          const targetId = realNotes[targetIdx].id;
+          selectedNote = targetId;
+          selectedNotes = new Set([targetId]);
+          draw();
+        }
       }
       return;
     }
@@ -3584,8 +6045,14 @@
         draw();
       } else if (setGapMode) {
         cancelSetGapMode();
+      } else if (metronomePickTarget === 1 || metronomePickTarget === 2) {
+        clearMetronomePickTarget();
+        showToast('Metronome downbeat pick cancelled');
       } else if (pasteMode) {
         cancelPaste();
+      } else if (selectedCleanupSegment !== null) {
+        selectedCleanupSegment = null;
+        draw();
       } else if (selectedNotes.size > 0) {
         selectedNotes = new Set();
         selectedNote = null;
@@ -3595,17 +6062,38 @@
       }
     }
 
-    // Note action shortcuts (only when a note is selected and not in an input)
-    if (selectedNote !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        playNotePitch(selectedNote);
-      }
-      // Delete selected flag
-      if ((e.code === 'Delete' || e.code === 'Backspace') && selectedFlag !== null) {
+    if ((e.code === 'Delete' || e.code === 'Backspace') && selectedCleanupSegment !== null) {
+      e.preventDefault();
+      deleteCleanupSegment(selectedCleanupSegment);
+      return;
+    }
+
+    // Delete selected flag or selected breakpoint directly.
+    if ((e.code === 'Delete' || e.code === 'Backspace') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (selectedFlag !== null) {
         e.preventDefault();
         deleteFlag(selectedFlag);
         return;
+      }
+      if (selectedNote !== null) {
+        const selectedBreak = notes.find(n => n.id === selectedNote && n.type === 'break');
+        if (selectedBreak) {
+          e.preventDefault();
+          deleteNote(selectedBreak.id);
+          return;
+        }
+      }
+    }
+
+    // Note action shortcuts (selected note or currently opened note context menu)
+    if ((selectedNote !== null || (contextMenu.visible && contextMenu.noteId !== null)) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const shortcutNoteId = contextMenu.visible && contextMenu.noteId !== null
+        ? contextMenu.noteId
+        : selectedNote;
+
+      if (e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        playNotePitch(shortcutNoteId);
       }
 
       if (e.code === 'Delete' || e.code === 'Backspace') {
@@ -3624,11 +6112,17 @@
       }
       if (e.key.toLowerCase() === 's' && !e.shiftKey && contextMenu.visible) {
         e.preventDefault();
-        splitNote(selectedNote);
+        splitNote(shortcutNoteId);
       }
-      if (e.key.toLowerCase() === 'm' && contextMenu.visible) {
+      if (e.key.toLowerCase() === 'j' && e.shiftKey) {
         e.preventDefault();
-        mergeWithNext(selectedNote);
+        mergeWithPrevious(shortcutNoteId);
+        return;
+      }
+      if (e.key.toLowerCase() === 'j' && !e.shiftKey) {
+        e.preventDefault();
+        mergeWithNext(shortcutNoteId);
+        return;
       }
     }
   }
@@ -3642,7 +6136,9 @@
     playbackBeat = ((currentTime - gapSec) * bpm) / 15;
 
     // ── Loop wrap ──
-    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+    // Segment recording keeps loop visuals, but wrapping is disabled while
+    // recording/preroll is active.
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
       if (playbackBeat >= loopEndBeat) {
         const loopStartTime = beatToTime(loopStartBeat);
         audioEl.currentTime = loopStartTime;
@@ -3676,26 +6172,39 @@
       }
     }
 
+    // Recording hard stop at the segment end so cursor does not drift past
+    // the active range while MediaRecorder stop is still pending.
+    if (segRecPhase === 'recording' && segRecSegmentId !== null) {
+      const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+      if (seg && currentTimeSec >= (seg.endMs / 1000)) {
+        const segEndSec = seg.endMs / 1000;
+        if (audioEl) audioEl.currentTime = segEndSec;
+        currentTimeSec = segEndSec;
+        playbackBeat = timeToBeat(segEndSec);
+        draw();
+        stopSegmentRecording();
+        return;
+      }
+    }
+
     // Scroll logic
     const canvasWidth = canvasEl?.width || 800;
     const minScrollX = getMinBeat() * zoom;
     if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
-      // During loop: auto-scroll but clamp to loop boundaries
-      const loopWidthPx = (loopEndBeat - loopStartBeat) * zoom;
-      if (loopWidthPx > canvasWidth) {
-        // Loop wider than viewport — scroll with playback, clamped to loop region
-        const loopMinScroll = loopStartBeat * zoom - canvasWidth * 0.1;
-        const loopMaxScroll = loopEndBeat * zoom - canvasWidth * 0.9;
-        if (scrollMode) {
-          scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, playbackBeat * zoom - canvasWidth * 0.3));
-        } else {
-          const cursorX = beatToX(playbackBeat);
-          if (cursorX >= canvasWidth || cursorX < 0) {
-            scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, Math.floor(playbackBeat * zoom / canvasWidth) * canvasWidth));
-          }
+      // Keep normal page/follow behavior during loops too, but clamp scroll so
+      // the active viewport stays anchored to the loop region.
+      const loopMinScroll = Math.max(minScrollX, loopStartBeat * zoom);
+      const loopMaxScroll = Math.max(loopMinScroll, (loopEndBeat * zoom) - canvasWidth);
+      if (scrollMode) {
+        const targetScroll = playbackBeat * zoom - canvasWidth * 0.3;
+        scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, targetScroll));
+      } else {
+        const cursorX = beatToX(playbackBeat);
+        if (cursorX >= canvasWidth || cursorX < 0) {
+          const targetScroll = Math.floor(playbackBeat * zoom / canvasWidth) * canvasWidth;
+          scrollX = Math.max(loopMinScroll, Math.min(loopMaxScroll, targetScroll));
         }
       }
-      // If loop fits in viewport, no scrolling needed — user can see everything
     } else if (scrollMode) {
       // Fixed cursor: cursor stays at 30%, notes scroll
       scrollX = Math.max(minScrollX, playbackBeat * zoom - canvasWidth * 0.3);
@@ -3729,6 +6238,7 @@
       audioEl.playbackRate = rate;
       audioEl.preservesPitch = true;
     }
+    saveEditorUiPrefs('playback-rate');
   }
 
   // ──── MIDI Pitch Playback ────────────────────
@@ -3794,23 +6304,18 @@
   }
 
   function updateMetronome(currentBeat) {
-    // Click interval in US beats = one quarter note × divisor
-    const clickInterval = BEATS_PER_QUARTER * metronomeDivisor;
-    // When we have a downbeat reference, shift the click grid so a click falls on it
-    let clickOffset = metronomeOffset;
-    let accentPhase = 0;
-    if (downbeatFromHeader) {
-      const exactBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
-      const dbBeat = Math.round(exactBeat);
-      clickOffset = dbBeat % clickInterval;
-      accentPhase = Math.floor((dbBeat - clickOffset) / clickInterval) % 4;
-    }
+    // Always click quarter notes; accenting is based on downbeat anchors.
+    const clickInterval = getMetronomeClickInterval();
+    const clickOffset = getMetronomeClickOffset();
+    const downbeatAnchor = getMetronomeDownbeatAnchorBeat();
+    const downbeatInterval = Math.max(0.0001, getMetronomeDownbeatInterval());
     const offsetBeat = currentBeat - clickOffset;
     const clickBeat = Math.floor(offsetBeat / clickInterval);
     if (clickBeat !== lastMetronomeBeat) {
       lastMetronomeBeat = clickBeat;
-      // Accent on the downbeat (every 4 clicks = one bar)
-      const isDownbeat = ((clickBeat - accentPhase) % 4 + 4) % 4 === 0;
+      const clickedBeat = clickBeat * clickInterval + clickOffset;
+      const phase = (clickedBeat - downbeatAnchor) / downbeatInterval;
+      const isDownbeat = Math.abs(phase - Math.round(phase)) < 1e-3;
       playMetronomeClick(isDownbeat);
     }
   }
@@ -3818,8 +6323,13 @@
   function toggleMetronome() {
     metronomeEnabled = !metronomeEnabled;
     if (metronomeEnabled) ensureMetronomeCtx();
+    if (!metronomeEnabled) {
+      metronomeToolOpen = false;
+      clearMetronomePickTarget();
+    }
     lastMetronomeBeat = -1;
     console.log('[Metronome]', metronomeEnabled ? 'ON' : 'OFF');
+    saveEditorUiPrefs('metronome-toggle');
   }
 
   function stopAllMidiNotes() {
@@ -3840,6 +6350,7 @@
       stopAllMidiNotes();
     }
     console.log('[MIDI] Pitch playback:', midiPlayback);
+    saveEditorUiPrefs('midi-toggle');
   }
 
   function toggleMuteVocal() {
@@ -3851,10 +6362,152 @@
   function handleVolumeChange(e) {
     audioVolume = parseFloat(e.target.value);
     if (audioEl && !muteVocal) audioEl.volume = audioVolume;
+    saveEditorUiPrefs('audio-volume');
   }
 
   // ──── Mic Sing-Along ────────────────────────────
-  async function loadMicDevices() {
+  function clearMicTrackDisconnectWatchers(track = null) {
+    if (!track) {
+      const active = micStream?.getAudioTracks?.()[0];
+      if (active) clearMicTrackDisconnectWatchers(active);
+      return;
+    }
+    if (micTrackEndedHandler) {
+      track.removeEventListener('ended', micTrackEndedHandler);
+      micTrackEndedHandler = null;
+    }
+    if (micTrackMuteHandler) {
+      track.removeEventListener('mute', micTrackMuteHandler);
+      micTrackMuteHandler = null;
+    }
+  }
+
+  function handleActiveMicDisconnected(reason = 'unknown') {
+    if (micDisconnectHandled) return;
+    micDisconnectHandled = true;
+    console.warn('[Mic] Active microphone disconnected:', reason);
+
+    // In segment-recording modal, do not close the modal on disconnect.
+    // Recover to default mic so user can continue without losing modal state.
+    if (segRecPhase === 'armed') {
+      const shouldRecover = !micStarting;
+      stopMic();
+      if (shouldRecover) {
+        micDeviceId = '';
+        saveEditorUiPrefs('segrec-mic-disconnect-recover-default');
+        micStarting = true;
+        startMic()
+          .then(() => {
+            if (micStream) {
+              showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+            } else {
+              showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+            }
+          })
+          .catch(() => {
+            showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+          })
+          .finally(() => {
+            micStarting = false;
+            draw();
+          });
+      } else {
+        showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+        draw();
+      }
+      return;
+    }
+
+    // For sing-along mode, try to continue on default input automatically.
+    if (micEnabled && segRecPhase === 'idle') {
+      const shouldRecover = !micStarting;
+      stopMic();
+      if (shouldRecover) {
+        micDeviceId = '';
+        saveEditorUiPrefs('mic-disconnect-recover-default');
+        micStarting = true;
+        startMic()
+          .then(() => {
+            if (micStream) {
+              micEnabled = true;
+              showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+            } else {
+              micEnabled = false;
+              showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+            }
+          })
+          .catch(() => {
+            micEnabled = false;
+            showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+          })
+          .finally(() => {
+            micStarting = false;
+            draw();
+          });
+      } else {
+        micEnabled = false;
+        showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+        draw();
+      }
+      return;
+    }
+
+    // Stop ongoing segment capture cleanly if the input vanishes.
+    if (segRecPhase === 'recording' || segRecPhase === 'preroll') {
+      stopSegmentRecording();
+      showToast('Recording stopped: microphone disconnected', MIC_EVENT_TOAST_MS, true);
+    } else if (micEnabled) {
+      showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+    }
+
+    micEnabled = false;
+    stopMic();
+    draw();
+  }
+
+  function installMicTrackDisconnectWatchers(stream) {
+    const track = stream?.getAudioTracks?.()[0];
+    if (!track) return;
+    clearMicTrackDisconnectWatchers(track);
+
+    // `ended` is the most reliable unplug signal; `mute` catches some browsers.
+    micTrackEndedHandler = () => handleActiveMicDisconnected('track-ended');
+    micTrackMuteHandler = () => {
+      if (!micEnabled && segRecPhase === 'idle') return;
+      // Some drivers briefly toggle mute; defer hard stop slightly.
+      setTimeout(() => {
+        const live = track.readyState === 'live';
+        if (!live) handleActiveMicDisconnected('track-muted-not-live');
+      }, 120);
+    };
+
+    track.addEventListener('ended', micTrackEndedHandler);
+    track.addEventListener('mute', micTrackMuteHandler);
+  }
+
+  async function handleMediaDeviceChange() {
+    await loadMicDevices(true);
+    if (!micStream) return;
+    const track = micStream.getAudioTracks()[0];
+    if (!track || track.readyState !== 'live') {
+      handleActiveMicDisconnected('devicechange-no-live-track');
+      return;
+    }
+    const settings = track.getSettings?.() || {};
+    const activeDeviceId = settings.deviceId || micDeviceId;
+    if (activeDeviceId && micDeviceId && activeDeviceId !== micDeviceId) {
+      // Browser auto-switched the live stream to another input (usually default)
+      // after unplugging the previously selected external mic.
+      micDeviceId = activeDeviceId;
+      saveEditorUiPrefs('mic-device-autoswitched');
+      showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+    }
+    if (activeDeviceId && !micDevices.some(d => d.deviceId === activeDeviceId)) {
+      handleActiveMicDisconnected('devicechange-active-missing');
+    }
+  }
+
+  async function loadMicDevices(notifyOnFallback = false) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       micDevices = devices.filter(d => d.kind === 'audioinput');
@@ -3870,6 +6523,16 @@
       if (!micDeviceId && micDevices.length > 0) {
         micDeviceId = micDevices[0].deviceId;
       }
+      // If a persisted/selected device no longer exists (e.g. unplugged),
+      // fall back to first available device to avoid exact-constraint failures.
+      if (micDeviceId && !micDevices.some(d => d.deviceId === micDeviceId)) {
+        console.warn('[Mic] Selected device is no longer available, falling back to default input');
+        micDeviceId = micDevices[0]?.deviceId || '';
+        saveEditorUiPrefs('mic-device-unavailable-fallback');
+        if (notifyOnFallback && (micStream || micEnabled || segRecPhase !== 'idle')) {
+          showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+        }
+      }
     } catch (err) {
       console.error('[Mic] Failed to enumerate devices:', err);
     }
@@ -3877,6 +6540,7 @@
 
   async function startMic() {
     try {
+      micDisconnectHandled = false;
       const audioConstraints = {
         echoCancellation: false, // warm-up latency + distorts pitch signal; highpass filter handles bass
         noiseSuppression: false, // same — introduces ~1s init delay and degrades pitch clarity
@@ -3884,10 +6548,28 @@
         ...(micDeviceId ? { deviceId: { exact: micDeviceId } } : {})
       };
       const constraints = { audio: audioConstraints };
-      micStream = await navigator.mediaDevices.getUserMedia(constraints);
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        const canFallbackToDefault = !!micDeviceId && (err?.name === 'OverconstrainedError' || err?.name === 'NotFoundError');
+        if (!canFallbackToDefault) throw err;
+
+        console.warn('[Mic] Selected input unavailable, retrying with default device', err);
+        micDeviceId = '';
+        saveEditorUiPrefs('mic-device-fallback-default');
+        const fallbackConstraints = {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          }
+        };
+        micStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+      }
 
       micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
       micSourceNode = micAudioCtx.createMediaStreamSource(micStream);
+      installMicTrackDisconnectWatchers(micStream);
 
       // High-pass filter at 200Hz — removes bass bleed from speakers/room rumble
       const highpass = micAudioCtx.createBiquadFilter();
@@ -3934,6 +6616,16 @@
       // Load device list after permission is granted (labels become available)
       await loadMicDevices();
 
+      // Ensure the selected ID reflects the actual active track after fallback/default pick.
+      const activeTrack = micStream?.getAudioTracks?.()[0];
+      if (activeTrack) {
+        const settings = activeTrack.getSettings?.() || {};
+        if (settings.deviceId && settings.deviceId !== micDeviceId) {
+          micDeviceId = settings.deviceId;
+          saveEditorUiPrefs('mic-device-active-track');
+        }
+      }
+
       // Start mic level polling (for the level indicator)
       micLevelTimer = setInterval(() => {
         if (!micAnalyser) return;
@@ -3944,7 +6636,17 @@
           const v = Math.abs(buf[i]);
           if (v > maxVal) maxVal = v;
         }
-        micLevel = Math.min(1, maxVal * 3); // amplify for visibility
+        const nextLevel = Math.min(1, maxVal * 3); // amplify for visibility
+        micLevel = nextLevel;
+        micPeakLevel = Math.max(nextLevel, micPeakLevel * 0.92);
+        if (maxVal >= 0.98) {
+          micOversteering = true;
+          if (micOversteerTimer) clearTimeout(micOversteerTimer);
+          micOversteerTimer = setTimeout(() => {
+            micOversteering = false;
+            micOversteerTimer = null;
+          }, 900);
+        }
       }, 50);
 
       console.log('[Mic] Started — sampleRate:', micAudioCtx.sampleRate);
@@ -3957,11 +6659,15 @@
   function stopMic() {
     if (micLevelTimer) { clearInterval(micLevelTimer); micLevelTimer = null; }
     micLevel = 0;
+    micPeakLevel = 0;
+    micOversteering = false;
+    if (micOversteerTimer) { clearTimeout(micOversteerTimer); micOversteerTimer = null; }
     if (micRecorder && micRecorder.state !== 'inactive') {
       micRecorder.stop();
       console.log('[Mic] MediaRecorder stopped,', micRecordedChunks.length, 'chunks');
     }
     if (micStream) {
+      clearMicTrackDisconnectWatchers(micStream.getAudioTracks()[0]);
       micStream.getTracks().forEach(t => t.stop());
       micStream = null;
     }
@@ -3974,6 +6680,7 @@
     micAnalyser = null;
     micDetector = null;
     micInputBuffer = null;
+    micDisconnectHandled = false;
     console.log('[Mic] Stopped');
   }
 
@@ -3990,12 +6697,375 @@
     }
   }
 
+  // ── Segment recording functions ──
+  function resetSegRecLyricsPreview() {
+    segRecLyricsLoading = false;
+    segRecLyricsError = '';
+    segRecLyricsLines = [];
+    segRecLyricsHyphenated = false;
+  }
+
+  async function generateLyricsForRecordedSegment(silent = false) {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!$sessionId) return;
+    if (!segRecApplied && !segRecBlob) return;
+    if (segRecApplied && !seg) return;
+
+    segRecLyricsLoading = true;
+    segRecLyricsError = '';
+    segRecLyricsLines = [];
+    segRecLyricsHyphenated = false;
+
+    const language = SUPPORTED_LANGUAGES.some(l => l.code === $lyricsData?.language)
+      ? $lyricsData.language
+      : 'auto';
+
+    try {
+      let previewResp;
+      if (segRecApplied) {
+        previewResp = await fetch(`/api/segment-preview/${$sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start_ms: seg.startMs,
+            end_ms: seg.endMs,
+            language,
+            model_preset: segRegenPreset,
+            audio_source: 'edited',
+            source_type: 'cleanup',
+          }),
+        });
+      } else {
+        const fd = new FormData();
+        const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
+        fd.append('recording', segRecBlob, `segment_preview.${ext}`);
+        fd.append('language', language);
+        previewResp = await fetch(`/api/segment-preview-upload/${$sessionId}`, {
+          method: 'POST',
+          body: fd,
+        });
+      }
+
+      const previewData = await previewResp.json().catch(() => ({}));
+      if (!previewResp.ok) {
+        throw new Error(previewData?.detail || previewData?.message || 'Preview lyrics failed');
+      }
+
+      let lines = [];
+      if (Array.isArray(previewData?.lyrics_lines) && previewData.lyrics_lines.length > 0) {
+        lines = previewData.lyrics_lines.map(v => String(v));
+      } else if (typeof previewData?.lyrics === 'string' && previewData.lyrics.trim()) {
+        lines = previewData.lyrics.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else if (typeof previewData?.text === 'string' && previewData.text.trim()) {
+        lines = previewData.text.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      }
+
+      if (lines.length > 0) {
+        try {
+          const hyphenated = await hyphenateSegmentPreviewLines(lines, true);
+          segRecLyricsLines = hyphenated;
+          segRecLyricsHyphenated = true;
+        } catch {
+          segRecLyricsLines = lines;
+          segRecLyricsHyphenated = false;
+        }
+      } else {
+        segRecLyricsLines = ['(No lyrics recognized for this segment)'];
+      }
+
+      if (!silent) showToast('Segment lyrics generated');
+    } catch (err) {
+      console.error('[SegRec] Lyrics generation failed:', err);
+      segRecLyricsError = String(err?.message || err || 'Lyrics generation failed');
+      if (!silent) showToast('Segment lyrics failed');
+    } finally {
+      segRecLyricsLoading = false;
+    }
+  }
+
+  async function armSegmentRecording(segId) {
+    const seg = cleanupSegments.find(s => s.id === segId);
+    console.log(`[SegRec] Arm segment id=${segId} | startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} dur=${seg ? (seg.endMs - seg.startMs).toFixed(0) : '?'}ms`);
+    if (!seg) return;
+
+    // Segment recording has exclusive control: disable interactive tracing/singalong modes first.
+    if (vocalTraceEnabled) {
+      vocalTraceEnabled = false;
+      stopVocalTrace();
+    }
+    if (micEnabled) {
+      micEnabled = false;
+      stopMic();
+    }
+
+    // Ensure mic is running
+    if (!micStream) {
+      micStarting = true;
+      await startMic();
+      micStarting = false;
+      if (!micStream) {
+        console.error('[SegRec] Mic failed to start');
+        return;
+      }
+    }
+
+    segRecSegmentId = segId;
+    segRecApplied = false;
+    segRecBlob = null;
+    resetSegRecLyricsPreview();
+    if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
+    segRecChunks = [];
+
+    // Set loop to segment range so user can practice
+    const startSec = seg.startMs / 1000;
+    const endSec = seg.endMs / 1000;
+    loopStartBeat = timeToBeat(startSec);
+    loopEndBeat = timeToBeat(endSec);
+    loopEnabled = true;
+
+    // Seek to pre-roll start
+    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+
+    segRecPhase = 'armed';
+    closeContextMenu();
+    draw();
+  }
+
+  async function startSegmentRecording() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg || !micStream) { console.warn('[SegRec] startSegmentRecording: missing seg or micStream', { segRecSegmentId, hasMic: !!micStream }); return; }
+
+    const startSec = seg.startMs / 1000;
+    const endSec = seg.endMs / 1000;
+    const durationSec = endSec - startSec;
+    console.log(`[SegRec] Start recording: preroll=${segRecPrerollSec}s region=${startSec.toFixed(2)}–${endSec.toFixed(2)}s dur=${durationSec.toFixed(2)}s`);
+
+    segRecPhase = 'preroll';
+    segRecCountdown = Math.ceil(segRecPrerollSec);
+
+    // Keep segment loop visible while recording for clear visual boundaries.
+    loopStartBeat = timeToBeat(startSec);
+    loopEndBeat = timeToBeat(endSec);
+    loopEnabled = true;
+
+    // Seek to pre-roll start.
+    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+
+    // If preroll would start before time 0, keep the playhead parked at 0 for
+    // the clipped lead duration (c - s), then start playback.
+    const clippedLeadSec = Math.max(0, segRecPrerollSec - startSec);
+    const runningPrerollSec = Math.max(0, segRecPrerollSec - clippedLeadSec);
+    if (clippedLeadSec > 0) {
+      await new Promise(resolve => setTimeout(resolve, clippedLeadSec * 1000));
+      if (segRecPhase !== 'preroll') return; // was cancelled
+    }
+
+    if (!isPlaying) togglePlayback();
+
+    // Countdown
+    segRecCountdownTimer = setInterval(() => {
+      segRecCountdown--;
+      if (segRecCountdown <= 0) {
+        clearInterval(segRecCountdownTimer);
+        segRecCountdownTimer = null;
+      }
+    }, 1000);
+
+    // Start MediaRecorder when playback reaches segment start.
+    await new Promise(resolve => setTimeout(resolve, runningPrerollSec * 1000));
+
+    if (segRecPhase !== 'preroll') return; // was cancelled
+
+    // Start recording
+    segRecChunks = [];
+    const preferredTypes = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus','audio/ogg',''];
+    const mimeType = preferredTypes.find(t => t === '' || MediaRecorder.isTypeSupported(t));
+    segRecRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
+    segRecRecorder.ondataavailable = e => { if (e.data.size > 0) segRecChunks.push(e.data); };
+    segRecRecorder.onstop = () => {
+      segRecBlob = new Blob(segRecChunks, { type: segRecRecorder.mimeType });
+      segRecObjectUrl = URL.createObjectURL(segRecBlob);
+      console.log(`[SegRec] Recording done: mimeType=${segRecRecorder.mimeType} size=${segRecBlob.size} bytes objectUrl=${segRecObjectUrl}`);
+      // Restore loop on the recorded segment for quick retry/listen workflows.
+      loopStartBeat = timeToBeat(startSec);
+      loopEndBeat = timeToBeat(endSec);
+      loopEnabled = true;
+      segRecPhase = 'review';
+      generateLyricsForRecordedSegment(true);
+      draw();
+    };
+    segRecRecorder.start();
+    segRecPhase = 'recording';
+    console.log(`[SegRec] MediaRecorder started: mimeType=${segRecRecorder.mimeType}`);
+    draw();
+
+    // Auto-stop fallback (primary stop uses playback-end clamp in updatePlayback).
+    // Add a small buffer to avoid early stop if recorder start is slightly ahead
+    // of the audible playback clock.
+    segRecStopTimer = setTimeout(() => {
+      if (segRecPhase === 'recording') stopSegmentRecording();
+    }, (durationSec * 1000) + 250);
+  }
+
+  function stopSegmentRecording() {
+    console.log(`[SegRec] Stop recording (phase=${segRecPhase} recorderState=${segRecRecorder?.state})`);
+    if (segRecStopTimer) { clearTimeout(segRecStopTimer); segRecStopTimer = null; }
+    if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
+    if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
+    if (isPlaying) togglePlayback();
+  }
+
+  function cancelSegmentRecording() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    stopSegmentRecording();
+    // Keep loop context anchored to this segment even when closing review.
+    if (seg) {
+      loopStartBeat = timeToBeat(seg.startMs / 1000);
+      loopEndBeat = timeToBeat(seg.endMs / 1000);
+      loopEnabled = true;
+    }
+    if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
+    segRecBlob = null;
+    segRecChunks = [];
+    segRecSegmentId = null;
+    segRecApplied = false;
+    resetSegRecLyricsPreview();
+    segRecPhase = 'idle';
+    micEnabled = false;
+    stopMic();
+    draw();
+  }
+
+  async function applySegmentRecording(closeAfterApply = true) {
+    if (!segRecBlob || segRecSegmentId === null) return;
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg) return;
+
+    segRecUploading = true;
+    try {
+      const formData = new FormData();
+      const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
+      formData.append('recording', segRecBlob, `segment_recording.${ext}`);
+      formData.append('start_ms', String(seg.startMs));
+      formData.append('end_ms', String(seg.endMs));
+
+      const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
+
+      const spliceResult = await resp.json();
+      console.log(`[SegRec] Splice OK:`, spliceResult);
+      const appliedSegId = segRecSegmentId;
+      segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
+      // Bust vocal URL cache so the editor plays the new spliced audio
+      const cacheBust = `?v=${Date.now()}`;
+      vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
+      if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
+      console.log(`[SegRec] Updated vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | audioSource: ${audioSource} → edited`);
+      const wasPlaying = isPlaying;
+      const resumeTime = currentTimeSec || audioEl?.currentTime || 0;
+      if (wasPlaying) {
+        audioEl?.pause();
+        isPlaying = false;
+        cancelAnimationFrame(animFrame);
+      }
+
+      // Force edited source immediately and wait one microtask so the bound <audio src>
+      // is updated before calling load()/seek/play.
+      audioSource = 'edited';
+      currentAudioUrl = vocalUrl;
+      await tick();
+
+      if (audioEl) {
+        // Defensive: set src directly as well (in case DOM binding is delayed).
+        editedAudioLoading = true;
+        if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
+        audioEl.load();
+        audioEl.onloadedmetadata = () => {
+          audioEl.currentTime = Math.max(0, Math.min(resumeTime, audioEl.duration || resumeTime));
+          audioEl.onloadedmetadata = null;
+          if (wasPlaying) audioEl.play().catch(() => {});
+        };
+      }
+
+      // Keep waveform in sync with the patched vocal immediately.
+      loadWaveform(currentAudioUrl);
+      cleanedAudioDirty = true;
+      segRecApplied = true;
+      micEnabled = false;
+      stopMic();
+      handleSave(); // triggers auto-regenerate
+      if (closeAfterApply) {
+        segRecPhase = 'idle';
+        segRecSegmentId = null;
+      } else {
+        segRecPhase = 'review';
+      }
+      // Keep modal open; if preview was generated pre-splice, users already saw it.
+      if (!closeAfterApply && segRecSegmentId === appliedSegId && segRecLyricsLines.length === 0 && !segRecLyricsError) {
+        await generateLyricsForRecordedSegment(true);
+      }
+      showToast('Recording applied');
+    } catch (err) {
+      console.error('[SegRec] Splice failed:', err);
+      alert('Failed to splice recording: ' + err.message);
+    } finally {
+      segRecUploading = false;
+    }
+  }
+
+  async function openSegmentAiFromRecordedPreview() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg || !segRecBlob) return;
+
+    // Ensure the recorded take is inserted before opening AI generation.
+    if (!segRecApplied) {
+      await applySegmentRecording(false);
+      if (!segRecApplied) return;
+    }
+
+    // Ensure we have preview text to prefill the AI modal.
+    if (!segRecLyricsLoading && (segRecLyricsLines.length === 0 || segRecLyricsError)) {
+      await generateLyricsForRecordedSegment(true);
+    }
+
+    const usableLines = segRecLyricsLines
+      .map(v => String(v || '').trim())
+      .filter(v => v.length > 0 && !/^\(no lyrics recognized/i.test(v));
+
+    if (usableLines.length === 0) {
+      showToast('No usable lyrics recognized. Retry recording.');
+      return;
+    }
+
+    const prefillLines = [...usableLines];
+    const prefillHyphenated = !!segRecLyricsHyphenated;
+
+    // Close recording review and open AI modal at the same segment range.
+    cancelSegmentRecording();
+    openSegmentRegenerateFromCleanup(seg);
+
+    // Prefill AI modal state so Generate Notes is immediately available.
+    segRegenPreviewLines = prefillLines;
+    segRegenPreviewHyphenated = prefillHyphenated;
+    segRegenPreviewError = '';
+    segRegenPreviewConfidence = null;
+    showToast('AI modal prefilled from recording preview');
+  }
+
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
+    saveEditorUiPrefs('mic-device-change');
     if (micEnabled) {
       stopMic();
       await startMic();
     }
+  }
+
+  function handleMicGainInput(e) {
+    const value = Number(e.target.value);
+    const nextGain = Math.max(0, Math.min(2, value / 100));
+    micGain = nextGain;
+    if (micGainNode) micGainNode.gain.value = micGain;
   }
 
   function sampleMicPitch(timeSec) {
@@ -4262,13 +7332,21 @@
 
   // ── Pitch line: offline full-song pitch analysis ──
 
+  function getPitchLineAnalysisUrl() {
+    if (audioSource === 'edited') return getEditedAudioUrl();
+    // "Vocals" source should use the same baseline currently used for playback.
+    return originalVocalUrl || vocalUrl;
+  }
+
   async function computePitchLine() {
-    if (!vocalUrl) return;
+    const analysisUrl = getPitchLineAnalysisUrl();
+    if (!analysisUrl) return;
     pitchLineLoading = true;
-    pitchLineSourceUrl = vocalUrl;
+    pitchLineSourceUrl = analysisUrl;
     pitchLineFrames = [];
     try {
-      const response = await fetch(vocalUrl);
+      console.log('[PitchLine] Analysing source', { audioSource, analysisUrl });
+      const response = await fetch(analysisUrl);
       const arrayBuffer = await response.arrayBuffer();
       const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
       const buffer = await tmpCtx.decodeAudioData(arrayBuffer);
@@ -4311,8 +7389,9 @@
   async function togglePitchLine() {
     pitchLineVisible = !pitchLineVisible;
     if (pitchLineVisible) {
-      // Recompute if no data yet or vocal file changed
-      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== vocalUrl) {
+      const expectedSourceUrl = getPitchLineAnalysisUrl();
+      // Recompute if no data yet or selected source changed
+      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== expectedSourceUrl) {
         await computePitchLine();
       } else {
         draw();
@@ -4460,7 +7539,7 @@
     loopStartBeat = startBeat;
     loopEndBeat = startBeat + BEATS_PER_QUARTER;
     loopEnabled = true;
-    console.log(`[Loop] Created loop: beat ${loopStartBeat} → ${loopEndBeat}`);
+    console.log(`[Loop] Created loop: beat ${loopStartBeat} → ${loopEndBeat} | ms ${(beatToTime(loopStartBeat) * 1000).toFixed(1)} → ${(beatToTime(loopEndBeat) * 1000).toFixed(1)} | sec ${beatToTime(loopStartBeat).toFixed(3)} → ${beatToTime(loopEndBeat).toFixed(3)}`);
     draw();
   }
 
@@ -4485,6 +7564,8 @@
   // Load waveform peaks from audio URL via Web Audio API
   async function loadWaveform(url) {
     console.log('[Waveform] Loading from', url);
+    const token = ++waveformLoadToken;
+    waveformLoading = true;
     try {
       const resp = await fetch(url);
       const arrayBuffer = await resp.arrayBuffer();
@@ -4521,6 +7602,8 @@
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);
       waveformPeaks = [];
+    } finally {
+      if (token === waveformLoadToken) waveformLoading = false;
     }
   }
 
@@ -4542,16 +7625,26 @@
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
       // Parse extra headers from ultrastar content
-      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET']);
+      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
       extraHeaders = [];
       let foundDownbeatOffset = false;
+      let loadedMetronomeAnchorMs = null;
+      let loadedMetronomeIg = null;
+      let loadedMetronomeSpeed = null;
       for (const line of (data.ultrastar_content || '').split('\n')) {
         const m = line.match(/^#([\w]+):(.*)/);
         if (m) {
-          if (m[1].toUpperCase() === 'DOWNBEATOFFSET') {
+          const key = m[1].toUpperCase();
+          if (key === 'DOWNBEATOFFSET') {
             downbeatOffsetMs = parseFloat(m[2]) || 0;
             foundDownbeatOffset = true;
-          } else if (!standardKeys.has(m[1].toUpperCase())) {
+          } else if (key === 'METRONOMEANCHOR') {
+            loadedMetronomeAnchorMs = parseFloat(m[2]) || null;
+          } else if (key === 'METRONOMEIG') {
+            loadedMetronomeIg = m[2].trim();
+          } else if (key === 'METRONOMESPEED') {
+            loadedMetronomeSpeed = parseFloat(m[2]) || 1;
+          } else if (!standardKeys.has(key)) {
             extraHeaders.push({ key: m[1], value: m[2] });
           }
         }
@@ -4567,6 +7660,33 @@
 
       bpm = data.bpm;
       gapMs = data.gap_ms;
+
+      // Restore metronome tool state from headers (needs bpm + gapMs resolved first)
+      console.log(`%c[MetronomeTool] Load — raw header values: ANCHOR=${loadedMetronomeAnchorMs} IG=${loadedMetronomeIg} SPEED=${loadedMetronomeSpeed}`, 'color:#7dd3fc');
+      if (loadedMetronomeAnchorMs !== null) {
+        if (loadedMetronomeIg) {
+          const parts = loadedMetronomeIg.split('/');
+          if (parts.length === 2) {
+            metronomeSigNumerator = parseInt(parts[0]) || 4;
+            metronomeSigDenominator = parseInt(parts[1]) || 4;
+          }
+        }
+        metronomeSpeedFactor = loadedMetronomeSpeed !== null ? loadedMetronomeSpeed : 1;
+        metronomeDownbeat1Beat = (loadedMetronomeAnchorMs - data.gap_ms) * data.bpm / 15000;
+        metronomeDownbeat2Beat = null;
+        console.log(`%c[MetronomeTool] Restoring: anchorMs=${loadedMetronomeAnchorMs} → beat=${metronomeDownbeat1Beat?.toFixed(3)} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor} bpm=${data.bpm} gap=${data.gap_ms}`, 'color:#7dd3fc;font-weight:bold');
+        recalcMetronomeFromControls('load');
+        console.log(`%c[MetronomeTool] After recalc: anchorBeat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)} interval=${metronomeManualDownbeatInterval?.toFixed(3)} beatUnit=${metronomeManualBeatUnitInterval?.toFixed(3)}`, 'color:#7dd3fc');
+      } else {
+        console.log('[MetronomeTool] No METRONOMEANCHOR header found — clearing metronome tool state');
+        metronomeDownbeat1Beat = null;
+        metronomeManualDownbeatAnchorBeat = null;
+        metronomeManualDownbeatInterval = null;
+        metronomeManualBeatUnitInterval = null;
+        metronomeSpeedFactor = 1;
+        metronomeSigNumerator = 4;
+        metronomeSigDenominator = 4;
+      }
 
       // Compute first downbeat once on load
       if (!foundDownbeatOffset) {
@@ -4585,6 +7705,9 @@
       bpmChanged = false;
       rawTimings = data.syllable_timings || [];
 
+      cleanupSegmentIdCounter = 1;
+      setCleanupSegmentsFromApi(data.cleanup_segments || []);
+
       // Extract pitches from parsed notes (non-break, in order) for re-quantization
       pitchMap = notes.filter(n => n.type !== 'break').map(n => n.pitch);
       console.log('[Step4] Stored', rawTimings.length, 'raw timings,', pitchMap.length, 'pitches for re-quantization');
@@ -4593,18 +7716,69 @@
       // Restore save state
       editCount = data.edit_count || 0;
       lastSaveTime = data.last_saved ? new Date(data.last_saved * 1000) : null;
+      cleanedAudioAvailable = !!data.cleaned_audio_available;
       hasUnsavedChanges = false;
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
+      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_vocal_splice=${data.has_vocal_splice} has_original_demucs=${data.has_original_demucs}`);
       vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
-      originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
-      // Default to whichever audio is available
-      if (hasVocalsAudio) {
-        audioSource = 'vocals';
-      } else if (hasOriginalAudio) {
-        audioSource = 'original';
+      // If splices exist, original demucs vocal is served at /demucs; else same as vocals
+      originalVocalUrl = (hasVocalsAudio && data.has_original_demucs)
+        ? getAudioUrl($sessionId, 'demucs')
+        : vocalUrl;
+      if (data.has_vocal_splice && cleanupSegments.length > 0 && segRecPatched.size === 0 && !cleanupSegmentsHavePatchedMetadata) {
+        // Legacy sessions may not contain per-segment patched flags.
+        // Favor preserving recorded audio by treating existing segments as patched.
+        segRecPatched = new Set(cleanupSegments.map(s => s.id));
       }
-      console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource);
+      originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
+      console.log(`[Step4] URLs: vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | originalUrl=${originalUrl}`);
+      const defaultSource = hasVocalsAudio ? (data.has_vocal_splice ? 'edited' : 'vocals') : (hasOriginalAudio ? 'original' : 'original');
+      console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | default audioSource=${defaultSource}`);
+      const uiPrefs = restoreEditorUiPrefs();
+      if (uiPrefs) {
+        if (typeof uiPrefs.scrollMode === 'boolean') scrollMode = uiPrefs.scrollMode;
+        if (typeof uiPrefs.playbackRate === 'number' && [0.25, 0.5, 0.75, 1].includes(uiPrefs.playbackRate)) {
+          playbackRate = uiPrefs.playbackRate;
+        }
+        if (typeof uiPrefs.audioVolume === 'number' && Number.isFinite(uiPrefs.audioVolume)) {
+          audioVolume = Math.max(0, Math.min(1, uiPrefs.audioVolume));
+        }
+        if (typeof uiPrefs.midiPlayback === 'boolean') midiPlayback = uiPrefs.midiPlayback;
+        if (typeof uiPrefs.metronomeEnabled === 'boolean') metronomeEnabled = uiPrefs.metronomeEnabled;
+        if (typeof uiPrefs.waveformHeight === 'number' && Number.isFinite(uiPrefs.waveformHeight)) {
+          waveformHeight = Math.max(40, Math.min(240, uiPrefs.waveformHeight));
+        }
+        if (typeof uiPrefs.micDeviceId === 'string') {
+          micDeviceId = uiPrefs.micDeviceId;
+        }
+        if (typeof uiPrefs.vibratoModalX === 'number' && Number.isFinite(uiPrefs.vibratoModalX)) {
+          vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, uiPrefs.vibratoModalX));
+        }
+        if (typeof uiPrefs.vibratoModalY === 'number' && Number.isFinite(uiPrefs.vibratoModalY)) {
+          vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, uiPrefs.vibratoModalY));
+        }
+      }
+      const preferredSource = uiPrefs?.audioSource || defaultSource;
+      audioSource = resolvePreferredAudioSource(preferredSource);
+      if (preferredSource !== audioSource) {
+        console.log(`[Step4] Audio source fallback: preferred=${preferredSource} -> resolved=${audioSource}`);
+      }
+      // Set the reactive audio URL driving the <audio> element
+      const editedUrl = getEditedAudioUrl();
+      currentAudioUrl = audioSource === 'original' ? originalUrl : audioSource === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
+      console.log('[Step4] Audio: vocals=' + hasVocalsAudio + ', original=' + hasOriginalAudio + ', source=' + audioSource + ', currentAudioUrl=' + currentAudioUrl);
+      // Explicitly reload the audio element — Svelte reactive src binding updates the
+      // attribute but the browser does not re-fetch/re-buffer unless load() is called.
+      await tick();
+      if (audioEl && currentAudioUrl) {
+        editedAudioLoading = audioSource === 'edited';
+        if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
+        audioEl.playbackRate = playbackRate;
+        audioEl.preservesPitch = true;
+        audioEl.load();
+      }
+      saveEditorUiPrefs('loadData');
       computeTotalBeats();
 
       // Position playhead and scroll at GAP (song start) — unless we have a saved scroll position
@@ -4629,9 +7803,8 @@
       loadFlags();
 
       // Load waveform for the active audio source
-      const activeAudioUrl = audioSource === 'original' ? originalUrl : vocalUrl;
-      if (activeAudioUrl) {
-        loadWaveform(activeAudioUrl);
+      if (currentAudioUrl) {
+        loadWaveform(currentAudioUrl);
       }
 
       updatePitchRange();
@@ -4643,8 +7816,20 @@
     }
   }
 
+  function scrollViewportToTop() {
+    // Ensure editor opens from the top of the page, not at prior scroll offset.
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }
+
+  $: if ($currentStep === 4) {
+    scrollViewportToTop();
+  }
+
   onMount(() => {
     console.log('[Step4] onMount');
+    scrollViewportToTop();
     if (canvasEl) {
       ctx = canvasEl.getContext('2d');
       resizeCanvas();
@@ -4658,17 +7843,29 @@
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('blur', handleMouseUp);
+    if (navigator.mediaDevices?.addEventListener) {
+      mediaDeviceChangeHandler = () => { handleMediaDeviceChange(); };
+      navigator.mediaDevices.addEventListener('devicechange', mediaDeviceChangeHandler);
+    }
     autosaveInterval = setInterval(() => { if (hasUnsavedChanges) handleSave(); }, 10000);
   });
 
   onDestroy(() => {
-    if (hasUnsavedChanges) handleSave(); // autosave on navigate away
+    console.log(`%c[Step4] onDestroy — hasUnsavedChanges=${hasUnsavedChanges} metronomeAnchor=${metronomeManualDownbeatAnchorBeat} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor}`, 'color:#ffd700;font-weight:bold');
+    if (hasUnsavedChanges) {
+      console.log('[Step4] onDestroy — triggering save');
+      handleSave();
+    } else {
+      console.log('[Step4] onDestroy — nothing to save');
+    }
     // Persist scroll position for this session
     if ($sessionId) {
       localStorage.setItem(`editor_scroll_${$sessionId}`, JSON.stringify({ sx: scrollX, z: zoom }));
     }
+    saveEditorUiPrefs('destroy');
     saveSessionNotes();
     saveFlags();
+    clearCleanupKeyboardSaveTimer();
     if (autosaveInterval) clearInterval(autosaveInterval);
     cancelAnimationFrame(animFrame);
     window.removeEventListener('keydown', handleKeydown);
@@ -4679,8 +7876,44 @@
     window.removeEventListener('mousemove', handleMouseMove);
     window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('blur', handleMouseUp);
+    if (mediaDeviceChangeHandler && navigator.mediaDevices?.removeEventListener) {
+      navigator.mediaDevices.removeEventListener('devicechange', mediaDeviceChangeHandler);
+      mediaDeviceChangeHandler = null;
+    }
+    window.removeEventListener('mousemove', segRegenModalMouseMove);
+    window.removeEventListener('mouseup', segRegenModalMouseUp);
     stopMic();
   });
+
+  // ── Recording modal drag ──
+  let segRecModalX = 10;
+  let segRecModalY = 10;
+  let segRecModalDragging = false;
+  let segRecModalDragOffsetX = 0;
+  let segRecModalDragOffsetY = 0;
+
+  function segRecModalMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-rec-modal-title')) return;
+    segRecModalDragging = true;
+    segRecModalDragOffsetX = e.clientX - segRecModalX;
+    segRecModalDragOffsetY = e.clientY - segRecModalY;
+    window.addEventListener('mousemove', segRecModalMouseMove);
+    window.addEventListener('mouseup', segRecModalMouseUp);
+    e.preventDefault();
+  }
+
+  function segRecModalMouseMove(e) {
+    if (!segRecModalDragging) return;
+    segRecModalX = Math.max(0, Math.min(window.innerWidth - 270, e.clientX - segRecModalDragOffsetX));
+    segRecModalY = Math.max(0, Math.min(window.innerHeight - 200, e.clientY - segRecModalDragOffsetY));
+  }
+
+  function segRecModalMouseUp() {
+    segRecModalDragging = false;
+    window.removeEventListener('mousemove', segRecModalMouseMove);
+    window.removeEventListener('mouseup', segRecModalMouseUp);
+  }
 
   // Reload when we enter this step (one-shot per session)
   $: if ($generationResult && canvasEl && $sessionId && dataLoadedSession !== $sessionId) {
@@ -4692,6 +7925,126 @@
 </script>
 
 <div class="step-content">
+  {#if segRecPhase !== 'idle'}
+    {@const seg = cleanupSegments.find(s => s.id === segRecSegmentId)}
+    <div class="seg-rec-modal" class:seg-rec-recording={segRecPhase === 'recording'}
+      style="left:{segRecModalX}px;top:{segRecModalY}px"
+      on:mousedown={segRecModalMouseDown}>
+      <div class="seg-rec-modal-title">
+        {#if segRecPhase === 'armed'}
+          🎙 Record over segment
+        {:else if segRecPhase === 'preroll'}
+          ⏱ Get ready…
+        {:else if segRecPhase === 'recording'}
+          🔴 Recording
+        {:else if segRecPhase === 'review'}
+          ✅ Review
+        {/if}
+      </div>
+      <div class="seg-rec-modal-info">
+        {seg ? `${(seg.startMs/1000).toFixed(1)}s – ${(seg.endMs/1000).toFixed(1)}s  (${((seg.endMs - seg.startMs)/1000).toFixed(1)}s)` : ''}
+      </div>
+      {#if segRecPhase === 'armed' || segRecPhase === 'preroll' || segRecPhase === 'recording'}
+        <div class="seg-rec-mic-panel">
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Mic</span>
+            <select class="mic-select seg-rec-mic-select" value={micDeviceId} on:change={changeMicDevice} title="Select recording microphone">
+              {#if micDevices.length === 0}
+                <option value="">Default microphone</option>
+              {:else}
+                {#each micDevices as device}
+                  <option value={device.deviceId}>{device.label || `Mic ${micDevices.indexOf(device) + 1}`}</option>
+                {/each}
+              {/if}
+            </select>
+          </div>
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Input</span>
+            <div class="seg-rec-mic-meter" title="Mic input level">
+              <div class="seg-rec-mic-meter-fill" style="width:{Math.round(Math.min(1, micPeakLevel) * 100)}%" class:seg-rec-mic-meter-warm={micPeakLevel > 0.65} class:seg-rec-mic-meter-hot={micPeakLevel > 0.85 || micOversteering}></div>
+              <div class="seg-rec-mic-meter-live" style="left:{Math.round(Math.min(1, micLevel) * 100)}%"></div>
+            </div>
+            <span class="seg-rec-mic-status" class:seg-rec-mic-status-hot={micOversteering}>{micOversteering ? 'CLIP' : 'OK'}</span>
+          </div>
+          <div class="seg-rec-mic-row">
+            <span class="seg-rec-mic-label">Gain</span>
+            <input type="range" class="mic-gain-slider seg-rec-mic-slider" min="0" max="200" step="1"
+                   value={Math.round(micGain * 100)}
+                   on:input={handleMicGainInput}
+                   title={`Mic gain: ${Math.round(micGain * 100)}%`} />
+            <span class="seg-rec-mic-gain-readout">{Math.round(micGain * 100)}%</span>
+          </div>
+          {#if micOversteering}
+            <div class="seg-rec-mic-warning">Input is clipping. Reduce gain or increase distance from the mic.</div>
+          {/if}
+        </div>
+      {/if}
+      {#if segRecPhase === 'preroll'}
+        <div class="seg-rec-countdown-overlay">{segRecCountdown}</div>
+      {/if}
+      {#if segRecPhase === 'review' && segRecObjectUrl}
+        <audio controls src={segRecObjectUrl} style="width:100%;margin:6px 0;"></audio>
+      {/if}
+      {#if segRecPhase === 'review'}
+        <div class="seg-rec-lyrics-panel" style="margin-top:6px; border:1px solid var(--border-weak, #3a3f52); border-radius:8px; padding:8px; background:rgba(17,21,30,0.45);">
+          {#if !segRecApplied && !segRecLyricsLoading && segRecLyricsLines.length === 0 && !segRecLyricsError}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.75;">Recognizing lyrics from recording preview...</div>
+          {:else if segRecLyricsLoading}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.9;display:flex;align-items:center;gap:8px;">
+              <span class="loading-spinner"></span>
+              <span>Recognizing and hyphenating lyrics...</span>
+            </div>
+          {:else if segRecLyricsError}
+            <div style="margin-top:6px;font-size:0.82rem;color:#ff9b9b;">{segRecLyricsError}</div>
+          {:else if segRecLyricsLines.length > 0}
+            <div style="margin-top:6px;max-height:120px;overflow:auto;font-size:0.85rem;line-height:1.35;">
+              {#each segRecLyricsLines as line}
+                <div>{line}</div>
+              {/each}
+            </div>
+          {:else}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.75;">No lyrics generated yet.</div>
+          {/if}
+        </div>
+      {/if}
+      <div class="seg-rec-modal-actions">
+        {#if segRecPhase === 'armed'}
+          <button class="tool-btn sm seg-rec-primary-action" on:click={startSegmentRecording}>▶ Start</button>
+          <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
+        {:else if segRecPhase === 'recording'}
+          <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
+        {:else if segRecPhase === 'review'}
+          <button class="tool-btn sm seg-rec-primary-action" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
+            {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
+          </button>
+          <button class="tool-btn sm" on:click={openSegmentAiFromRecordedPreview} disabled={segRecUploading || segRecLyricsLoading || !segRecBlob}>
+            🤖 Generate AI
+          </button>
+          <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
+          <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
+        {/if}
+      </div>
+      {#if segRecPhase === 'armed'}
+        <div class="seg-rec-hint">Loop is set — practice, then hit Start when ready.</div>
+      {/if}
+    </div>
+  {/if}
+  {#if isRegeneratingCleaned}
+    <div class="loading-modal-overlay" style="z-index:9999">
+      <div class="loading-modal">
+        <span class="loading-spinner"></span>
+        <span class="loading-label">Regenerating cleaned audio…</span>
+      </div>
+    </div>
+  {/if}
+  {#if uiBusy}
+    <div class="editor-busy-shield" aria-live="polite" aria-busy="true">
+      <div class="loading-modal">
+        <span class="loading-spinner"></span>
+        <span class="loading-label">{isRegeneratingCleaned ? 'Processing cleaned audio…' : isSaving ? 'Saving changes…' : 'Processing…'}</span>
+      </div>
+    </div>
+  {/if}
   <div class="toolbar">
     
 
@@ -4751,11 +8104,12 @@
     </div> -->
     <div class="toolbar-toolset-wrapper">
       <div id="mic-controls-wrapper">
-        <button class="tool-btn" class:active={micEnabled} on:click={() => {
+        <button class="tool-btn" class:active={micEnabled} disabled={uiModalGuardActive} class:disabled-audio={uiModalGuardActive} on:click={() => {
+          if (uiModalGuardActive) return;
           micEnabled = !micEnabled;
           if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
           toggleMic();
-        }} title="Microphone sing-along (M)">
+        }} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Microphone sing-along (M)'}>
           Mic <span class="mic-icon-wrap" class:mic-off={!micEnabled}>🎙️</span>
         </button>
       {#if micEnabled}
@@ -4764,9 +8118,9 @@
                class:mic-level-hot={micLevel > 0.8}
                class:mic-level-warm={micLevel > 0.3 && micLevel <= 0.8}></div>
         </div>
-        <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
-               value={Math.round(micGain * 100)}
-               on:input={(e) => { micGain = parseInt(e.target.value) / 100; if (micGainNode) micGainNode.gain.value = micGain; }}
+         <input type="range" class="mic-gain-slider" min="0" max="200" step="1"
+           value={Math.round(micGain * 100)}
+           on:input={handleMicGainInput}
                title="Mic volume: {Math.round(micGain * 100)}%" />
         <select class="mic-select" bind:value={pitchTolerance} on:change={() => draw()} title="Pitch tolerance (difficulty)">
           <option value={1}>Hard (±1)</option>
@@ -4796,13 +8150,14 @@
       </div>
       <div id="vocal_trace_outer_wrapper">
         <div id="vocal_trace-controls-wrapper">
-          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio} on:click={(e) => {
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} on:click={(e) => {
+            if (uiModalGuardActive) return;
             if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
             vocalTraceEnabled = !vocalTraceEnabled;
             if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
             toggleVocalTrace();
             e.currentTarget.blur();
-          }} title={hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
+          }} title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
             Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
           </button>
           {#if vocalTraceLoading}
@@ -4828,16 +8183,16 @@
           {/if}
         </div>
         <div id="pitch-line-controls-wrapper">
-          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio}
-            on:click={() => { if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
-            title={hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
+          <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} disabled={uiModalGuardActive}
+            on:click={() => { if (uiModalGuardActive) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
+            title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute pitch from selected Vocals/Edited source (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
             Pitch <span style="font-size:0.85em">〰️</span>
           </button>
           {#if pitchLineLoading}
             <div class="loading-modal-overlay">
               <div class="loading-modal">
                 <span class="loading-spinner"></span>
-                <span class="loading-label">Analysing vocal pitch…</span>
+                <span class="loading-label">Analysing pitch…</span>
               </div>
             </div>
           {/if}
@@ -4852,13 +8207,14 @@
           <!-- <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); handleBpmChange(); }}>−</button> -->
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.1)) * 1000) / 1000; handleBpmChange(); }}>−.1</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.01)) * 1000) / 1000; handleBpmChange(); }}>−.01</button> -->
-          <input type="number" class="bpm-input" bind:value={bpm} on:change={() => { console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" />
+          <input type="number" class="bpm-input" class:disabled-audio={uiModalGuardActive} bind:value={bpm} on:change={() => { if (uiModalGuardActive) return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={uiModalGuardActive} />
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
-          <button class="tool-btn" style="margin-left: 4px;"
-                on:click={openTapper}
-                title="Tap the beat to calculate BPM (Enter key)">
+              <button class="tool-btn" class:disabled-audio={uiModalGuardActive} style="margin-left: 4px;"
+                on:click={() => { if (uiModalGuardActive) return; openTapper(); }}
+                disabled={uiModalGuardActive}
+                title={uiModalGuardActive ? 'Disabled while modal is active' : 'Tap the beat to calculate BPM (Enter key)'}>
             Tap
           </button>
           <!-- Cal button kept for reference (beat marker calibration)
@@ -4871,22 +8227,23 @@
         </div>
         <div id="gap-controls" title="Click to set a new GAP position on the waveform (Ctrl+G)">
           <span class="bpm-label gap-label">GAP</span>
-          <span class="gap-input gap-display" role="button" tabindex="0"
-            on:click={enterSetGapMode}
-            on:keydown={(e) => e.key === 'Enter' && enterSetGapMode()}
-            title="Click to set GAP (Ctrl+G) — {gapMs}ms">
+          <span class="gap-input gap-display" class:disabled-audio={uiModalGuardActive} role="button" tabindex="0"
+            on:click={() => { if (uiModalGuardActive) return; enterSetGapMode(); }}
+            on:keydown={(e) => { if (uiModalGuardActive) return; e.key === 'Enter' && enterSetGapMode(); }}
+            title={uiModalGuardActive ? 'Disabled while modal is active' : `Click to set GAP (Ctrl+G) — ${gapMs}ms`}
+            >
             {gapMs} ms
           </span>
         </div>
       </div>
       <div id="edit-controls-wrapper">
-        <button class="tool-btn" on:click={autoFixWordSpaces} title="Convert old-style leading spaces to trailing (for imported songs)">
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; autoFixWordSpaces(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
            Fix Spaces&nbsp;🔤
         </button>
-        <button class="tool-btn" on:click={openTextEditor} title="Edit raw Ultrastar .txt">
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; openTextEditor(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Edit raw Ultrastar .txt'}>
            Text&nbsp;📝 
         </button>
-        <button class="tool-btn" on:click={() => { loadSessionNotes(); showNotesModal = true; }} title="Session notes">
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; loadSessionNotes(); showNotesModal = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
       </div>
@@ -4902,7 +8259,7 @@
           <span class="mic-icon-wrap" class:mic-off={!loopEnabled}>🔁</span>
         </button>
         <button class="tool-btn" style="width: 62px;"
-          on:click={() => { scrollMode = !scrollMode; }}
+          on:click={toggleScrollMode}
           title={scrollMode ? 'Following playhead — click to pin' : 'View pinned — click to follow'}>
           {scrollMode ? 'Scroll' : 'Page'}
         </button>
@@ -4922,8 +8279,9 @@
       </div>
       <div id="audio-source-wrapper">
         <div class="audio-source-toggle" title="Audio source">
-          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio} on:click={() => hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals')} title={hasVocalsAudio ? 'Vocals' : 'No vocals — go to Step 1 to extract or upload'}>Vocals 🎤</button>
-          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio} on:click={() => hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original')} title={hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
+          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
+          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0) || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
+          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
         </div>
         <div class="volume-control" title="Audio volume">
           <span class="volume-icon" on:click={toggleMuteVocal}>
@@ -4942,9 +8300,9 @@
           <span>Metronome</span><span style="padding-left: 4px">{metronomeEnabled ? ' 🔈' : ' 🔇'}</span>
         </button>
         {#if metronomeEnabled}
-          <button class="tool-btn sm" class:active={metronomeDivisor === 1} on:click={() => { metronomeDivisor = 1; lastMetronomeBeat = -1; draw(); }} title="Click every quarter note">♩</button>
-          <button class="tool-btn sm" class:active={metronomeDivisor === 2} on:click={() => { metronomeDivisor = 2; lastMetronomeBeat = -1; draw(); }} title="Click every half note">𝅗𝅥</button>
-          <button class="tool-btn sm" class:active={metronomeDivisor === 4} on:click={() => { metronomeDivisor = 4; lastMetronomeBeat = -1; draw(); }} title="Click every bar (4/4)">𝄺</button>
+          <button class="tool-btn sm" class:active={metronomeToolOpen} on:click={() => { metronomeToolOpen = !metronomeToolOpen; if (!metronomeToolOpen) clearMetronomePickTarget(); }} title="Open metronome downbeat tool">
+            ⚙️
+          </button>
         {/if}
       </div>
     </div>
@@ -4966,7 +8324,7 @@
     {#if showWaveform}
       <input type="range" class="wave-height-slider wave-height-overlay" min="40" max="240" step="10"
              bind:value={waveformHeight}
-             on:input={() => { resizeCanvas(); draw(); }}
+             on:input={() => { saveEditorUiPrefs('waveform-height'); resizeCanvas(); draw(); }}
              title="Waveform height: {waveformHeight}px" />
     {/if}
     
@@ -5097,7 +8455,7 @@
 
   <!-- Set GAP mode overlay bar -->
   {#if toastMsg}
-    <div class="toast-bar">{toastMsg}</div>
+    <div class="toast-bar" class:toast-center={toastCenter}>{toastMsg}</div>
   {/if}
 
   {#if setGapMode}
@@ -5131,6 +8489,8 @@
   {#if contextMenu.visible}
     {@const ctxNote = notes.find(n => n.id === contextMenu.noteId)}
     {@const isMultiCtx = selectedNotes.size > 1 && selectedNotes.has(contextMenu.noteId)}
+    {@const canMergePrev = ctxNote && !isMultiCtx && canMergeWithPrevious(ctxNote.id)}
+    {@const canMergeNext = ctxNote && !isMultiCtx && canMergeWithNext(ctxNote.id)}
     {#if ctxNote}
       <div
         class="context-menu"
@@ -5140,13 +8500,13 @@
         {#if contextMenu.isBreak}
           <!-- Break context menu -->
           <div class="ctx-header">
-            <span class="ctx-break-label">Break @ beat {ctxNote.startBeat}</span>
+            <span class="ctx-break-label">🔴 Break @ beat {ctxNote.startBeat}</span>
           </div>
           <div class="ctx-divider"></div>
-          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat = n.startBeat - 1; notes = [...notes]; markUnsaved(); draw(); } }}>
+          <button class="ctx-item" on:click={() => nudgeBreak(ctxNote.id, -1)}>
             ← Nudge Left <span class="ctx-shortcut">-1</span>
           </button>
-          <button class="ctx-item" on:click={() => { pushUndo(); const n = notes.find(n2 => n2.id === ctxNote.id); if(n) { n.startBeat += 1; notes = [...notes]; markUnsaved(); draw(); } }}>
+          <button class="ctx-item" on:click={() => nudgeBreak(ctxNote.id, 1)}>
             → Nudge Right <span class="ctx-shortcut">+1</span>
           </button>
           <div class="ctx-divider"></div>
@@ -5190,8 +8550,14 @@
           <button class="ctx-item" on:click={() => splitNote(ctxNote.id, contextMenu.beat)}>
             ✂️ Split Note <span class="ctx-shortcut">S</span>
           </button>
-          <button class="ctx-item" on:click={() => mergeWithNext(ctxNote.id)}>
-            🔗 Merge with Next <span class="ctx-shortcut">M</span>
+          <button class="ctx-item" on:click={() => openVibratoModal(ctxNote.id)}>
+            〰️ Vibrato Tool
+          </button>
+          <button class="ctx-item" disabled={!canMergePrev} on:click={() => mergeWithPrevious(ctxNote.id)}>
+            🔗 Join with Previous <span class="ctx-shortcut">Shift+J</span>
+          </button>
+          <button class="ctx-item" disabled={!canMergeNext} on:click={() => mergeWithNext(ctxNote.id)}>
+            🔗 Join with Next <span class="ctx-shortcut">J</span>
           </button>
           <div class="ctx-divider"></div>
           {/if}
@@ -5242,6 +8608,77 @@
           ✕ Cancel <span class="ctx-shortcut">Esc</span>
         </button>
       </div>
+    {:else if contextMenu.isCleanup}
+      {@const seg = cleanupSegments.find(s => s.id === contextMenu.cleanupId)}
+      {@const isPatchedSeg = seg ? segRecPatched.has(seg.id) : false}
+      {@const joinNeighbors = seg ? getJoinableCleanupNeighborsForSegment(seg.id) : { left: null, right: null }}
+      {#if seg}
+        <div
+          class="context-menu"
+          bind:this={contextMenuEl}
+          style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+        >
+          <div class="ctx-header">
+            <span class="ctx-location-label">🧹 Cleanup {(seg.startMs/1000).toFixed(2)}s → {(seg.endMs/1000).toFixed(2)}s</span>
+          </div>
+          <div class="ctx-divider"></div>
+          <button class="ctx-item" on:click={() => armSegmentRecording(seg.id)}>
+            🎙 Record over this segment
+          </button>
+          <button class="ctx-item" on:click={() => openSegmentRegenerateFromCleanup(seg)}>
+            🤖 AI Generate Notes In Segment
+          </button>
+          {#if isPatchedSeg}
+            <button class="ctx-item" on:click={() => emptyRecordedCleanupSegment(seg.id)}>
+              🧼 Make Segment Empty
+            </button>
+          {/if}
+          <button class="ctx-item" on:click={() => splitCleanupSegmentAtMs(seg.id, contextMenu.ms)}>
+            ✂️ Split Cleanup Segment
+          </button>
+          {#if joinNeighbors.left || joinNeighbors.right}
+            <div class="ctx-divider"></div>
+          {/if}
+          {#if joinNeighbors.left}
+            <button class="ctx-item" on:click={() => joinCleanupSegments(joinNeighbors.left.left.id, joinNeighbors.left.right.id)}>
+              🔗 Join with Previous Segment
+            </button>
+          {/if}
+          {#if joinNeighbors.right}
+            <button class="ctx-item" on:click={() => joinCleanupSegments(joinNeighbors.right.left.id, joinNeighbors.right.right.id)}>
+              🔗 Join with Next Segment
+            </button>
+          {/if}
+          <button class="ctx-item danger" on:click={() => deleteCleanupSegment(seg.id)}>
+            🗑 Delete Cleanup Segment
+          </button>
+        </div>
+      {/if}
+    {:else if contextMenu.isWaveformEmpty}
+      {@const joinPair = getJoinableCleanupPairAtMs(contextMenu.ms)}
+      <div
+        class="context-menu"
+        bind:this={contextMenuEl}
+        style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
+      >
+        <div class="ctx-header">
+          <span class="ctx-location-label">Waveform @ {((contextMenu.ms ?? 0) / 1000).toFixed(3)}s</span>
+        </div>
+        <div class="ctx-divider"></div>
+        <button class="ctx-item" on:click={() => addCleanupSegmentAtMs(contextMenu.ms ?? 0)}>
+          🧹 Add Cleanup Segment
+        </button>
+        {#if isBeatInsideActiveLoop(contextMenu.beat)}
+          <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
+            🤖 AI Generate Notes In Loop
+          </button>
+        {/if}
+        {#if joinPair}
+          <button class="ctx-item" on:click={() => joinCleanupSegments(joinPair.left.id, joinPair.right.id)}>
+            🔗 Join Adjacent Cleanup Segments
+          </button>
+        {/if}
+      </div>
     {:else if contextMenu.isFlag}
       <!-- Flag context menu -->
       <div
@@ -5250,13 +8687,13 @@
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
         <div class="ctx-header">
-          <span class="ctx-location-label">🚩 Flag @ beat {contextMenu.beat}</span>
+          <span class="ctx-location-label">🟢 Flag @ beat {contextMenu.beat}</span>
         </div>
         <div class="ctx-divider"></div>
-        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat - 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+        <button class="ctx-item" on:click={() => nudgeFlag(contextMenu.flagId, -1)}>
           ← Nudge Left <span class="ctx-shortcut">-1</span>
         </button>
-        <button class="ctx-item" on:click={() => { const f = flags.find(fl => fl.id === contextMenu.flagId); if(f) { f.beat = f.beat + 1; flags = [...flags]; saveFlags(); draw(); closeContextMenu(); } }}>
+        <button class="ctx-item" on:click={() => nudgeFlag(contextMenu.flagId, 1)}>
           → Nudge Right <span class="ctx-shortcut">+1</span>
         </button>
         <div class="ctx-divider"></div>
@@ -5284,11 +8721,16 @@
           🎵 Add Note
         </button>
         <button class="ctx-item" on:click={() => addBreakAt(contextMenu.beat)}>
-          ┃ Add Break
+          🔴 Add Break
         </button>
         <button class="ctx-item" on:click={() => addFlagAt(contextMenu.beat)}>
-          🚩 Add Flag
+          🟢 Add Flag
         </button>
+        {#if isBeatInsideActiveLoop(contextMenu.beat)}
+          <button class="ctx-item" on:click={openSegmentRegenerateFromLoopContext}>
+            🤖 AI Generate Notes In Loop
+          </button>
+        {/if}
         {#if clipboard}
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={() => { finalizePaste(contextMenu.beat); closeContextMenu(); }}>
@@ -5309,12 +8751,29 @@
       bind:this={scrollTrackEl}
       on:pointerdown={onScrollTrackPointerDown}
     >
+      <div class="scrollbar-cleanup-lane" aria-hidden="true">
+        {#each cleanupSegments as seg (seg.id)}
+          {@const startPct = ((timeToBeat(seg.startMs / 1000) - getMinBeat()) / scrollBeatRange * 100)}
+          {@const endPct = ((timeToBeat(seg.endMs / 1000) - getMinBeat()) / scrollBeatRange * 100)}
+          {@const widthPct = Math.max(0.2, endPct - startPct)}
+          <div
+            class="scrollbar-cleanup-seg"
+            class:patched={segRecPatched.has(seg.id)}
+            style="left: {startPct.toFixed(3)}%; width: {widthPct.toFixed(3)}%;"
+          ></div>
+        {/each}
+      </div>
       <!-- playhead tick -->
       {#if !isPlaying}
         <div class="scrollbar-playhead" style="left: {playheadPct}%"></div>
       {/if}
       {#each flags as flag}
         <div class="scrollbar-flag" style="left: {((flag.beat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+      {/each}
+      {#each notes as note (note.id)}
+        {#if note.type === 'break'}
+          <div class="scrollbar-break" style="left: {((note.startBeat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+        {/if}
       {/each}
       <!-- draggable handle -->
       <div class="scrollbar-handle" style="left: {scrollHandlePct}%"></div>
@@ -5328,6 +8787,8 @@
     <span class="legend-item"><span class="dot orange"></span> Rap note</span>
     <span class="legend-item"><span class="dot red-line"></span> Break line</span>
     <span class="legend-item"><span class="dot green-flag"></span> Flag</span>
+    <span class="legend-item"><span class="dot cleanup-range"></span> Cleanup segment</span>
+    <span class="legend-item"><span class="dot recorded-range"></span> Recorded segment</span>
   </div>
 
   <!-- Stats bar for debugging timing -->
@@ -5346,7 +8807,9 @@
   {/if}
 
   <!-- Hidden audio element for playback -->
-  <audio bind:this={audioEl} src={vocalUrl || originalUrl} preload="auto"
+  <audio bind:this={audioEl} src={currentAudioUrl} preload="auto"
+    on:canplay={() => { editedAudioLoading = false; }}
+    on:error={() => { editedAudioLoading = false; }}
     on:ended={() => {
       isPlaying = false;
       cancelAnimationFrame(animFrame);
@@ -5355,6 +8818,68 @@
       console.log('[Audio] Reached end of track — stopped playback');
     }}
   ></audio>
+
+  {#if metronomeEnabled && metronomeToolOpen}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="metronome-tool-modal"
+      style="left:{metronomeToolX}px;top:{metronomeToolY}px"
+      on:mousedown={metronomeToolMouseDown}
+      role="dialog"
+      aria-label="Metronome downbeat tool"
+    >
+      <div class="metronome-tool-title">⏱ Metronome Downbeat Tool</div>
+
+      <div class="metronome-tool-row">
+        <button class="tool-btn sm" class:active={metronomePickTarget === 1} on:click={() => armMetronomeDownbeatPick(1)}>
+          Set Downbeat
+        </button>
+      </div>
+
+      <div class="metronome-signature-row">
+        <select class="mic-select" bind:value={metronomeSigNumerator} on:change={(e) => { metronomeSigNumerator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature numerator">
+          {#each METRONOME_SIGNATURE_NUM_OPTIONS as num}
+            <option value={num}>{num}</option>
+          {/each}
+        </select>
+        <span class="metronome-signature-slash">/</span>
+        <select class="mic-select" bind:value={metronomeSigDenominator} on:change={(e) => { metronomeSigDenominator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature denominator">
+          {#each METRONOME_SIGNATURE_DEN_OPTIONS as den}
+            <option value={den}>{den}</option>
+          {/each}
+        </select>
+      </div>
+
+      {#if getMetronomeSignatureIntervalBeats() === null}
+        <div class="metronome-signature-warning">
+          Impossible value for this BPM grid. Choose another signature.
+        </div>
+      {:else}
+        <div class="metronome-signature-hint">
+          Measure size: {getMetronomeSignatureIntervalBeats()?.toFixed(3)} beats
+        </div>
+      {/if}
+
+      <div class="metronome-signature-hint">
+        Downbeat: {metronomeDownbeat1Beat === null ? 'not set' : metronomeDownbeat1Beat.toFixed(3)}
+      </div>
+
+      <div class="metronome-speed-row">
+        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('slower')} title="Half speed">−</button>
+        <span class="metronome-speed-value">Speed x{metronomeSpeedFactor}</span>
+        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('faster')} title="Double speed">+</button>
+      </div>
+
+      <div class="metronome-tool-row">
+        <button class="tool-btn sm" on:click={clearMetronomeDownbeatReference}>
+          Reset
+        </button>
+        <button class="tool-btn sm" on:click={() => { metronomeToolOpen = false; clearMetronomePickTarget(); }}>
+          Close
+        </button>
+      </div>
+    </div>
+  {/if}
 
   <div class="shortcut-bar">
     <div class="shortcut-group">
@@ -5380,6 +8905,10 @@
     <div class="shortcut-group">
       <span class="shortcut-label">Edit</span>
       <span class="shortcut"><kbd>Drag</kbd> move</span>
+      <span class="shortcut"><kbd>Tab</kbd> next note</span>
+      <span class="shortcut"><kbd>Shift+Tab</kbd> previous note</span>
+      <span class="shortcut"><kbd>↑↓</kbd> pitch ±1 semitone</span>
+      <span class="shortcut"><kbd>Ctrl+↑↓</kbd> pitch ±1 octave</span>
       <span class="shortcut"><kbd>S</kbd> split</span>
       <span class="shortcut"><kbd>Del</kbd> delete</span>
       <span class="shortcut"><kbd>P</kbd> play pitch</span>
@@ -5442,12 +8971,193 @@
       </div>
     </div>
   {/if}
+
+  {#if segRegenModalOpen}
+    {#if segRegenModalBlocking}
+      <div class="seg-regen-global-blocker" aria-live="polite" aria-label={segRegenModalBlockingLabel}>
+        <div class="loading-modal seg-regen-loading-modal">
+          <span class="loading-spinner"></span>
+          <span class="loading-label">{segRegenModalBlockingLabel}</span>
+        </div>
+      </div>
+    {/if}
+
+    <div
+      class="seg-regen-modal"
+      style="left:{segRegenModalX}px;top:{segRegenModalY}px"
+      on:mousedown={segRegenModalMouseDown}
+      role="dialog"
+      aria-label="AI note generation"
+      aria-busy={segRegenModalBlocking}
+    >
+      <div class="seg-regen-modal-title">🤖 AI Note Generation</div>
+      <div class="seg-regen-modal-subtitle">
+        Section · {formatTime(segRegenRange.startMs / 1000)} → {formatTime(segRegenRange.endMs / 1000)}
+      </div>
+
+      <div class="seg-regen-options-grid">
+        <label>
+          Language
+          <select class="mic-select" bind:value={segRegenLanguage}>
+            <option value="auto">Auto</option>
+            {#each SUPPORTED_LANGUAGES as lang}
+              <option value={lang.code}>{lang.label}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="seg-regen-audio-label" title="important: select the adio source">
+          <span class="seg-regen-audio-head">
+            <span>Audio Source</span>
+            <span class="seg-regen-audio-flag">!</span>
+          </span>
+          <select class="mic-select seg-regen-audio-select" bind:value={segRegenAudioSource}>
+            <option value="vocals">Vocal{segRegenCurrentEditorSource === 'vocals' ? ' (current)' : ''}</option>
+            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited{segRegenCurrentEditorSource === 'edited' ? ' (current)' : ''}</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="seg-regen-toggle">
+        <input type="checkbox" bind:checked={segRegenAutoHyphenate} />
+        Auto-hyphenate after preview
+      </label>
+      <div class="seg-regen-actions">
+        <button class="btn btn-primary" on:click={previewSegmentLyrics} disabled={segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}>Preview Lyrics</button>
+        <button
+          class="btn"
+          disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+          on:click={async () => {
+            if (segRegenPreviewLines.length === 0) {
+              showToast('Run Preview Lyrics first');
+              return;
+            }
+            segRegenPreviewLines = await hyphenateSegmentPreviewLines(segRegenPreviewLines);
+          }}
+        >Hyphenate</button>
+        <button
+          class="btn"
+          disabled={segRegenPreviewLines.length === 0 || segRegenPreviewLoading || segRegenHyphenateLoading || segRegenGenerateLoading}
+          on:click={generateNotesFromSegmentPreview}
+        >{segRegenGenerateLoading ? 'Generating...' : 'Generate Notes'}</button>
+      </div>
+      <div class="seg-regen-preview">
+        {#if segRegenPreviewLoading}
+          <div class="seg-regen-preview-state">Recognizing lyrics...</div>
+        {:else if segRegenHyphenateLoading}
+          <div class="seg-regen-preview-state">Applying hyphenation...</div>
+        {:else if segRegenPreviewError}
+          <div class="seg-regen-preview-error">{segRegenPreviewError}</div>
+        {:else if segRegenPreviewLines.length > 0}
+          <div class="seg-regen-preview-head">
+            <span>Preview {segRegenPreviewHyphenated ? '(hyphenated)' : '(raw)'}</span>
+            {#if segRegenPreviewConfidence !== null}
+              <span>Conf {(segRegenPreviewConfidence * 100).toFixed(0)}%</span>
+            {/if}
+          </div>
+          <div class="seg-regen-preview-body">
+            {#each segRegenPreviewLines as line}
+              <div class="seg-regen-preview-line">{line}</div>
+            {/each}
+          </div>
+        {:else}
+          <div class="seg-regen-preview-state">No preview yet.</div>
+        {/if}
+      </div>
+
+      <div class="seg-regen-footer">
+        <button class="btn" on:click={closeSegmentRegenerateModal}>Close</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if vibratoModalOpen}
+    {@const vibratoNote = notes.find(n => n.id === vibratoNoteId && n.type !== 'break')}
+    {#if vibratoNote}
+      <div
+        class="vibrato-modal"
+        style="left:{vibratoModalX}px;top:{vibratoModalY}px"
+        on:mousedown={vibratoModalMouseDown}
+        role="dialog"
+        aria-label="Vibrato tool"
+      >
+        <div class="seg-regen-modal-title">〰️ Vibrato Tool</div>
+        <div class="seg-regen-modal-subtitle">
+          Note · {formatTime(beatToTime(vibratoNote.startBeat))} → {formatTime(beatToTime(vibratoNote.startBeat + vibratoNote.duration))} · {noteName(vibratoNote.pitch)}
+        </div>
+
+        <label class="seg-regen-audio-label" title="important: select the audio source">
+          <span class="seg-regen-audio-head">
+            <span>Audio Source</span>
+            <span class="seg-regen-audio-flag">!</span>
+          </span>
+          <select class="mic-select seg-regen-audio-select" bind:value={vibratoAudioSource}>
+            <option value="vocals">Vocal{vibratoCurrentEditorSource === 'vocals' ? ' (current)' : ''}</option>
+            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited{vibratoCurrentEditorSource === 'edited' ? ' (current)' : ''}</option>
+          </select>
+        </label>
+
+        <label>
+          Sensitivity
+          <select class="mic-select" bind:value={vibratoSensitivity} disabled={vibratoLoading}>
+            <option value="subtle">Subtle (capture small nuances)</option>
+            <option value="balanced">Balanced</option>
+            <option value="strict">Strict (clean-only)</option>
+          </select>
+        </label>
+
+        <div class="seg-regen-actions">
+          <button class="btn btn-primary" on:click={analyzeVibratoForSelectedNote} disabled={vibratoLoading}>
+            {vibratoLoading ? 'Analyzing...' : 'Analyze Vibrato'}
+          </button>
+          <button class="btn" on:click={applyVibratoToSelectedNote} disabled={vibratoLoading || vibratoSegments.length < 2}>
+            Apply Split
+          </button>
+        </div>
+
+        <div class="seg-regen-preview">
+          {#if vibratoLoading}
+            <div class="seg-regen-preview-state">Analyzing pitch movement...</div>
+          {:else if vibratoError}
+            <div class="seg-regen-preview-error">{vibratoError}</div>
+          {:else if vibratoSegments.length > 0}
+            <div class="seg-regen-preview-head">
+              <span>Preview ({vibratoSegments.length} slices)</span>
+            </div>
+            <div class="seg-regen-preview-body">
+              {#each vibratoSegments as seg, i}
+                <div class="seg-regen-preview-line">
+                  {i + 1}. {formatTime(seg.start_sec)} → {formatTime(seg.end_sec)} · {noteName(seg.pitch)}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="seg-regen-preview-state">No vibrato analysis yet.</div>
+          {/if}
+        </div>
+
+        <div class="seg-regen-footer">
+          <button class="btn" on:click={closeVibratoModal}>Close</button>
+        </div>
+      </div>
+    {/if}
+  {/if}
 </div>
 
 <style>
   .step-content {
     max-width: 100%;
     margin: 0 auto;
+  }
+
+  .editor-busy-shield {
+    position: fixed;
+    inset: 0;
+    z-index: 9800;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: all;
   }
 
   h2 { color: #4fc3f7; margin-bottom: 1rem; }
@@ -5495,6 +9205,23 @@
     color: #a5d6a7;
     font-size: 0.85rem;
     animation: toast-fadein 0.15s ease;
+  }
+  .toast-bar.toast-center {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9500;
+    align-self: initial;
+    background: rgba(15, 26, 15, 0.94);
+    border: 1px solid #6bcf72;
+    border-radius: 10px;
+    padding: 10px 18px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #d6f5d8;
+    pointer-events: none;
   }
   @keyframes toast-fadein {
     from { opacity: 0; transform: translateY(4px); }
@@ -5893,6 +9620,212 @@
     margin-left: 6px;
   }
 
+  .seg-rec-modal {
+    position: fixed;
+    z-index: 9000;
+    width: 260px;
+    cursor: default;
+    background: #1a2a1a;
+    border: 2px solid #3a7a3a;
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .seg-rec-modal.seg-rec-recording {
+    background: #2a1010;
+    border-color: #c03030;
+    animation: rec-pulse 1s ease-in-out infinite;
+  }
+
+  .seg-rec-modal-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #e0e0e0;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .seg-rec-modal-info {
+    font-size: 0.8rem;
+    color: #9cba9c;
+    font-family: monospace;
+  }
+
+  .seg-rec-mic-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(8, 14, 8, 0.45);
+    border: 1px solid #315531;
+    border-radius: 8px;
+    padding: 8px;
+  }
+
+  .seg-rec-mic-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .seg-rec-mic-label {
+    min-width: 36px;
+    font-size: 0.75rem;
+    color: #b6d0b6;
+    font-weight: 600;
+  }
+
+  .seg-rec-mic-select {
+    flex: 1;
+    max-width: none;
+  }
+
+  .seg-rec-mic-meter {
+    position: relative;
+    flex: 1;
+    height: 10px;
+    border-radius: 6px;
+    border: 1px solid #506050;
+    background: linear-gradient(90deg, #1b5e20 0 65%, #ef6c00 65% 85%, #b71c1c 85% 100%);
+    overflow: hidden;
+  }
+
+  .seg-rec-mic-meter-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: rgba(180, 220, 180, 0.45);
+    transition: width 80ms linear;
+  }
+
+  .seg-rec-mic-meter-fill.seg-rec-mic-meter-warm {
+    background: rgba(255, 214, 118, 0.5);
+  }
+
+  .seg-rec-mic-meter-fill.seg-rec-mic-meter-hot {
+    background: rgba(255, 105, 97, 0.58);
+  }
+
+  .seg-rec-mic-meter-live {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 2px;
+    background: #fff;
+    box-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+    transform: translateX(-1px);
+  }
+
+  .seg-rec-mic-status {
+    width: 32px;
+    text-align: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #9dd69d;
+    letter-spacing: 0.03em;
+  }
+
+  .seg-rec-mic-status.seg-rec-mic-status-hot {
+    color: #ff6b6b;
+  }
+
+  .seg-rec-mic-slider {
+    flex: 1;
+    width: auto;
+  }
+
+  .seg-rec-mic-gain-readout {
+    width: 36px;
+    text-align: right;
+    font-size: 0.72rem;
+    color: #d5e5d5;
+    font-family: monospace;
+  }
+
+  .seg-rec-mic-warning {
+    color: #ff9696;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    background: rgba(120, 0, 0, 0.2);
+    border: 1px solid rgba(255, 120, 120, 0.35);
+    border-radius: 5px;
+    padding: 4px 6px;
+  }
+
+  .seg-rec-countdown-overlay {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9100;
+    font-size: 8rem;
+    font-weight: 900;
+    color: #f0c040;
+    text-shadow: 0 0 40px rgba(240,192,64,0.8), 0 2px 8px rgba(0,0,0,0.9);
+    pointer-events: none;
+    line-height: 1;
+  }
+
+  .seg-rec-hint {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .seg-rec-modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .seg-rec-modal-actions .tool-btn {
+    flex: 1 1 auto;
+  }
+
+  .seg-rec-primary-action {
+    border-color: #5da65d;
+    box-shadow: inset 0 0 0 1px rgba(93, 166, 93, 0.2);
+  }
+
+  .seg-rec-primary-action:hover:not(:disabled) {
+    background: #253625;
+    border-color: #79bd79;
+  }
+
+  .seg-rec-hint {
+    font-size: 0.75rem;
+    color: #778;
+    font-style: italic;
+  }
+
+  .seg-rec-panel {
+    display: none; /* legacy — replaced by modal */
+  }
+
+  @keyframes rec-pulse {
+    0%, 100% { border-color: #c03030; }
+    50% { border-color: #ff6060; }
+  }
+
+  .seg-rec-label {
+    color: #ccc;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .seg-rec-hint {
+    color: #888;
+    font-size: 0.78rem;
+    font-style: italic;
+  }
+
   #mic-controls-wrapper {
     display: flex;
     align-items: center;
@@ -6053,7 +9986,7 @@
   }
 
   .scrollbar-container {
-    padding: 0;
+    padding: 0 0 3px 0;
     background: #12121e;
     border: 1px solid #333;
     border-top: none;
@@ -6061,21 +9994,42 @@
 
   .scrollbar-track {
     position: relative;
-    height: 18px;
+    height: 38px;
     cursor: pointer;
     /* visible rail in the vertical center */
     background: linear-gradient(
       to bottom,
-      transparent 5px,
-      #1a1a2e      5px,
-      #1a1a2e      11px,
-      transparent  11px
+      transparent 6px,
+      #1a1a2e      6px,
+      #1a1a2e      13px,
+      transparent  13px
     );
+  }
+
+  .scrollbar-cleanup-lane {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 1px;
+    height: 8px;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .scrollbar-cleanup-seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: #ff6b6b;
+  }
+
+  .scrollbar-cleanup-seg.patched {
+    background: #80e080;
   }
 
   .scrollbar-handle {
     position: absolute;
-    top: 50%;
+    top: 38%;
     width: 14px;
     height: 14px;
     background: #4fc3f7;
@@ -6084,28 +10038,51 @@
     cursor: grab;
     box-shadow: 0 0 4px rgba(79, 195, 247, 0.6);
     pointer-events: none; /* track handles the pointer events */
+    z-index: 4;
   }
 
   .scrollbar-playhead {
     position: absolute;
     top: 0;
-    bottom: 0;
+    bottom: 10px;
     width: 2px;
     background: #ff4444;
     pointer-events: none;
     transform: translateX(-50%);
     opacity: 0.85;
+    z-index: 3;
   }
 
   .scrollbar-flag {
     position: absolute;
     top: 0;
-    bottom: 0;
+    bottom: 10px;
     width: 2px;
-    background: #4ade80;
+    background: repeating-linear-gradient(
+      to bottom,
+      #4ade80 0 2px,
+      transparent 2px 5px
+    );
     pointer-events: none;
     transform: translateX(-50%);
     opacity: 0.75;
+    z-index: 2;
+  }
+
+  .scrollbar-break {
+    position: absolute;
+    top: 0;
+    bottom: 10px;
+    width: 2px;
+    background: repeating-linear-gradient(
+      to bottom,
+      #ff6b6b 0 2px,
+      transparent 2px 5px
+    );
+    pointer-events: none;
+    transform: translateX(-50%);
+    opacity: 0.85;
+    z-index: 2;
   }
 
   .legend {
@@ -6137,8 +10114,26 @@
   .dot.yellow { background: #fdd835; }
   .dot.gold { background: #ffd700; }
   .dot.orange { background: #ff9800; }
-  .dot.red-line { background: #c62828; width: 2px; height: 12px; }
-  .dot.green-flag { background: #4ade80; width: 2px; height: 12px; }
+  .dot.red-line {
+    background: repeating-linear-gradient(
+      to bottom,
+      #c62828 0 2px,
+      transparent 2px 5px
+    );
+    width: 2px;
+    height: 12px;
+  }
+  .dot.green-flag {
+    background: repeating-linear-gradient(
+      to bottom,
+      #4ade80 0 2px,
+      transparent 2px 5px
+    );
+    width: 2px;
+    height: 12px;
+  }
+  .dot.cleanup-range { background: #ff6b6b; }
+  .dot.recorded-range { background: #80e080; }
 
   .save-controls {
     display: flex;
@@ -6537,6 +10532,16 @@
     background: #2a2a4e;
   }
 
+  .ctx-item:disabled {
+    opacity: 0.45;
+    cursor: default;
+    pointer-events: none;
+  }
+
+  .ctx-item:disabled .ctx-shortcut {
+    opacity: 0.65;
+  }
+
   .ctx-item.danger {
     color: #ef5350;
   }
@@ -6826,10 +10831,6 @@
     -webkit-appearance: none;
   }
 
-  .mic-select:focus {
-    /* outline: 1px solid #4fc3f7; */
-  }
-
   .mic-opt {
     font-size: 12px;
     color: #ccc;
@@ -6837,15 +10838,25 @@
     user-select: none;
   }
 
-  .tool-btn.disabled-audio {
-    opacity: 0.3;
-    cursor: pointer;
-    position: relative;
+  .tool-btn.disabled-audio,
+  .tool-btn:disabled,
+  .bpm-input.disabled-audio,
+  .bpm-input:disabled,
+  .gap-display.disabled-audio {
+    opacity: 0.4;
+    cursor: not-allowed !important;
+    filter: saturate(0.45);
   }
 
-  .tool-btn.disabled-audio:hover {
-    opacity: 0.5;
-    background: #3e2723;
+  .tool-btn.disabled-audio:hover,
+  .tool-btn:disabled:hover {
+    opacity: 0.4;
+    background: #222;
+  }
+
+  .gap-display.disabled-audio:hover {
+    color: #4fc3f7;
+    border-color: #444;
   }
 
   label.disabled-label {
@@ -6973,6 +10984,275 @@
     justify-content: flex-end;
     gap: 0.75rem;
     margin-top: 1rem;
+  }
+
+  .seg-regen-modal {
+    position: fixed;
+    z-index: 9050;
+    width: 390px;
+    cursor: default;
+    background: #111c22;
+    border: 2px solid #2b7084;
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 22px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .vibrato-modal {
+    position: fixed;
+    z-index: 9051;
+    width: 390px;
+    cursor: default;
+    background: #111c22;
+    border: 2px solid #2b7084;
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 22px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .metronome-tool-modal {
+    position: fixed;
+    z-index: 9055;
+    width: 286px;
+    cursor: default;
+    background: #161923;
+    border: 2px solid #4f7aa1;
+    border-radius: 10px;
+    padding: 10px 12px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .metronome-tool-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #cfe8ff;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .metronome-tool-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .metronome-tool-row .tool-btn {
+    flex: 1;
+    font-size: 0.78rem;
+    padding: 4px 6px;
+  }
+
+  .metronome-signature-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .metronome-signature-row .mic-select {
+    min-width: 88px;
+    text-align: center;
+  }
+
+  .metronome-signature-slash {
+    color: #9fc2e6;
+    font-weight: 700;
+  }
+
+  .metronome-signature-hint {
+    font-size: 0.74rem;
+    color: #9fc2e6;
+  }
+
+  .metronome-signature-warning {
+    font-size: 0.74rem;
+    color: #ffb4a8;
+    background: rgba(179, 38, 30, 0.2);
+    border: 1px solid rgba(255, 140, 127, 0.4);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
+
+  .metronome-speed-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .metronome-speed-value {
+    min-width: 92px;
+    text-align: center;
+    font-size: 0.78rem;
+    color: #cfe8ff;
+    font-weight: 600;
+  }
+
+  .seg-regen-global-blocker {
+    position: fixed;
+    inset: 0;
+    z-index: 9100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7, 13, 16, 0.62);
+    pointer-events: all;
+  }
+
+  .seg-regen-loading-modal {
+    padding: 1rem 1.2rem;
+    min-width: 200px;
+  }
+
+  .seg-regen-modal-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: #b6e8ff;
+    cursor: grab;
+    user-select: none;
+  }
+
+  .seg-regen-modal-subtitle {
+    font-size: 0.78rem;
+    color: #8cc7da;
+    font-family: monospace;
+  }
+
+  .seg-regen-mode-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .seg-regen-options-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .seg-regen-options-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.75rem;
+    color: #8ab8c7;
+  }
+
+  .seg-regen-audio-label {
+    background: linear-gradient(180deg, rgba(255, 187, 0, 0.14), rgba(255, 187, 0, 0.06));
+    border: 1px solid rgba(255, 187, 0, 0.45);
+    border-radius: 7px;
+    padding: 6px;
+  }
+
+  .seg-regen-audio-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #ffd666;
+    font-weight: 700;
+  }
+
+  .seg-regen-audio-flag {
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 800;
+    background: #ffb300;
+    color: #261a00;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  }
+
+  .seg-regen-audio-select {
+    border-color: #ffb300;
+    box-shadow: 0 0 0 1px rgba(255, 187, 0, 0.25) inset;
+    max-width: 110px;
+  }
+
+  .seg-regen-mode-help {
+    font-size: 0.77rem;
+    color: #9ab5bf;
+    line-height: 1.35;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(139, 197, 214, 0.2);
+    border-radius: 6px;
+    padding: 7px 8px;
+  }
+
+  .seg-regen-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.77rem;
+    color: #9ec1cd;
+    user-select: none;
+  }
+
+  .seg-regen-toggle input {
+    accent-color: #4fc3f7;
+  }
+
+  .seg-regen-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .seg-regen-preview {
+    border: 1px solid rgba(139, 197, 214, 0.25);
+    border-radius: 6px;
+    background: rgba(7, 13, 16, 0.75);
+    padding: 8px;
+    min-height: 82px;
+  }
+
+  .seg-regen-preview-head {
+    display: flex;
+    justify-content: space-between;
+    color: #8cc7da;
+    font-size: 0.74rem;
+    margin-bottom: 6px;
+  }
+
+  .seg-regen-preview-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 120px;
+    overflow: auto;
+  }
+
+  .seg-regen-preview-line {
+    color: #d5e7ee;
+    font-size: 0.8rem;
+    line-height: 1.25;
+  }
+
+  .seg-regen-preview-state {
+    color: #8faab5;
+    font-size: 0.78rem;
+  }
+
+  .seg-regen-preview-error {
+    color: #ff9f9f;
+    font-size: 0.78rem;
+    line-height: 1.25;
+  }
+
+  .seg-regen-footer {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .btn {

@@ -145,9 +145,11 @@ export function getAudioUrl(sessionId, type) {
 }
 
 // ─── Step 2: Lyrics ────────────────────────────
-export function transcribeAudio(sessionId, language = 'en', signal = null) {
+export function transcribeAudio(sessionId, language = 'en', signal = null, useCleaned = false, modelPreset = 'balanced') {
   return new Promise((resolve, reject) => {
-    const url = `${BASE}/transcribe-stream/${sessionId}?language=${encodeURIComponent(language)}`;
+    let url = `${BASE}/transcribe-stream/${sessionId}?language=${encodeURIComponent(language)}`;
+    if (useCleaned) url += '&use_cleaned=true';
+    url += `&model_preset=${encodeURIComponent(modelPreset)}`;
     console.log(`[API] SSE ${url}`);
     const es = new EventSource(url);
 
@@ -238,13 +240,14 @@ export function streamGenerate(sessionId, onEvent) {
   return es;
 }
 
-export async function startGenerate(sessionId) {
-  return request('POST', `/generate/start/${sessionId}`, null, false, false, null);
+export async function startGenerate(sessionId, useCleaned = false) {
+  const url = useCleaned ? `/generate/start/${sessionId}?use_cleaned=true` : `/generate/start/${sessionId}`;
+  return request('POST', url, null, false, false, null);
 }
 
-export async function pollGenerate(sessionId, onStatus, signal) {
+export async function pollGenerate(sessionId, onStatus, signal, useCleaned = false) {
   // Start generation
-  await startGenerate(sessionId);
+  await startGenerate(sessionId, useCleaned);
   // Poll every 3s until done, error, or cancelled
   return new Promise((resolve, reject) => {
     let interval = setInterval(async () => {
@@ -290,8 +293,41 @@ export async function saveCorrections(sessionId, corrections) {
   return request('POST', `/corrections/${sessionId}`, corrections);
 }
 
-export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders = []) {
-  return request('POST', `/save-editor/${sessionId}`, { notes, bpm, gap_ms: gapMs, extra_headers: extraHeaders });
+export async function saveEditorState(sessionId, notes, bpm, gapMs, extraHeaders = [], cleanupSegments = []) {
+  return request('POST', `/save-editor/${sessionId}`, {
+    notes,
+    bpm,
+    gap_ms: gapMs,
+    extra_headers: extraHeaders,
+    cleanup_segments: cleanupSegments,
+  });
+}
+
+export async function generateCleanedAudio(sessionId, cleanupSegments) {
+  return request('POST', `/generate-cleaned-audio/${sessionId}`, {
+    cleanup_segments: cleanupSegments,
+  });
+}
+
+export async function generateEmptyUltrastar(sessionId) {
+  return request('POST', `/generate/empty/${sessionId}`);
+}
+
+export async function suggestVibrato(sessionId, payload) {
+  return request('POST', `/vibrato-suggest/${sessionId}`, payload);
+}
+
+// ─── Storage Manager ───────────────────────────
+export async function getStorageInfo() {
+  return request('GET', '/storage-info');
+}
+
+export async function cleanupOrphans() {
+  return request('POST', '/cleanup-orphans');
+}
+
+export async function cleanupDebugData() {
+  return request('POST', '/cleanup-debug');
 }
 
 // ─── Step 5: Export ────────────────────────────
