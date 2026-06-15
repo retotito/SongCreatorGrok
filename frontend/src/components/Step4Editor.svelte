@@ -8907,7 +8907,6 @@
             <button class="tool-btn sm" on:click={() => { pitchLineFrames = []; pitchLineSourceUrl = null; pitchLineVisible = false; draw(); }} title="Clear pitch line">🗑</button>
           {/if}
         </div>
-      </div>
       <div id="BPM-controls-wrapper">
         <div class="bpm-controls">
           <span class="bpm-label">BPM</span>
@@ -9856,6 +9855,7 @@
       </div>
     {/if}
   {/if}
+</div>
 
 <style>
   .step-content {
