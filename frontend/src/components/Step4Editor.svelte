@@ -7204,8 +7204,20 @@
     }
   }
 
+  function scrollViewportToTop() {
+    // Ensure editor opens from the top of the page, not at prior scroll offset.
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  }
+
+  $: if ($currentStep === 4) {
+    scrollViewportToTop();
+  }
+
   onMount(() => {
     console.log('[Step4] onMount');
+    scrollViewportToTop();
     if (canvasEl) {
       ctx = canvasEl.getContext('2d');
       resizeCanvas();
