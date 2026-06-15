@@ -6336,7 +6336,7 @@
     draw();
   }
 
-  async function applySegmentRecording() {
+  async function applySegmentRecording(closeAfterApply = true) {
     if (!segRecBlob || segRecSegmentId === null) return;
     const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
     if (!seg) return;
@@ -6391,12 +6391,17 @@
       loadWaveform(currentAudioUrl);
       cleanedAudioDirty = true;
       segRecApplied = true;
-      segRecPhase = 'review';
       micEnabled = false;
       stopMic();
       handleSave(); // triggers auto-regenerate
+      if (closeAfterApply) {
+        segRecPhase = 'idle';
+        segRecSegmentId = null;
+      } else {
+        segRecPhase = 'review';
+      }
       // Keep modal open; if preview was generated pre-splice, users already saw it.
-      if (segRecSegmentId === appliedSegId && segRecLyricsLines.length === 0 && !segRecLyricsError) {
+      if (!closeAfterApply && segRecSegmentId === appliedSegId && segRecLyricsLines.length === 0 && !segRecLyricsError) {
         await generateLyricsForRecordedSegment(true);
       }
       showToast('Recording applied');
@@ -6414,7 +6419,7 @@
 
     // Ensure the recorded take is inserted before opening AI generation.
     if (!segRecApplied) {
-      await applySegmentRecording();
+      await applySegmentRecording(false);
       if (!segRecApplied) return;
     }
 
@@ -7374,12 +7379,12 @@
       {/if}
       <div class="seg-rec-modal-actions">
         {#if segRecPhase === 'armed'}
-          <button class="tool-btn sm active" on:click={startSegmentRecording}>▶ Start</button>
+          <button class="tool-btn sm seg-rec-primary-action" on:click={startSegmentRecording}>▶ Start</button>
           <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
         {:else if segRecPhase === 'recording'}
           <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
         {:else if segRecPhase === 'review'}
-          <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
+          <button class="tool-btn sm seg-rec-primary-action" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
             {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
           </button>
           <button class="tool-btn sm" on:click={openSegmentAiFromRecordedPreview} disabled={segRecUploading || segRecLyricsLoading || !segRecBlob}>
@@ -9048,6 +9053,27 @@
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+  }
+
+  .seg-rec-modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .seg-rec-modal-actions .tool-btn {
+    flex: 1 1 auto;
+  }
+
+  .seg-rec-primary-action {
+    border-color: #5da65d;
+    box-shadow: inset 0 0 0 1px rgba(93, 166, 93, 0.2);
+  }
+
+  .seg-rec-primary-action:hover:not(:disabled) {
+    background: #253625;
+    border-color: #79bd79;
   }
 
   .seg-rec-hint {
