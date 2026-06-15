@@ -5146,8 +5146,10 @@
       stopAllMidiNotes();
       draw(); // Redraw to show paused cursor
     } else {
-      // If loop active and playhead is outside loop, jump to loop start
-      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      // If loop is active and playhead is outside loop, jump to loop start.
+      // During active segment capture (preroll/recording) we keep loop visual
+      // boundaries but avoid forcing loop jumps.
+      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
         if (playbackBeat < loopStartBeat || playbackBeat >= loopEndBeat) {
           const loopStartTime = beatToTime(loopStartBeat);
           currentTimeSec = loopStartTime;
@@ -5724,7 +5726,9 @@
     playbackBeat = ((currentTime - gapSec) * bpm) / 15;
 
     // ── Loop wrap ──
-    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+    // Segment recording keeps loop visuals, but wrapping is disabled while
+    // recording/preroll is active.
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
       if (playbackBeat >= loopEndBeat) {
         const loopStartTime = beatToTime(loopStartBeat);
         audioEl.currentTime = loopStartTime;
@@ -5755,6 +5759,21 @@
           }
         }
         console.log(`[Loop] Wrapped to beat ${loopStartBeat}`);
+      }
+    }
+
+    // Recording hard stop at the segment end so cursor does not drift past
+    // the active range while MediaRecorder stop is still pending.
+    if (segRecPhase === 'recording' && segRecSegmentId !== null) {
+      const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+      if (seg && currentTimeSec >= (seg.endMs / 1000)) {
+        const segEndSec = seg.endMs / 1000;
+        if (audioEl) audioEl.currentTime = segEndSec;
+        currentTimeSec = segEndSec;
+        playbackBeat = timeToBeat(segEndSec);
+        draw();
+        stopSegmentRecording();
+        return;
       }
     }
 
@@ -6234,8 +6253,12 @@
     segRecPhase = 'preroll';
     segRecCountdown = Math.ceil(segRecPrerollSec);
 
-    // Pause loop, seek to pre-roll start, play
-    loopEnabled = false;
+    // Keep segment loop visible while recording for clear visual boundaries.
+    loopStartBeat = timeToBeat(startSec);
+    loopEndBeat = timeToBeat(endSec);
+    loopEnabled = true;
+
+    // Seek to pre-roll start and play.
     seekToTime(Math.max(0, startSec - segRecPrerollSec));
     if (!isPlaying) togglePlayback();
 
@@ -6276,10 +6299,12 @@
     console.log(`[SegRec] MediaRecorder started: mimeType=${segRecRecorder.mimeType}`);
     draw();
 
-    // Auto-stop after segment duration
+    // Auto-stop fallback (primary stop uses playback-end clamp in updatePlayback).
+    // Add a small buffer to avoid early stop if recorder start is slightly ahead
+    // of the audible playback clock.
     segRecStopTimer = setTimeout(() => {
       if (segRecPhase === 'recording') stopSegmentRecording();
-    }, durationSec * 1000);
+    }, (durationSec * 1000) + 250);
   }
 
   function stopSegmentRecording() {
