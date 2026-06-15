@@ -33,6 +33,7 @@
   let autosaveInterval = null;
   let toastMsg = '';        // brief status message shown as a toast
   let toastTimer = null;
+  let toastCenter = false;
   let uiBusy = false;
   let editedAudioLoading = false;
   let waveformLoading = false;
@@ -815,6 +816,7 @@
       midiPlayback,
       metronomeEnabled,
       waveformHeight,
+      micDeviceId,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -1155,6 +1157,11 @@
   let micOversteering = false;
   let micOversteerTimer = null;
   let micLevelTimer = null; // interval for level polling
+  let micDisconnectHandled = false;
+  let micTrackEndedHandler = null;
+  let micTrackMuteHandler = null;
+  let mediaDeviceChangeHandler = null;
+  const MIC_EVENT_TOAST_MS = 4000;
   // Sticky prediction state for smoothing
   let micLastPitch = -1;
   let micPitchConfidence = 0;
@@ -4846,10 +4853,14 @@
     draw();
   }
 
-  function showToast(msg, durationMs = 3000) {
+  function showToast(msg, durationMs = 3000, center = false) {
     toastMsg = msg;
+    toastCenter = center;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toastMsg = ''; }, durationMs);
+    toastTimer = setTimeout(() => {
+      toastMsg = '';
+      toastCenter = false;
+    }, durationMs);
   }
 
   function autoFixWordSpaces() {
@@ -5956,7 +5967,148 @@
   }
 
   // ──── Mic Sing-Along ────────────────────────────
-  async function loadMicDevices() {
+  function clearMicTrackDisconnectWatchers(track = null) {
+    if (!track) {
+      const active = micStream?.getAudioTracks?.()[0];
+      if (active) clearMicTrackDisconnectWatchers(active);
+      return;
+    }
+    if (micTrackEndedHandler) {
+      track.removeEventListener('ended', micTrackEndedHandler);
+      micTrackEndedHandler = null;
+    }
+    if (micTrackMuteHandler) {
+      track.removeEventListener('mute', micTrackMuteHandler);
+      micTrackMuteHandler = null;
+    }
+  }
+
+  function handleActiveMicDisconnected(reason = 'unknown') {
+    if (micDisconnectHandled) return;
+    micDisconnectHandled = true;
+    console.warn('[Mic] Active microphone disconnected:', reason);
+
+    // In segment-recording modal, do not close the modal on disconnect.
+    // Recover to default mic so user can continue without losing modal state.
+    if (segRecPhase === 'armed') {
+      const shouldRecover = !micStarting;
+      stopMic();
+      if (shouldRecover) {
+        micDeviceId = '';
+        saveEditorUiPrefs('segrec-mic-disconnect-recover-default');
+        micStarting = true;
+        startMic()
+          .then(() => {
+            if (micStream) {
+              showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+            } else {
+              showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+            }
+          })
+          .catch(() => {
+            showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+          })
+          .finally(() => {
+            micStarting = false;
+            draw();
+          });
+      } else {
+        showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+        draw();
+      }
+      return;
+    }
+
+    // For sing-along mode, try to continue on default input automatically.
+    if (micEnabled && segRecPhase === 'idle') {
+      const shouldRecover = !micStarting;
+      stopMic();
+      if (shouldRecover) {
+        micDeviceId = '';
+        saveEditorUiPrefs('mic-disconnect-recover-default');
+        micStarting = true;
+        startMic()
+          .then(() => {
+            if (micStream) {
+              micEnabled = true;
+              showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+            } else {
+              micEnabled = false;
+              showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+            }
+          })
+          .catch(() => {
+            micEnabled = false;
+            showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+          })
+          .finally(() => {
+            micStarting = false;
+            draw();
+          });
+      } else {
+        micEnabled = false;
+        showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+        draw();
+      }
+      return;
+    }
+
+    // Stop ongoing segment capture cleanly if the input vanishes.
+    if (segRecPhase === 'recording' || segRecPhase === 'preroll') {
+      stopSegmentRecording();
+      showToast('Recording stopped: microphone disconnected', MIC_EVENT_TOAST_MS, true);
+    } else if (micEnabled) {
+      showToast('Microphone disconnected', MIC_EVENT_TOAST_MS, true);
+    }
+
+    micEnabled = false;
+    stopMic();
+    draw();
+  }
+
+  function installMicTrackDisconnectWatchers(stream) {
+    const track = stream?.getAudioTracks?.()[0];
+    if (!track) return;
+    clearMicTrackDisconnectWatchers(track);
+
+    // `ended` is the most reliable unplug signal; `mute` catches some browsers.
+    micTrackEndedHandler = () => handleActiveMicDisconnected('track-ended');
+    micTrackMuteHandler = () => {
+      if (!micEnabled && segRecPhase === 'idle') return;
+      // Some drivers briefly toggle mute; defer hard stop slightly.
+      setTimeout(() => {
+        const live = track.readyState === 'live';
+        if (!live) handleActiveMicDisconnected('track-muted-not-live');
+      }, 120);
+    };
+
+    track.addEventListener('ended', micTrackEndedHandler);
+    track.addEventListener('mute', micTrackMuteHandler);
+  }
+
+  async function handleMediaDeviceChange() {
+    await loadMicDevices(true);
+    if (!micStream) return;
+    const track = micStream.getAudioTracks()[0];
+    if (!track || track.readyState !== 'live') {
+      handleActiveMicDisconnected('devicechange-no-live-track');
+      return;
+    }
+    const settings = track.getSettings?.() || {};
+    const activeDeviceId = settings.deviceId || micDeviceId;
+    if (activeDeviceId && micDeviceId && activeDeviceId !== micDeviceId) {
+      // Browser auto-switched the live stream to another input (usually default)
+      // after unplugging the previously selected external mic.
+      micDeviceId = activeDeviceId;
+      saveEditorUiPrefs('mic-device-autoswitched');
+      showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+    }
+    if (activeDeviceId && !micDevices.some(d => d.deviceId === activeDeviceId)) {
+      handleActiveMicDisconnected('devicechange-active-missing');
+    }
+  }
+
+  async function loadMicDevices(notifyOnFallback = false) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       micDevices = devices.filter(d => d.kind === 'audioinput');
@@ -5972,6 +6124,16 @@
       if (!micDeviceId && micDevices.length > 0) {
         micDeviceId = micDevices[0].deviceId;
       }
+      // If a persisted/selected device no longer exists (e.g. unplugged),
+      // fall back to first available device to avoid exact-constraint failures.
+      if (micDeviceId && !micDevices.some(d => d.deviceId === micDeviceId)) {
+        console.warn('[Mic] Selected device is no longer available, falling back to default input');
+        micDeviceId = micDevices[0]?.deviceId || '';
+        saveEditorUiPrefs('mic-device-unavailable-fallback');
+        if (notifyOnFallback && (micStream || micEnabled || segRecPhase !== 'idle')) {
+          showToast('Mic disconnected - switched to default input', MIC_EVENT_TOAST_MS, true);
+        }
+      }
     } catch (err) {
       console.error('[Mic] Failed to enumerate devices:', err);
     }
@@ -5979,6 +6141,7 @@
 
   async function startMic() {
     try {
+      micDisconnectHandled = false;
       const audioConstraints = {
         echoCancellation: false, // warm-up latency + distorts pitch signal; highpass filter handles bass
         noiseSuppression: false, // same — introduces ~1s init delay and degrades pitch clarity
@@ -5986,10 +6149,28 @@
         ...(micDeviceId ? { deviceId: { exact: micDeviceId } } : {})
       };
       const constraints = { audio: audioConstraints };
-      micStream = await navigator.mediaDevices.getUserMedia(constraints);
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        const canFallbackToDefault = !!micDeviceId && (err?.name === 'OverconstrainedError' || err?.name === 'NotFoundError');
+        if (!canFallbackToDefault) throw err;
+
+        console.warn('[Mic] Selected input unavailable, retrying with default device', err);
+        micDeviceId = '';
+        saveEditorUiPrefs('mic-device-fallback-default');
+        const fallbackConstraints = {
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          }
+        };
+        micStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+      }
 
       micAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
       micSourceNode = micAudioCtx.createMediaStreamSource(micStream);
+      installMicTrackDisconnectWatchers(micStream);
 
       // High-pass filter at 200Hz — removes bass bleed from speakers/room rumble
       const highpass = micAudioCtx.createBiquadFilter();
@@ -6036,6 +6217,16 @@
       // Load device list after permission is granted (labels become available)
       await loadMicDevices();
 
+      // Ensure the selected ID reflects the actual active track after fallback/default pick.
+      const activeTrack = micStream?.getAudioTracks?.()[0];
+      if (activeTrack) {
+        const settings = activeTrack.getSettings?.() || {};
+        if (settings.deviceId && settings.deviceId !== micDeviceId) {
+          micDeviceId = settings.deviceId;
+          saveEditorUiPrefs('mic-device-active-track');
+        }
+      }
+
       // Start mic level polling (for the level indicator)
       micLevelTimer = setInterval(() => {
         if (!micAnalyser) return;
@@ -6077,6 +6268,7 @@
       console.log('[Mic] MediaRecorder stopped,', micRecordedChunks.length, 'chunks');
     }
     if (micStream) {
+      clearMicTrackDisconnectWatchers(micStream.getAudioTracks()[0]);
       micStream.getTracks().forEach(t => t.stop());
       micStream = null;
     }
@@ -6089,6 +6281,7 @@
     micAnalyser = null;
     micDetector = null;
     micInputBuffer = null;
+    micDisconnectHandled = false;
     console.log('[Mic] Stopped');
   }
 
@@ -6462,6 +6655,7 @@
 
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
+    saveEditorUiPrefs('mic-device-change');
     if (micEnabled) {
       stopMic();
       await startMic();
@@ -7156,6 +7350,9 @@
         if (typeof uiPrefs.waveformHeight === 'number' && Number.isFinite(uiPrefs.waveformHeight)) {
           waveformHeight = Math.max(40, Math.min(240, uiPrefs.waveformHeight));
         }
+        if (typeof uiPrefs.micDeviceId === 'string') {
+          micDeviceId = uiPrefs.micDeviceId;
+        }
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
@@ -7241,6 +7438,10 @@
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     window.addEventListener('blur', handleMouseUp);
+    if (navigator.mediaDevices?.addEventListener) {
+      mediaDeviceChangeHandler = () => { handleMediaDeviceChange(); };
+      navigator.mediaDevices.addEventListener('devicechange', mediaDeviceChangeHandler);
+    }
     autosaveInterval = setInterval(() => { if (hasUnsavedChanges) handleSave(); }, 10000);
   });
 
@@ -7270,6 +7471,10 @@
     window.removeEventListener('mousemove', handleMouseMove);
     window.removeEventListener('mouseup', handleMouseUp);
     window.removeEventListener('blur', handleMouseUp);
+    if (mediaDeviceChangeHandler && navigator.mediaDevices?.removeEventListener) {
+      navigator.mediaDevices.removeEventListener('devicechange', mediaDeviceChangeHandler);
+      mediaDeviceChangeHandler = null;
+    }
     window.removeEventListener('mousemove', segRegenModalMouseMove);
     window.removeEventListener('mouseup', segRegenModalMouseUp);
     stopMic();
@@ -7845,7 +8050,7 @@
 
   <!-- Set GAP mode overlay bar -->
   {#if toastMsg}
-    <div class="toast-bar">{toastMsg}</div>
+    <div class="toast-bar" class:toast-center={toastCenter}>{toastMsg}</div>
   {/if}
 
   {#if setGapMode}
@@ -8520,6 +8725,23 @@
     color: #a5d6a7;
     font-size: 0.85rem;
     animation: toast-fadein 0.15s ease;
+  }
+  .toast-bar.toast-center {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9500;
+    align-self: initial;
+    background: rgba(15, 26, 15, 0.94);
+    border: 1px solid #6bcf72;
+    border-radius: 10px;
+    padding: 10px 18px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #d6f5d8;
+    pointer-events: none;
   }
   @keyframes toast-fadein {
     from { opacity: 0; transform: translateY(4px); }
