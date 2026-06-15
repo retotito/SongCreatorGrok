@@ -6263,6 +6263,10 @@
       segRecBlob = new Blob(segRecChunks, { type: segRecRecorder.mimeType });
       segRecObjectUrl = URL.createObjectURL(segRecBlob);
       console.log(`[SegRec] Recording done: mimeType=${segRecRecorder.mimeType} size=${segRecBlob.size} bytes objectUrl=${segRecObjectUrl}`);
+      // Restore loop on the recorded segment for quick retry/listen workflows.
+      loopStartBeat = timeToBeat(startSec);
+      loopEndBeat = timeToBeat(endSec);
+      loopEnabled = true;
       segRecPhase = 'review';
       generateLyricsForRecordedSegment(true);
       draw();
@@ -6287,7 +6291,14 @@
   }
 
   function cancelSegmentRecording() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
     stopSegmentRecording();
+    // Keep loop context anchored to this segment even when closing review.
+    if (seg) {
+      loopStartBeat = timeToBeat(seg.startMs / 1000);
+      loopEndBeat = timeToBeat(seg.endMs / 1000);
+      loopEnabled = true;
+    }
     if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
     segRecBlob = null;
     segRecChunks = [];
