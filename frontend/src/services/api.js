@@ -313,6 +313,10 @@ export async function generateEmptyUltrastar(sessionId) {
   return request('POST', `/generate/empty/${sessionId}`);
 }
 
+export async function suggestVibrato(sessionId, payload) {
+  return request('POST', `/vibrato-suggest/${sessionId}`, payload);
+}
+
 // ─── Storage Manager ───────────────────────────
 export async function getStorageInfo() {
   return request('GET', '/storage-info');

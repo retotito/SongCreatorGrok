@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
@@ -783,6 +783,21 @@
       ? 'Applying hyphenation...'
       : 'Recognizing lyrics...';
 
+  // Vibrato tool modal
+  let vibratoModalOpen = false;
+  let vibratoModalX = 40;
+  let vibratoModalY = 96;
+  let vibratoModalDragging = false;
+  let vibratoModalDragOffsetX = 0;
+  let vibratoModalDragOffsetY = 0;
+  let vibratoNoteId = null;
+  let vibratoAudioSource = 'vocals'; // 'vocals' | 'edited'
+  let vibratoCurrentEditorSource = 'vocals';
+  let vibratoLoading = false;
+  let vibratoError = '';
+  let vibratoSegments = []; // [{ start_sec, end_sec, pitch }]
+  let vibratoSensitivity = 'balanced'; // 'subtle' | 'balanced' | 'strict'
+
   // Undo/Redo history
   let undoStack = [];
   let redoStack = [];
@@ -817,6 +832,8 @@
       metronomeEnabled,
       waveformHeight,
       micDeviceId,
+      vibratoModalX,
+      vibratoModalY,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -858,6 +875,11 @@
   $: if (segRegenModalOpen) {
     if (audioSource === 'edited') segRegenCurrentEditorSource = 'edited';
     else if (audioSource === 'vocals') segRegenCurrentEditorSource = 'vocals';
+  }
+
+  $: if (vibratoModalOpen) {
+    if (audioSource === 'edited') vibratoCurrentEditorSource = 'edited';
+    else if (audioSource === 'vocals') vibratoCurrentEditorSource = 'vocals';
   }
 
   // MIDI pitch playback during track play
@@ -1176,7 +1198,7 @@
   let segRecPhase = 'idle';
   let uiModalGuardActive = false;
   // Guard selected toolbar controls while any blocking modal/tool is open.
-  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || metronomeToolOpen;
+  $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || vibratoModalOpen || metronomeToolOpen;
   $: recordingActive.set(uiModalGuardActive);
   let segRecSegmentId = null;       // cleanup segment being recorded
   let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
@@ -3858,8 +3880,8 @@
   // ──── Context Menu ──────────────────────────
   function handleContextMenu(event) {
     event.preventDefault();
-    // No context menu during playback, grid align, or segment recording
-    if (isPlaying || gridAlignMode || segRecPhase !== 'idle') return;
+    // No context menu during playback, grid align, segment recording, or vibrato modal.
+    if (isPlaying || gridAlignMode || segRecPhase !== 'idle' || vibratoModalOpen) return;
 
     // Paste mode: show minimal paste/cancel menu
     if (pasteMode && clipboard) {
@@ -4233,6 +4255,349 @@
     segRegenModalOpen = false;
   }
 
+  function closeVibratoModal() {
+    if (vibratoModalDragging) {
+      vibratoModalMouseUp();
+    }
+    vibratoModalOpen = false;
+    vibratoLoading = false;
+  }
+
+  function openVibratoModal(noteId) {
+    const note = notes.find(n => n.id === noteId);
+    if (!note || note.type === 'break') return;
+    if (note.isRap) {
+      showToast('Vibrato tool is not available for rap notes');
+      return;
+    }
+    if (note.duration < 2) {
+      showToast('Select a longer note for vibrato');
+      return;
+    }
+
+    vibratoNoteId = noteId;
+    vibratoError = '';
+    vibratoSegments = [];
+    vibratoCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
+    vibratoAudioSource = (vibratoCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+      ? 'edited'
+      : 'vocals';
+    vibratoModalOpen = true;
+    closeContextMenu();
+  }
+
+  function getVibratoAudioSourceForApi() {
+    return vibratoAudioSource === 'edited' ? 'edited' : 'vocals';
+  }
+
+  function logDisplayedPitchToolFramesForRange(note, startSec, endSec) {
+    const startBeat = note.startBeat;
+    const endBeat = note.startBeat + note.duration;
+    const rangeFrames = pitchLineFrames
+      .filter(f => Number.isFinite(f?.beat) && Number.isFinite(f?.pitch) && f.beat >= startBeat && f.beat <= endBeat)
+      .sort((a, b) => a.beat - b.beat);
+
+    console.group('[VibratoUI] Displayed pitch-tool frames');
+    console.log('[VibratoUI] note', {
+      id: note.id,
+      startBeat,
+      endBeat,
+      startSec,
+      endSec,
+      durationSec: Math.max(0, endSec - startSec),
+      pitch: note.pitch,
+      pitchName: noteName(note.pitch),
+      vibratoAudioSource,
+      analysisSource: getVibratoAudioSourceForApi(),
+      editorAudioSource: audioSource,
+      pitchLineVisible,
+      pitchLineFramesCount: pitchLineFrames.length,
+      pitchLineSourceUrl,
+    });
+
+    if (rangeFrames.length === 0) {
+      console.warn('[VibratoUI] No displayed pitch-line frames found in selected note range');
+      console.groupEnd();
+      return {
+        frameCount: 0,
+        spanSemitones: 0,
+        uniquePitchCount: 0,
+        runCount: 0,
+        minPitch: null,
+        maxPitch: null,
+      };
+    }
+
+    const pitches = rangeFrames.map(f => f.pitch);
+    const minPitch = Math.min(...pitches);
+    const maxPitch = Math.max(...pitches);
+    const uniquePitches = [...new Set(pitches)];
+    console.log('[VibratoUI] frame_stats', {
+      count: rangeFrames.length,
+      minPitch,
+      minPitchName: noteName(minPitch),
+      maxPitch,
+      maxPitchName: noteName(maxPitch),
+      spanSemitones: maxPitch - minPitch,
+      uniquePitchCount: uniquePitches.length,
+      uniquePitchNames: uniquePitches.slice(0, 16).map(p => `${p}(${noteName(p)})`),
+    });
+
+    // Log compact pitch-change runs so subtle movements are easy to see.
+    const runs = [];
+    let runStart = rangeFrames[0].beat;
+    let runPitch = rangeFrames[0].pitch;
+    let runCount = 1;
+    for (let i = 1; i < rangeFrames.length; i++) {
+      const f = rangeFrames[i];
+      if (f.pitch === runPitch) {
+        runCount += 1;
+        continue;
+      }
+      runs.push({ startBeat: runStart, endBeat: rangeFrames[i - 1].beat, pitch: runPitch, count: runCount });
+      runStart = f.beat;
+      runPitch = f.pitch;
+      runCount = 1;
+    }
+    runs.push({
+      startBeat: runStart,
+      endBeat: rangeFrames[rangeFrames.length - 1].beat,
+      pitch: runPitch,
+      count: runCount,
+    });
+
+    console.log(
+      '[VibratoUI] pitch_runs',
+      runs.map(r => `${r.startBeat.toFixed(2)}-${r.endBeat.toFixed(2)}b:${r.pitch}(${noteName(r.pitch)}) x${r.count}`).join(' | ')
+    );
+
+    // Full run table (all dotted pitch changes grouped into contiguous runs).
+    const runTable = runs.map((r, idx) => ({
+      idx: idx + 1,
+      startBeat: Number(r.startBeat.toFixed(3)),
+      endBeat: Number(r.endBeat.toFixed(3)),
+      pitch: r.pitch,
+      note: noteName(r.pitch),
+      frameCount: r.count,
+    }));
+    console.log('[VibratoUI] all_pitch_change_runs', runTable);
+    console.table(runTable);
+
+    // Full dotted-frame sequence (exactly what the user sees in pitch tool).
+    const fullFrameTable = rangeFrames.map((f, idx) => ({
+      idx: idx + 1,
+      beat: Number(f.beat.toFixed(3)),
+      timeSec: Number(beatToTime(f.beat).toFixed(3)),
+      pitch: f.pitch,
+      note: noteName(f.pitch),
+    }));
+    console.log('[VibratoUI] all_dotted_frames_count', fullFrameTable.length);
+    console.log('[VibratoUI] all_dotted_frames', fullFrameTable);
+
+    const preview = rangeFrames.slice(0, 24).map(f => ({ beat: Number(f.beat.toFixed(3)), pitch: f.pitch, note: noteName(f.pitch) }));
+    console.table(preview);
+    if (rangeFrames.length > preview.length) {
+      const tail = rangeFrames.slice(-12).map(f => ({ beat: Number(f.beat.toFixed(3)), pitch: f.pitch, note: noteName(f.pitch) }));
+      console.log('[VibratoUI] tail preview');
+      console.table(tail);
+    }
+    console.groupEnd();
+
+    return {
+      frameCount: rangeFrames.length,
+      spanSemitones: maxPitch - minPitch,
+      uniquePitchCount: uniquePitches.length,
+      runCount: runs.length,
+      minPitch,
+      maxPitch,
+    };
+  }
+
+  function getVibratoSensitivityParams() {
+    if (vibratoSensitivity === 'subtle') {
+      return {
+        min_duration_sec: 0.55,
+        target_slice_sec: 0.10,
+        max_segments: 12,
+        min_pitch_span: 1,
+        min_run_frames: 1,
+      };
+    }
+    if (vibratoSensitivity === 'strict') {
+      return {
+        min_duration_sec: 1.0,
+        target_slice_sec: 0.22,
+        max_segments: 6,
+        min_pitch_span: 3,
+        min_run_frames: 3,
+      };
+    }
+    return {
+      min_duration_sec: 0.8,
+      target_slice_sec: 0.16,
+      max_segments: 8,
+      min_pitch_span: 2,
+      min_run_frames: 2,
+    };
+  }
+
+  async function analyzeVibratoForSelectedNote() {
+    if (!$sessionId || vibratoNoteId === null || vibratoLoading) return;
+    const note = notes.find(n => n.id === vibratoNoteId && n.type !== 'break');
+    if (!note) {
+      vibratoError = 'Selected note no longer exists';
+      return;
+    }
+
+    const startSec = beatToTime(note.startBeat);
+    const endSec = beatToTime(note.startBeat + note.duration);
+    const startMs = Math.max(0, startSec * 1000);
+    const endMs = Math.max(startMs + 20, endSec * 1000);
+
+    const uiStats = logDisplayedPitchToolFramesForRange(note, startSec, endSec);
+
+    vibratoLoading = true;
+    vibratoError = '';
+    vibratoSegments = [];
+    try {
+      const data = await suggestVibrato($sessionId, {
+        start_ms: startMs,
+        end_ms: endMs,
+        audio_source: getVibratoAudioSourceForApi(),
+        ...getVibratoSensitivityParams(),
+      });
+
+      const segments = Array.isArray(data?.segments)
+        ? data.segments
+            .map(s => ({
+              start_sec: Number(s.start_sec),
+              end_sec: Number(s.end_sec),
+              pitch: Number(s.pitch),
+            }))
+            .filter(s => Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec) && Number.isFinite(s.pitch) && s.end_sec > s.start_sec)
+        : [];
+
+      const backendPitches = segments.map(s => s.pitch);
+      const backendMin = backendPitches.length ? Math.min(...backendPitches) : null;
+      const backendMax = backendPitches.length ? Math.max(...backendPitches) : null;
+      const backendSpan = (backendMin != null && backendMax != null) ? (backendMax - backendMin) : 0;
+      const backendUnique = backendPitches.length ? new Set(backendPitches).size : 0;
+
+      console.group('[VibratoCompare] Frontend vs Backend');
+      console.log('[VibratoCompare] request', {
+        sessionId: $sessionId,
+        noteId: note.id,
+        source: getVibratoAudioSourceForApi(),
+        sensitivity: vibratoSensitivity,
+        params: getVibratoSensitivityParams(),
+        startMs: Math.round(startMs),
+        endMs: Math.round(endMs),
+      });
+      console.log('[VibratoCompare] frontend_ui_pitchtool', uiStats);
+      console.log('[VibratoCompare] backend_segments', {
+        count: segments.length,
+        spanSemitones: backendSpan,
+        uniquePitchCount: backendUnique,
+        minPitch: backendMin,
+        minPitchName: backendMin != null ? noteName(backendMin) : null,
+        maxPitch: backendMax,
+        maxPitchName: backendMax != null ? noteName(backendMax) : null,
+      });
+      if (segments.length > 0) {
+        console.log(
+          '[VibratoCompare] backend_segment_list',
+          segments
+            .map(s => `${s.start_sec.toFixed(3)}-${s.end_sec.toFixed(3)}:${s.pitch}(${noteName(s.pitch)})`)
+            .join(' | ')
+        );
+      }
+      if (uiStats?.frameCount > 0) {
+        console.log('[VibratoCompare] delta', {
+          segmentCountMinusUiRuns: segments.length - (uiStats.runCount || 0),
+          backendSpanMinusUiSpan: backendSpan - (uiStats.spanSemitones || 0),
+          backendUniqueMinusUiUnique: backendUnique - (uiStats.uniquePitchCount || 0),
+        });
+      }
+      console.groupEnd();
+
+      if (segments.length < 2) {
+        vibratoError = 'No clear vibrato detected in this range';
+        return;
+      }
+
+      vibratoSegments = segments;
+      showToast(`Detected ${segments.length} vibrato slices`);
+    } catch (err) {
+      vibratoError = String(err?.message || 'Vibrato analysis failed');
+    } finally {
+      vibratoLoading = false;
+    }
+  }
+
+  function applyVibratoToSelectedNote() {
+    if (vibratoNoteId === null || vibratoSegments.length < 2) return;
+    const idx = notes.findIndex(n => n.id === vibratoNoteId && n.type !== 'break');
+    if (idx === -1) return;
+
+    const note = notes[idx];
+    const noteStart = note.startBeat;
+    const noteEnd = note.startBeat + note.duration;
+    if (note.duration < 2) {
+      showToast('Note too short to split');
+      return;
+    }
+
+    const totalSec = Math.max(0.001, beatToTime(noteEnd) - beatToTime(noteStart));
+    const startSec = beatToTime(noteStart);
+
+    const maxSegmentCount = Math.min(vibratoSegments.length, Math.max(2, note.duration));
+    const useSegments = vibratoSegments.slice(0, maxSegmentCount);
+
+    const boundaries = [noteStart];
+    let prev = noteStart;
+    for (let i = 0; i < useSegments.length - 1; i++) {
+      const proposedRel = (useSegments[i].end_sec - startSec) / totalSec;
+      const proposedBeat = noteStart + Math.round(proposedRel * note.duration);
+      const remaining = (useSegments.length - 1) - i;
+      const minBeat = prev + 1;
+      const maxBeat = noteEnd - remaining;
+      const bounded = Math.max(minBeat, Math.min(maxBeat, proposedBeat));
+      boundaries.push(bounded);
+      prev = bounded;
+    }
+    boundaries.push(noteEnd);
+
+    const maxId = Math.max(0, ...notes.map(n => n.id || 0));
+    const replacements = [];
+    for (let i = 0; i < useSegments.length; i++) {
+      const segStart = boundaries[i];
+      const segEnd = boundaries[i + 1];
+      const dur = Math.max(1, segEnd - segStart);
+      replacements.push({
+        id: maxId + 1 + i,
+        startBeat: segStart,
+        duration: dur,
+        pitch: Math.round(useSegments[i].pitch),
+        syllable: i === 0 ? note.syllable : ' ~',
+        isRap: false,
+        isGolden: !!note.isGolden,
+        confidence: note.confidence ?? 1.0,
+        original: { startBeat: segStart, duration: dur, pitch: Math.round(useSegments[i].pitch) },
+      });
+    }
+
+    pushUndo();
+    notes = [...notes.slice(0, idx), ...replacements, ...notes.slice(idx + 1)];
+    selectedNote = replacements[0]?.id ?? null;
+    selectedNotes = selectedNote !== null ? new Set([selectedNote]) : new Set();
+    markUnsaved();
+    updatePitchRange();
+    computeTotalBeats();
+    closeVibratoModal();
+    draw();
+    showToast(`Applied vibrato split (${replacements.length} notes)`);
+  }
+
   async function hyphenateSegmentPreviewLines(lines, silent = false) {
     const raw = (lines || []).map(v => String(v || '').trim()).filter(Boolean);
     if (raw.length === 0) return [];
@@ -4579,6 +4944,31 @@
     segRegenModalDragging = false;
     window.removeEventListener('mousemove', segRegenModalMouseMove);
     window.removeEventListener('mouseup', segRegenModalMouseUp);
+  }
+
+  function vibratoModalMouseDown(e) {
+    if (e.button !== 0) return;
+    if (!(e.target instanceof Element) || !e.target.closest('.seg-regen-modal-title')) return;
+    vibratoModalDragging = true;
+    vibratoModalDragOffsetX = e.clientX - vibratoModalX;
+    vibratoModalDragOffsetY = e.clientY - vibratoModalY;
+    window.addEventListener('mousemove', vibratoModalMouseMove);
+    window.addEventListener('mouseup', vibratoModalMouseUp);
+    e.preventDefault();
+  }
+
+  function vibratoModalMouseMove(e) {
+    if (!vibratoModalDragging) return;
+    vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, e.clientX - vibratoModalDragOffsetX));
+    vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, e.clientY - vibratoModalDragOffsetY));
+  }
+
+  function vibratoModalMouseUp() {
+    if (!vibratoModalDragging) return;
+    vibratoModalDragging = false;
+    window.removeEventListener('mousemove', vibratoModalMouseMove);
+    window.removeEventListener('mouseup', vibratoModalMouseUp);
+    saveEditorUiPrefs('vibrato-modal-move');
   }
 
   function metronomeToolMouseDown(e) {
@@ -5365,6 +5755,15 @@
     }
 
     console.log(`[Key] code=${e.code} key=${e.key} shift=${e.shiftKey} ctrl=${e.ctrlKey} meta=${e.metaKey}`);
+
+    // Vibrato modal captures keyboard focus; only Escape should close it.
+    if (vibratoModalOpen) {
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        closeVibratoModal();
+      }
+      return;
+    }
 
     // ── Grid Align mode: only allow Enter (confirm), Escape (cancel), Ctrl+G (cancel) ──
     if (gridAlignMode) {
@@ -7353,6 +7752,12 @@
         if (typeof uiPrefs.micDeviceId === 'string') {
           micDeviceId = uiPrefs.micDeviceId;
         }
+        if (typeof uiPrefs.vibratoModalX === 'number' && Number.isFinite(uiPrefs.vibratoModalX)) {
+          vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, uiPrefs.vibratoModalX));
+        }
+        if (typeof uiPrefs.vibratoModalY === 'number' && Number.isFinite(uiPrefs.vibratoModalY)) {
+          vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, uiPrefs.vibratoModalY));
+        }
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
@@ -8145,6 +8550,9 @@
           <button class="ctx-item" on:click={() => splitNote(ctxNote.id, contextMenu.beat)}>
             ✂️ Split Note <span class="ctx-shortcut">S</span>
           </button>
+          <button class="ctx-item" on:click={() => openVibratoModal(ctxNote.id)}>
+            〰️ Vibrato Tool
+          </button>
           <button class="ctx-item" disabled={!canMergePrev} on:click={() => mergeWithPrevious(ctxNote.id)}>
             🔗 Join with Previous <span class="ctx-shortcut">Shift+J</span>
           </button>
@@ -8660,6 +9068,78 @@
         <button class="btn" on:click={closeSegmentRegenerateModal}>Close</button>
       </div>
     </div>
+  {/if}
+
+  {#if vibratoModalOpen}
+    {@const vibratoNote = notes.find(n => n.id === vibratoNoteId && n.type !== 'break')}
+    {#if vibratoNote}
+      <div
+        class="vibrato-modal"
+        style="left:{vibratoModalX}px;top:{vibratoModalY}px"
+        on:mousedown={vibratoModalMouseDown}
+        role="dialog"
+        aria-label="Vibrato tool"
+      >
+        <div class="seg-regen-modal-title">〰️ Vibrato Tool</div>
+        <div class="seg-regen-modal-subtitle">
+          Note · {formatTime(beatToTime(vibratoNote.startBeat))} → {formatTime(beatToTime(vibratoNote.startBeat + vibratoNote.duration))} · {noteName(vibratoNote.pitch)}
+        </div>
+
+        <label class="seg-regen-audio-label" title="important: select the audio source">
+          <span class="seg-regen-audio-head">
+            <span>Audio Source</span>
+            <span class="seg-regen-audio-flag">!</span>
+          </span>
+          <select class="mic-select seg-regen-audio-select" bind:value={vibratoAudioSource}>
+            <option value="vocals">Vocal{vibratoCurrentEditorSource === 'vocals' ? ' (current)' : ''}</option>
+            <option value="edited" disabled={!cleanedAudioAvailable && segRecPatched.size === 0}>Edited{vibratoCurrentEditorSource === 'edited' ? ' (current)' : ''}</option>
+          </select>
+        </label>
+
+        <label>
+          Sensitivity
+          <select class="mic-select" bind:value={vibratoSensitivity} disabled={vibratoLoading}>
+            <option value="subtle">Subtle (capture small nuances)</option>
+            <option value="balanced">Balanced</option>
+            <option value="strict">Strict (clean-only)</option>
+          </select>
+        </label>
+
+        <div class="seg-regen-actions">
+          <button class="btn btn-primary" on:click={analyzeVibratoForSelectedNote} disabled={vibratoLoading}>
+            {vibratoLoading ? 'Analyzing...' : 'Analyze Vibrato'}
+          </button>
+          <button class="btn" on:click={applyVibratoToSelectedNote} disabled={vibratoLoading || vibratoSegments.length < 2}>
+            Apply Split
+          </button>
+        </div>
+
+        <div class="seg-regen-preview">
+          {#if vibratoLoading}
+            <div class="seg-regen-preview-state">Analyzing pitch movement...</div>
+          {:else if vibratoError}
+            <div class="seg-regen-preview-error">{vibratoError}</div>
+          {:else if vibratoSegments.length > 0}
+            <div class="seg-regen-preview-head">
+              <span>Preview ({vibratoSegments.length} slices)</span>
+            </div>
+            <div class="seg-regen-preview-body">
+              {#each vibratoSegments as seg, i}
+                <div class="seg-regen-preview-line">
+                  {i + 1}. {formatTime(seg.start_sec)} → {formatTime(seg.end_sec)} · {noteName(seg.pitch)}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="seg-regen-preview-state">No vibrato analysis yet.</div>
+          {/if}
+        </div>
+
+        <div class="seg-regen-footer">
+          <button class="btn" on:click={closeVibratoModal}>Close</button>
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -10521,6 +11001,21 @@
     gap: 10px;
   }
 
+  .vibrato-modal {
+    position: fixed;
+    z-index: 9051;
+    width: 390px;
+    cursor: default;
+    background: #111c22;
+    border: 2px solid #2b7084;
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 22px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
   .metronome-tool-modal {
     position: fixed;
     z-index: 9055;
@@ -10682,6 +11177,7 @@
   .seg-regen-audio-select {
     border-color: #ffb300;
     box-shadow: 0 0 0 1px rgba(255, 187, 0, 0.25) inset;
+    max-width: 110px;
   }
 
   .seg-regen-mode-help {

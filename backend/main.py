@@ -2136,6 +2136,195 @@ async def segment_generate(session_id: str, request: Request):
         _safe_unlink(clip_path)
 
 
+@app.post("/api/vibrato-suggest/{session_id}")
+async def vibrato_suggest(session_id: str, request: Request):
+    """Suggest vibrato-style pitch subsegments for a selected note range.
+
+    Request JSON:
+      - start_ms, end_ms       required range in session audio timeline
+      - audio_source           optional: vocals|edited|original (default vocals)
+      - min_duration_sec       optional float, default 0.9
+      - target_slice_sec       optional float, default 0.18
+      - max_segments           optional int, default 8
+      - min_pitch_span         optional int semitones, default 2
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    body = await request.json()
+    try:
+        start_ms = float(body["start_ms"])
+        end_ms = float(body["end_ms"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="start_ms and end_ms are required numbers")
+
+    if not math.isfinite(start_ms) or not math.isfinite(end_ms):
+        raise HTTPException(status_code=400, detail="start_ms/end_ms must be finite")
+    if end_ms <= start_ms:
+        raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+    if (end_ms - start_ms) > 30_000:
+        raise HTTPException(status_code=400, detail="Range too long for vibrato suggest (max 30s)")
+
+    audio_source = str(body.get("audio_source") or "vocals")
+    min_duration_sec = float(body.get("min_duration_sec", 0.9))
+    target_slice_sec = float(body.get("target_slice_sec", 0.18))
+    max_segments = int(body.get("max_segments", 8))
+    min_pitch_span = int(body.get("min_pitch_span", 2))
+    min_run_frames = int(body.get("min_run_frames", 1))
+
+    source_path, resolved_source = _resolve_segment_audio_source(session, audio_source)
+    if not source_path or not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Audio source not found for '{audio_source}'")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    clip_name = f"vibrato_{int(time.time() * 1000)}_{int(start_ms)}_{int(end_ms)}.wav"
+    clip_path = os.path.join(temp_dir, clip_name)
+
+    try:
+        _extract_segment_clip_to_wav(source_path, start_ms, end_ms, clip_path)
+
+        from services.pitch_detection import (
+            CONFIDENCE_THRESHOLD,
+            detect_pitches,
+            get_pitch_at_time,
+            get_pitch_for_segment,
+            get_pitch_subsegments,
+            midi_to_note_name,
+        )
+        import numpy as np
+
+        pitch_data = detect_pitches(clip_path)
+        clip_start_sec = start_ms / 1000.0
+        clip_end_sec = end_ms / 1000.0
+        clip_duration_sec = max(0.001, clip_end_sec - clip_start_sec)
+
+        log_step(
+            "VIBRATO",
+            (
+                f"session={session_id[:8]} src={resolved_source} range={start_ms:.0f}-{end_ms:.0f}ms "
+                f"dur={clip_duration_sec:.3f}s sens(min_dur={min_duration_sec:.2f}, "
+                f"slice={target_slice_sec:.2f}, max_seg={max_segments}, span={min_pitch_span}, "
+                f"min_run={min_run_frames})"
+            ),
+        )
+
+        times = pitch_data.get("times")
+        midi_notes = pitch_data.get("midi_notes")
+        confidences = pitch_data.get("confidences")
+        voiced_mask = (times >= 0.0) & (times <= clip_duration_sec)
+        voiced_mask &= (midi_notes > 0) & (confidences >= CONFIDENCE_THRESHOLD)
+        voiced_times = times[voiced_mask]
+        voiced_notes = midi_notes[voiced_mask]
+        voiced_conf = confidences[voiced_mask]
+
+        start_pitch = get_pitch_at_time(pitch_data, 0.0, window=0.08)
+        end_pitch = get_pitch_at_time(pitch_data, clip_duration_sec, window=0.08)
+        edge_window = min(0.15, clip_duration_sec / 3)
+        start_edge_pitch = get_pitch_for_segment(pitch_data, 0.0, edge_window)
+        end_edge_pitch = get_pitch_for_segment(pitch_data, max(0.0, clip_duration_sec - edge_window), clip_duration_sec)
+
+        log_step(
+            "VIBRATO",
+            (
+                f"edge_pitch start={start_pitch}({midi_to_note_name(start_pitch)}) "
+                f"end={end_pitch}({midi_to_note_name(end_pitch)}) "
+                f"start_edge={start_edge_pitch}({midi_to_note_name(start_edge_pitch)}) "
+                f"end_edge={end_edge_pitch}({midi_to_note_name(end_edge_pitch)})"
+            ),
+        )
+
+        if len(voiced_notes) > 0:
+            note_min = int(np.min(voiced_notes))
+            note_max = int(np.max(voiced_notes))
+            note_med = int(np.median(voiced_notes))
+            unique_count = int(len(np.unique(voiced_notes)))
+            log_step(
+                "VIBRATO",
+                (
+                    f"voiced_frames={len(voiced_notes)}/{len(times)} conf>={CONFIDENCE_THRESHOLD:.2f} "
+                    f"span={note_max - note_min}st min={note_min}({midi_to_note_name(note_min)}) "
+                    f"med={note_med}({midi_to_note_name(note_med)}) max={note_max}({midi_to_note_name(note_max)}) "
+                    f"unique={unique_count}"
+                ),
+            )
+
+            head = [
+                f"{float(t):.3f}s:{int(n)}({midi_to_note_name(int(n))})@{float(c):.2f}"
+                for t, n, c in zip(voiced_times[:8], voiced_notes[:8], voiced_conf[:8])
+            ]
+            tail = [
+                f"{float(t):.3f}s:{int(n)}({midi_to_note_name(int(n))})@{float(c):.2f}"
+                for t, n, c in zip(voiced_times[-8:], voiced_notes[-8:], voiced_conf[-8:])
+            ]
+            if head:
+                log_step("VIBRATO", f"voiced_head {', '.join(head)}")
+            if tail:
+                log_step("VIBRATO", f"voiced_tail {', '.join(tail)}")
+        else:
+            log_step("VIBRATO", f"voiced_frames=0/{len(times)} conf>={CONFIDENCE_THRESHOLD:.2f}")
+
+        segments = get_pitch_subsegments(
+            pitch_data,
+            0.0,
+            clip_duration_sec,
+            min_duration_sec=max(0.2, min_duration_sec),
+            target_slice_sec=max(0.05, target_slice_sec),
+            max_segments=max(2, min(16, max_segments)),
+            min_pitch_span_semitones=max(1, min_pitch_span),
+            min_run_frames=max(1, min(8, min_run_frames)),
+        )
+
+        if not segments:
+            fallback_pitch = get_pitch_for_segment(pitch_data, 0.0, clip_duration_sec)
+            if fallback_pitch == 0:
+                fallback_pitch = 60
+            log_step(
+                "VIBRATO",
+                f"subsegments=0 -> fallback pitch {fallback_pitch} ({midi_to_note_name(fallback_pitch)})",
+            )
+            segments = [{"start": 0.0, "end": max(0.001, clip_end_sec - clip_start_sec), "pitch": int(fallback_pitch)}]
+        else:
+            seg_preview = [
+                f"{float(s['start']):.3f}-{float(s['end']):.3f}s:{int(s['pitch'])}({midi_to_note_name(int(s['pitch']))})"
+                for s in segments
+            ]
+            log_step("VIBRATO", f"subsegments={len(segments)} {', '.join(seg_preview)}")
+
+        abs_segments = [
+            {
+                "start_sec": round(clip_start_sec + float(s["start"]), 4),
+                "end_sec": round(clip_start_sec + float(s["end"]), 4),
+                "pitch": int(s["pitch"]),
+            }
+            for s in segments
+            if float(s.get("end", 0)) > float(s.get("start", 0))
+        ]
+
+        if abs_segments:
+            abs_segments[0]["start_sec"] = round(clip_start_sec, 4)
+            abs_segments[-1]["end_sec"] = round(clip_end_sec, 4)
+
+        abs_preview = [
+            f"{s['start_sec']:.3f}-{s['end_sec']:.3f}s:{int(s['pitch'])}({midi_to_note_name(int(s['pitch']))})"
+            for s in abs_segments
+        ]
+        log_step("VIBRATO", f"return_segments={len(abs_segments)} {', '.join(abs_preview)}")
+
+        return {
+            "status": "ok",
+            "audio_source": resolved_source,
+            "start_ms": round(start_ms, 1),
+            "end_ms": round(end_ms, 1),
+            "segments": abs_segments,
+        }
+    finally:
+        _safe_unlink(clip_path)
+
+
 # ────────────────────────────────────────────────────────────
 # Step 2a: WhisperX ASR Transcription + Forced Alignment
 # ────────────────────────────────────────────────────────────

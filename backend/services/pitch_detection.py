@@ -135,11 +135,13 @@ def get_pitch_subsegments(
     target_slice_sec: float = 0.18,
     max_segments: int = 4,
     min_pitch_span_semitones: int = 2,
+    min_run_frames: int = 1,
 ) -> list:
-    """Extract a small set of intra-syllable pitch subsegments.
+    """Extract intra-syllable pitch subsegments from detected pitch runs.
 
-    This is used to preserve vibrato-like movement for longer syllables by
-    emitting continuation notes instead of a single median pitch note.
+    The algorithm first builds contiguous same-pitch runs, optionally smooths
+    very short runs, then reduces to a segment budget while preserving larger
+    pitch transitions.
     """
     duration = max(0.0, float(end_time) - float(start_time))
     if duration < min_duration_sec:
@@ -162,43 +164,154 @@ def get_pitch_subsegments(
     if pitch_span < int(min_pitch_span_semitones):
         return []
 
-    # Derive a compact segment count from duration and clamp aggressively.
-    raw_segments = int(round(duration / target_slice_sec))
-    segment_count = max(2, min(max_segments, raw_segments))
-    edges = np.linspace(start_time, end_time, segment_count + 1)
+    seg_times = np.asarray(seg_times, dtype=float)
+    seg_notes = np.asarray(seg_notes, dtype=int)
 
-    chunks = []
-    for idx in range(segment_count):
-        left = float(edges[idx])
-        right = float(edges[idx + 1])
-        if idx < segment_count - 1:
-            mask = (seg_times >= left) & (seg_times < right)
-        else:
-            mask = (seg_times >= left) & (seg_times <= right)
+    if len(seg_times) < 2:
+        return []
 
-        if not np.any(mask):
+    # Build contiguous runs from framewise quantized MIDI notes.
+    runs = []
+    run_start = float(seg_times[0])
+    run_pitch = int(seg_notes[0])
+    run_frames = 1
+    for i in range(1, len(seg_notes)):
+        p = int(seg_notes[i])
+        if p == run_pitch:
+            run_frames += 1
+            continue
+        runs.append(
+            {
+                "start": run_start,
+                "end": float(seg_times[i - 1]),
+                "pitch": run_pitch,
+                "frames": run_frames,
+            }
+        )
+        run_start = float(seg_times[i])
+        run_pitch = p
+        run_frames = 1
+    runs.append(
+        {
+            "start": run_start,
+            "end": float(seg_times[-1]),
+            "pitch": run_pitch,
+            "frames": run_frames,
+        }
+    )
+
+    # Convert tiny one-frame end times into proper touching ranges.
+    if len(runs) > 1:
+        for i in range(len(runs) - 1):
+            runs[i]["end"] = runs[i + 1]["start"]
+        runs[-1]["end"] = float(end_time)
+    else:
+        runs[0]["start"] = float(start_time)
+        runs[0]["end"] = float(end_time)
+
+    if len(runs) < 2:
+        return []
+
+    def _merge_same_pitch(items: list) -> list:
+        if not items:
+            return []
+        out = [dict(items[0])]
+        for item in items[1:]:
+            prev = out[-1]
+            if int(item["pitch"]) == int(prev["pitch"]):
+                prev["end"] = item["end"]
+                prev["frames"] = int(prev.get("frames", 1)) + int(item.get("frames", 1))
+            else:
+                out.append(dict(item))
+        return out
+
+    # Remove very short runs by merging into neighbors.
+    min_frames = max(1, int(min_run_frames))
+    runs = _merge_same_pitch(runs)
+    i = 0
+    while i < len(runs):
+        if len(runs) <= 2:
+            break
+        frames = int(runs[i].get("frames", 1))
+        if frames >= min_frames:
+            i += 1
             continue
 
-        chunk_pitch = int(np.median(seg_notes[mask]))
-        chunks.append({"start": left, "end": right, "pitch": chunk_pitch})
+        if 0 < i < len(runs) - 1 and int(runs[i - 1]["pitch"]) == int(runs[i + 1]["pitch"]):
+            runs[i - 1]["end"] = runs[i + 1]["end"]
+            runs[i - 1]["frames"] = (
+                int(runs[i - 1].get("frames", 1))
+                + int(runs[i].get("frames", 1))
+                + int(runs[i + 1].get("frames", 1))
+            )
+            del runs[i : i + 2]
+            i = max(0, i - 1)
+            continue
 
-    if len(chunks) < 2:
-        return []
+        if i == 0:
+            runs[1]["start"] = runs[0]["start"]
+            runs[1]["frames"] = int(runs[1].get("frames", 1)) + int(runs[0].get("frames", 1))
+            del runs[0]
+            i = 0
+            continue
 
-    # Merge adjacent bins that quantize to the same pitch.
-    merged = [chunks[0]]
-    for chunk in chunks[1:]:
-        prev = merged[-1]
-        if chunk["pitch"] == prev["pitch"]:
-            prev["end"] = chunk["end"]
+        if i == len(runs) - 1:
+            runs[-2]["end"] = runs[-1]["end"]
+            runs[-2]["frames"] = int(runs[-2].get("frames", 1)) + int(runs[-1].get("frames", 1))
+            runs.pop()
+            i = max(0, i - 1)
+            continue
+
+        left = runs[i - 1]
+        right = runs[i + 1]
+        left_delta = abs(int(runs[i]["pitch"]) - int(left["pitch"]))
+        right_delta = abs(int(runs[i]["pitch"]) - int(right["pitch"]))
+        merge_left = left_delta <= right_delta
+        if merge_left:
+            left["end"] = runs[i]["end"]
+            left["frames"] = int(left.get("frames", 1)) + int(runs[i].get("frames", 1))
         else:
-            merged.append(chunk)
+            right["start"] = runs[i]["start"]
+            right["frames"] = int(right.get("frames", 1)) + int(runs[i].get("frames", 1))
+        del runs[i]
+        i = max(0, i - 1)
 
-    if len(merged) < 2:
+    runs = _merge_same_pitch(runs)
+    if len(runs) < 2:
         return []
 
-    merged_span = int(max(c["pitch"] for c in merged) - min(c["pitch"] for c in merged))
+    # Enforce segment budget while preserving larger pitch movements.
+    budget = max(2, min(int(max_segments), len(runs)))
+    while len(runs) > budget:
+        best_idx = 0
+        best_score = None
+        for j in range(len(runs) - 1):
+            a = runs[j]
+            b = runs[j + 1]
+            pitch_jump = abs(int(a["pitch"]) - int(b["pitch"]))
+            size = int(a.get("frames", 1)) + int(b.get("frames", 1))
+            score = (pitch_jump * 1000) + size
+            if best_score is None or score < best_score:
+                best_score = score
+                best_idx = j
+
+        left = runs[best_idx]
+        right = runs[best_idx + 1]
+        merged_pitch = int(left["pitch"]) if int(left.get("frames", 1)) >= int(right.get("frames", 1)) else int(right["pitch"])
+        merged = {
+            "start": left["start"],
+            "end": right["end"],
+            "pitch": merged_pitch,
+            "frames": int(left.get("frames", 1)) + int(right.get("frames", 1)),
+        }
+        runs[best_idx : best_idx + 2] = [merged]
+
+    runs = _merge_same_pitch(runs)
+    if len(runs) < 2:
+        return []
+
+    merged_span = int(max(c["pitch"] for c in runs) - min(c["pitch"] for c in runs))
     if merged_span < int(min_pitch_span_semitones):
         return []
 
-    return merged
+    return [{"start": float(r["start"]), "end": float(r["end"]), "pitch": int(r["pitch"])} for r in runs]
