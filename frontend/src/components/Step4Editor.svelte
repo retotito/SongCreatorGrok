@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow, analyzeWindow } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
@@ -5846,7 +5846,6 @@
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
       if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); return; }
-      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); return; }
       if (e.code === 'Escape') {
         e.preventDefault();
         if (loopStartBeat !== null) clearLoop();
@@ -6060,13 +6059,6 @@
       toggleMic();
     }
 
-    // V: toggle vocal trace
-    if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && !contextMenu.visible && hasVocalsAudio) {
-      e.preventDefault();
-      vocalTraceEnabled = !vocalTraceEnabled;
-      if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
-      toggleVocalTrace();
-    }
     // 9: toggle MIDI playback
     if (e.key === '9' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
@@ -6299,81 +6291,6 @@
       return;
     }
     animFrame = requestAnimationFrame(updatePlayback);
-  }
-
-  async function runQuickTraceWindow() {
-    console.log('[Trace] UI click');
-    if (!audioEl) return;
-    if (!hasVocalsAudio) {
-      handleMissingAudio('vocals');
-      return;
-    }
-    if (vocalTraceLoading) return;
-
-    if (!vocalTraceEnabled) {
-      vocalTraceEnabled = true;
-      if (micEnabled) {
-        micEnabled = false;
-        stopMic();
-      }
-      await toggleVocalTrace();
-    }
-
-    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
-      errorMessage.set('Vocal trace is not ready yet. Try again in a second.');
-      return;
-    }
-
-    const maxTime = audioEl.duration || audioDuration || 300;
-    const traceStartSec = TRACE_SCOPE === 'song' ? 0 : currentTimeSec;
-    const traceEndSec = TRACE_SCOPE === 'song' ? maxTime : Math.min(maxTime, traceStartSec + QUICK_TRACE_DURATION_SEC);
-
-    // Song trace runs in a fast offline pass instead of real-time playback.
-    if (TRACE_SCOPE === 'song') {
-      if (isPlaying) togglePlayback();
-      if (currentTimeSec > 0) seekToTime(0);
-
-      vocalTraceFrames = [];
-      vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
-      warmupVocalTrace(traceStartSec);
-      vocalTraceVisible = true;
-      draw();
-
-      const totalSamples = Math.max(1, Math.floor((traceEndSec - vocalTraceNextSampleSec) / VOCAL_TRACE_STEP_SEC) + 1);
-      let sampled = 0;
-      for (let t = vocalTraceNextSampleSec; t <= traceEndSec; t += VOCAL_TRACE_STEP_SEC) {
-        sampleVocalTrace(t);
-        sampled += 1;
-        if (sampled % 800 === 0) {
-          const percent = Math.min(100, Math.round((sampled / totalSamples) * 100));
-          errorMessage.set(`Tracing ${TRACE_SCOPE_LABEL}... ${percent}%`);
-          draw();
-          await new Promise(resolve => setTimeout(resolve, 0));
-        }
-      }
-
-      quickTraceActive = false;
-      quickTraceEndSec = null;
-      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${TRACE_SCOPE_LABEL} summary`);
-      errorMessage.set(`Trace ${TRACE_SCOPE_LABEL} complete (${vocalTraceFrames.length} frames).`);
-      draw();
-      return;
-    }
-
-    quickTraceEndSec = traceEndSec;
-    quickTraceActive = true;
-
-    if (TRACE_SCOPE === 'song' && currentTimeSec > 0) {
-      seekToTime(0);
-    }
-
-    vocalTraceFrames = [];
-    vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
-    warmupVocalTrace(traceStartSec);
-    vocalTraceVisible = true;
-    draw();
-
-    if (!isPlaying) togglePlayback();
   }
 
   function medianPitch(values) {
@@ -7053,111 +6970,6 @@
     };
   }
 
-  async function analyzeWindowAtCursor() {
-    console.group('[Analyze] start');
-    console.log('[Analyze] prereq snapshot', {
-      hasAudioElement: !!audioEl,
-      hasVocalsAudio,
-      sessionId: $sessionId || null,
-      vocalTraceReady: !!(vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf),
-      analyzeScope: ANALYZE_SCOPE,
-    });
-
-    if (!audioEl) {
-      errorMessage.set('Analyze failed: audio element is not ready yet.');
-      console.warn('[Analyze] abort: missing audio element');
-      console.groupEnd();
-      return;
-    }
-    if (!hasVocalsAudio) {
-      handleMissingAudio('vocals');
-      console.warn('[Analyze] abort: no vocals audio available');
-      console.groupEnd();
-      return;
-    }
-    if (!$sessionId) {
-      errorMessage.set('Analyze failed: missing session ID. Go back to Step 1 and load audio again.');
-      console.warn('[Analyze] abort: missing session ID');
-      console.groupEnd();
-      return;
-    }
-
-    const maxTime = audioEl.duration || audioDuration || 300;
-    const startSec = ANALYZE_SCOPE === 'song' ? 0 : Math.max(0, currentTimeSec);
-    const endSec = ANALYZE_SCOPE === 'song' ? maxTime : Math.min(maxTime, startSec + ANALYZE_WINDOW_SEC);
-    console.log('[Analyze] window', { startSec, endSec, duration: endSec - startSec, currentTimeSec, analyzeScope: ANALYZE_SCOPE });
-
-    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
-      const wasEnabled = vocalTraceEnabled;
-      vocalTraceEnabled = true;
-      await startVocalTrace();
-      if (!wasEnabled) vocalTraceEnabled = false;
-    }
-    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
-      errorMessage.set('Could not initialize vocal trace analyzer.');
-      console.error('[Analyze] abort: analyzer could not initialize');
-      console.groupEnd();
-      return;
-    }
-
-    vocalTraceFrames = [];
-    vocalTraceVisible = true;
-    warmupVocalTrace(startSec);
-    let t = Math.ceil(startSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
-    while (t <= endSec) {
-      sampleVocalTrace(t);
-      t += VOCAL_TRACE_STEP_SEC;
-    }
-
-    try {
-      // Run fresh Whisper on just this window — independent of Step 2
-      const wordsResult = await analyzeWindow($sessionId, startSec, endSec);
-      liveWordTokens = (wordsResult.words || []).map((w, idx) => ({
-        id: `${idx}-${w.start}-${w.end}`,
-        word: w.word,
-        start: w.start,
-        end: w.end,
-        score: w.score ?? 0,
-      }));
-      console.log('[Analyze5s] words result', {
-        method: wordsResult.method,
-        wordsInWindow: liveWordTokens.length,
-        words: liveWordTokens.map(w => w.word),
-      });
-
-      pushUndo();
-      const stats = buildNotesFromAnalyzeWindow(startSec, endSec, liveWordTokens);
-      const analyzedStartBeat = timeToBeat(startSec);
-      const analyzedEndBeat = timeToBeat(endSec);
-      const analyzedNotes = notes.filter(n => n.type !== 'break' && n.startBeat < analyzedEndBeat && (n.startBeat + n.duration) > analyzedStartBeat);
-      markUnsaved();
-      updatePitchRange();
-      console.log('[Analyze] note generation', stats);
-      if (vocalTraceFrames.length > 0) logVocalTraceState(`Analyze ${ANALYZE_SCOPE_LABEL} trace vs notes`, analyzedNotes);
-      if (!stats || stats.proposalCount === 0) {
-        errorMessage.set('Analyze ran, but no note proposals were generated in this range. Try a different section or run Trace first.');
-        console.warn('[Analyze] completed with zero proposals');
-      } else {
-        console.log(`[Analyze] inserted ${stats.proposalCount} notes in range`);
-      }
-    } catch (err) {
-      errorMessage.set(err.message);
-      liveWordTokens = [];
-      console.error('[Analyze] failed', err);
-    }
-
-    draw();
-    console.groupEnd();
-  }
-
-  function onAnalyzeButtonClick() {
-    console.log('[Analyze] UI click');
-    errorMessage.set(`Analyze ${ANALYZE_SCOPE_LABEL} started… check console for [Analyze] logs.`);
-    analyzeWindowAtCursor().catch((err) => {
-      console.error('[Analyze] unhandled error', err);
-      errorMessage.set(err?.message || 'Analyze failed unexpectedly.');
-    });
-  }
 
   // Set playback speed
   function setPlaybackRate(rate) {
@@ -9077,41 +8889,7 @@
       {/if}
 
       </div>
-      <div id="vocal_trace_outer_wrapper">
-        <div id="vocal_trace-controls-wrapper">
-          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} on:click={(e) => {
-            if (uiModalGuardActive) return;
-            if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
-            vocalTraceEnabled = !vocalTraceEnabled;
-            if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
-            toggleVocalTrace();
-            e.currentTarget.blur();
-          }} title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
-            Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
-          </button>
-          {#if vocalTraceLoading}
-            <div class="loading-modal-overlay">
-              <div class="loading-modal">
-                <span class="loading-spinner"></span>
-                <span class="loading-label">Loading vocal trace…</span>
-                <button class="tool-btn sm" on:click={() => {
-                  if (vocalTraceAbortController) vocalTraceAbortController.abort();
-                  vocalTraceEnabled = false;
-                  vocalTraceLoading = false;
-                }} title="Cancel">Cancel</button>
-              </div>
-            </div>
-          {/if}
-          {#if vocalTraceFrames.length > 0}
-            {#if vocalTraceVisible}
-              <button class="tool-btn sm active" on:click={() => { vocalTraceVisible = false; draw(); }} title="Hide vocal trace"><span class="mic-icon-wrap">👁</span></button>
-            {:else}
-              <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace"><span class="mic-icon-wrap mic-off">👁</span></button>
-            {/if}
-            <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
-          {/if}
-        </div>
-        <div id="pitch-line-controls-wrapper">
+      <div id="pitch-line-controls-wrapper">
           <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} disabled={uiModalGuardActive}
             on:click={() => { if (uiModalGuardActive) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
             title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute pitch from selected Vocals/Edited source (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
@@ -9183,16 +8961,6 @@
         <button class="tool-btn" on:click={() => { console.log('[UI] jump to GAP'); seekToTime(gapMs / 1000); }} title="Jump to GAP (beat 0)">GAP⏮</button>
         <button class="tool-btn" id="toggle-playback-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
           {isPlaying ? '⏸ Pause' : '▶ Play'}
-        </button>
-        <button class="tool-btn btn-trace" class:active={quickTraceActive} class:disabled-audio={!hasVocalsAudio}
-          on:click={runQuickTraceWindow}
-          title={hasVocalsAudio ? `TRACE: Plays ${TRACE_SCOPE_LABEL} of audio with real-time pink pitch dots` : 'No vocals — go to Step 1 to extract or upload'}>
-          🎙 Trace {TRACE_SCOPE_LABEL}
-        </button>
-        <button class="tool-btn btn-analyze" class:disabled-audio={!hasVocalsAudio}
-          on:click={onAnalyzeButtonClick}
-          title={hasVocalsAudio ? `ANALYZE: Silently scans ${ANALYZE_SCOPE_LABEL} and inserts note proposals (no playback)` : 'No vocals — go to Step 1 to extract or upload'}>
-          🔬 Analyze {ANALYZE_SCOPE_LABEL}
         </button>
         {#if liveWordTokens.length > 0}
           <button class="tool-btn sm" class:active={liveWordsVisible}
@@ -10088,7 +9856,6 @@
       </div>
     {/if}
   {/if}
-</div>
 
 <style>
   .step-content {
@@ -10795,15 +10562,6 @@
     padding-left: 10px;
   }
 
-  #vocal_trace-controls-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 175px;
-    border: 1px solid #333;
-    border-radius: 4px;
-  }
-
   .mic-icon-wrap {
     position: relative;
     display: inline-block;
@@ -10833,13 +10591,6 @@
   }
 
   .tool-btn:hover { background: #333; }
-  /* Trace = warm pink tint */
-  .tool-btn.btn-trace { background: #3a1a2a; color: #f48fb1; border-color: #c2185b; }
-  .tool-btn.btn-trace:hover { background: #4a2035; }
-  .tool-btn.btn-trace.active { background: #6a1030; border-color: #f06292; }
-  /* Analyze = cool cyan tint */
-  .tool-btn.btn-analyze { background: #0a2a3a; color: #80deea; border-color: #00838f; }
-  .tool-btn.btn-analyze:hover { background: #0f3545; }
 
   .zoom-label {
     color: #888;
