@@ -78,41 +78,6 @@
     }
   }
 
-  async function handleGenerateLyricsOnly() {
-    if (!$sessionId) {
-      errorMessage.set('No session. Please upload audio first.');
-      return;
-    }
-    errorMessage.set('');
-    isProcessing.set(true);
-    processingStatus.set('Preparing metadata...');
-    try {
-      if (lyricsText.trim()) {
-        const result = await submitLyrics($sessionId, lyricsText, artist, title, language);
-        lyricsData.set({
-          text: lyricsText,
-          artist,
-          title,
-          language,
-          syllableCount: result.syllable_count,
-          lineCount: result.line_count,
-          preview: result.preview,
-        });
-      } else {
-        await updateMetadata($sessionId, artist, title, language);
-      }
-
-      processingStatus.set('Generating lyrics-only TXT...');
-      const lyricsOnlyResult = await generateLyricsOnly($sessionId);
-      generationResult.set(lyricsOnlyResult);
-      processingStatus.set('✅ Lyrics-only TXT ready. Opening editor...');
-      currentStep.set(4);
-    } catch (err) {
-      errorMessage.set(err.message);
-    } finally {
-      isProcessing.set(false);
-    }
-  }
   // Restore checkTestSession function
   async function checkTestSession() {
     if ($sessionId && $sessionId.startsWith('test-')) {
@@ -130,7 +95,7 @@
   import { onDestroy } from 'svelte';
   import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned, generationResult } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
-  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar, generateLyricsOnly } from '../services/api.js';
+  import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar } from '../services/api.js';
 
   async function syncMetadata() {
     if (!$sessionId || !$lyricsData.syllableCount) return; // only if a result exists
@@ -470,9 +435,6 @@
       </button>
     </div>
     <div class="generate-row">
-      <button class="btn btn-secondary" on:click={handleGenerateLyricsOnly} disabled={$isProcessing || !artist.trim() || !title.trim() || !$sessionId}>
-        📝 Generate Lyrics-Only TXT
-      </button>
       <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
         🚀 Generate Full Ultrastar Files
       </button>
