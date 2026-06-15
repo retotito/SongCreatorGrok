@@ -2631,13 +2631,11 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
                 }
                 return
             except ImportError as e:
-                import traceback
                 log_step("WHISPER", f"WhisperX ImportError: {e}, falling back to vanilla Whisper...")
-                log_step("WHISPER", traceback.format_exc())
             except Exception as e:
-                import traceback
+                # Some pyannote/torch errors can throw during traceback formatting;
+                # keep fallback resilient by logging a compact message only.
                 log_step("WHISPERX", f"WhisperX failed: {e}, falling back to vanilla Whisper")
-                log_step("WHISPERX", traceback.format_exc())
 
             # Fallback: vanilla Whisper
             try:
@@ -2668,15 +2666,14 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
                     "model": f"whisper-{model_name}", "alignment": "whisper-native", "char_timestamps": 0,
                 }
             except ImportError as e:
-                import traceback
                 log_step("WHISPER", f"Vanilla Whisper ImportError: {e}")
-                log_step("WHISPER", traceback.format_exc())
                 result_container["error"] = "Neither WhisperX nor Whisper installed. Run: pip install whisperx"
             except Exception as e:
-                import traceback
                 log_step("WHISPER", f"Transcription failed: {e}")
-                log_step("WHISPER", traceback.format_exc())
                 result_container["error"] = f"Transcription failed: {str(e)}"
+
+            if "result" not in result_container and "error" not in result_container:
+                result_container["error"] = "Transcription ended without a result. Please retry once."
 
         executor_future = loop.run_in_executor(None, _run_transcribe)
         yield _send("transcribing", "Transcribing vocals with Whisper…")
@@ -2858,13 +2855,10 @@ def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: 
         })
     
     except ImportError as e:
-        import traceback
         log_step("WHISPER", f"WhisperX ImportError: {e}, falling back to vanilla Whisper...")
-        log_step("WHISPER", traceback.format_exc())
     except Exception as e:
-        import traceback
+        # Avoid traceback formatting here; some lazy imports can explode while formatting.
         log_step("WHISPERX", f"WhisperX failed: {e}, falling back to vanilla Whisper")
-        log_step("WHISPERX", traceback.format_exc())
     
     # --- Fallback: vanilla Whisper ---
     try:
@@ -2927,14 +2921,10 @@ def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: 
         })
         
     except ImportError as e:
-        import traceback
         log_step("WHISPER", f"Vanilla Whisper ImportError: {e}")
-        log_step("WHISPER", traceback.format_exc())
         raise HTTPException(status_code=500, detail="Neither WhisperX nor Whisper installed. Run: pip install whisperx")
     except Exception as e:
-        import traceback
         log_step("WHISPER", f"Transcription failed: {e}")
-        log_step("WHISPER", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
