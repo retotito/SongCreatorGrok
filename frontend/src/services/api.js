@@ -322,6 +322,10 @@ export async function cleanupOrphans() {
   return request('POST', '/cleanup-orphans');
 }
 
+export async function cleanupDebugData() {
+  return request('POST', '/cleanup-debug');
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

@@ -873,6 +873,15 @@ async def get_storage_info():
         except OSError:
             return 0
 
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
     session_rows = []
     for sid, s in sessions.items():
         result = s.get("result") or {}
@@ -936,10 +945,17 @@ async def get_storage_info():
 
     orphan_files = []
     orphan_size = 0
+    debug_files = []
+    debug_size = 0
     try:
         for fname in os.listdir(DOWNLOADS_DIR):
             fpath = os.path.join(DOWNLOADS_DIR, fname)
             if not os.path.isfile(fpath):
+                continue
+            if _is_debug_download_file(fname):
+                sz = _file_size(fpath)
+                debug_files.append({"path": fpath, "name": fname, "size": sz})
+                debug_size += sz
                 continue
             if fname not in all_referenced:
                 sz = _file_size(fpath)
@@ -957,6 +973,8 @@ async def get_storage_info():
         "sessions": session_rows,
         "orphan_files": orphan_files,
         "orphan_size_bytes": orphan_size,
+        "debug_files": debug_files,
+        "debug_size_bytes": debug_size,
     }
 
 
@@ -976,12 +994,23 @@ async def cleanup_orphans():
         for fn in s.get("generated_files", []):
             all_referenced.add(fn)
 
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
     deleted = []
     errors = []
     try:
         for fname in os.listdir(DOWNLOADS_DIR):
             fpath = os.path.join(DOWNLOADS_DIR, fname)
             if not os.path.isfile(fpath):
+                continue
+            if _is_debug_download_file(fname):
                 continue
             if fname not in all_referenced:
                 try:
@@ -993,6 +1022,40 @@ async def cleanup_orphans():
         pass
 
     log_step("CLEANUP", f"Orphan cleanup: deleted {len(deleted)} files, {len(errors)} errors")
+    return {"status": "ok", "deleted": deleted, "errors": errors}
+
+
+@app.post("/api/cleanup-debug")
+async def cleanup_debug_files():
+    """Delete known debug artifacts from downloads."""
+
+    def _is_debug_download_file(fname: str) -> bool:
+        return (
+            fname == "alignment_debug.txt"
+            or fname == "whisper_words.txt"
+            or fname.startswith("alignment_whisper_debug_")
+            or (fname.startswith("comparison_ms_") and fname.endswith(".json"))
+            or (fname.startswith("reference_ms_") and fname.endswith(".json"))
+        )
+
+    deleted = []
+    errors = []
+    try:
+        for fname in os.listdir(DOWNLOADS_DIR):
+            fpath = os.path.join(DOWNLOADS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if not _is_debug_download_file(fname):
+                continue
+            try:
+                os.remove(fpath)
+                deleted.append(fname)
+            except OSError as e:
+                errors.append({"file": fname, "error": str(e)})
+    except OSError:
+        pass
+
+    log_step("CLEANUP", f"Debug cleanup: deleted {len(deleted)} files, {len(errors)} errors")
     return {"status": "ok", "deleted": deleted, "errors": errors}
 
 
