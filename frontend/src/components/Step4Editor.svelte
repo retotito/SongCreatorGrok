@@ -387,6 +387,20 @@
     }).map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
 
     if (!changed) return false;
+
+    const updatedSeg = cleanupSegments.find(s => s.id === seg.id);
+    if (updatedSeg) {
+      let focusMs = updatedSeg.endMs;
+      if (mode === 'move') {
+        focusMs = direction > 0 ? updatedSeg.endMs : updatedSeg.startMs;
+      } else if (mode === 'start') {
+        focusMs = updatedSeg.startMs;
+      } else if (mode === 'end') {
+        focusMs = updatedSeg.endMs;
+      }
+      ensureBeatVisible(timeToBeat(focusMs / 1000), 84);
+    }
+
     cleanedAudioDirty = true;
     markUnsaved();
     scheduleCleanupKeyboardSave();
