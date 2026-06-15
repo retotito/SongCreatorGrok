@@ -6256,8 +6256,18 @@
     loopEndBeat = timeToBeat(endSec);
     loopEnabled = true;
 
-    // Seek to pre-roll start and play.
+    // Seek to pre-roll start.
     seekToTime(Math.max(0, startSec - segRecPrerollSec));
+
+    // If preroll would start before time 0, keep the playhead parked at 0 for
+    // the clipped lead duration (c - s), then start playback.
+    const clippedLeadSec = Math.max(0, segRecPrerollSec - startSec);
+    const runningPrerollSec = Math.max(0, segRecPrerollSec - clippedLeadSec);
+    if (clippedLeadSec > 0) {
+      await new Promise(resolve => setTimeout(resolve, clippedLeadSec * 1000));
+      if (segRecPhase !== 'preroll') return; // was cancelled
+    }
+
     if (!isPlaying) togglePlayback();
 
     // Countdown
@@ -6269,8 +6279,8 @@
       }
     }, 1000);
 
-    // Start MediaRecorder at the moment recording begins
-    await new Promise(resolve => setTimeout(resolve, segRecPrerollSec * 1000));
+    // Start MediaRecorder when playback reaches segment start.
+    await new Promise(resolve => setTimeout(resolve, runningPrerollSec * 1000));
 
     if (segRecPhase !== 'preroll') return; // was cancelled
 
