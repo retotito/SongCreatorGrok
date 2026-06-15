@@ -485,7 +485,7 @@
     const seg = normalizeCleanupSegment({ id: cleanupSegmentIdCounter++, startMs: segStartMs, endMs: segEndMs });
     const overlap = findCleanupOverlap(seg.startMs, seg.endMs);
     if (overlap) {
-      showToast('Cleanup segments cannot overlap');
+      showToast('Cleanup segments cannot overlap', 4000, true);
       return;
     }
     console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${seg.startMs.toFixed(0)} endMs=${seg.endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
@@ -702,7 +702,7 @@
     const nextStartMs = seg.startMs + deltaMs;
     const nextEndMs = seg.endMs + deltaMs;
     if (findCleanupOverlap(nextStartMs, nextEndMs, id)) {
-      showToast('Cleanup segments cannot overlap');
+      showToast('Cleanup segments cannot overlap', 4000, true);
       return;
     }
     seg.startMs = nextStartMs;
