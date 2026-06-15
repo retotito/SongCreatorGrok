@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
-  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato } from '../services/api.js';
+  import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow, analyzeWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
@@ -1236,6 +1236,16 @@
   let vocalTraceLastPitch = -1;
   let vocalTracePitchConfidence = 0;
   let vocalTraceRecentPitches = [];
+  let quickTraceActive = false;
+  let quickTraceEndSec = null;
+  const TRACE_SCOPE = 'song'; // 'window' | 'song'
+  const QUICK_TRACE_DURATION_SEC = 5;
+  const TRACE_SCOPE_LABEL = TRACE_SCOPE === 'song' ? 'song' : `${QUICK_TRACE_DURATION_SEC}s`;
+  const ANALYZE_SCOPE = 'song'; // 'window' | 'song'
+  const ANALYZE_WINDOW_SEC = 5;
+  const ANALYZE_SCOPE_LABEL = ANALYZE_SCOPE === 'song' ? 'song' : `${ANALYZE_WINDOW_SEC}s`;
+  let liveWordTokens = [];
+  let liveWordsVisible = true;
   // Fixed-grid sampling: sample every fixed number of seconds of audio time so the
   // same audio bytes are always sampled at the same positions regardless of rAF timing.
   const VOCAL_TRACE_STEP_SEC = 0.025;   // sample every 25ms (~0.67 beats at BPM 120)
@@ -2520,10 +2530,26 @@
     if (vocalTraceVisible && vocalTraceFrames.length > 0) {
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
+      const hasDrawableNotes = notes.some(n => n.type !== 'break');
       // Estimate beat gap between frames (for visual continuity)
       const vtBeatGap = vocalTraceFrames.length > 1
         ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5
         : 0.15;
+
+      // Lyrics-only / empty-note mode fallback: draw raw trace so users can still
+      // validate short trace runs before any notes exist.
+      if (!hasDrawableNotes) {
+        ctx.fillStyle = 'rgba(255, 80, 180, 0.7)';
+        const dotH = Math.max(2, noteHeight * 0.55);
+        for (let i = 0; i < vocalTraceFrames.length; i++) {
+          const frame = vocalTraceFrames[i];
+          if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
+          if (isPlaying && vocalTraceEnabled && frame.beat > playbackBeat) break;
+          const x = beatToX(frame.beat);
+          const y = pitchToY(frame.pitch);
+          ctx.fillRect(x, y - dotH / 2, 2, dotH);
+        }
+      }
 
       for (const note of notes) {
         if (note.type === 'break') continue;
@@ -2585,6 +2611,14 @@
                 && vocalTraceFrames[i + 1].pitch === missPitch) {
               i++; endBeat = vocalTraceFrames[i].beat;
             }
+            const missDurationBeat = Math.max(0, endBeat - frame.beat);
+            const nearStartEdge = (frame.beat - note.startBeat) <= Math.max(0.5, vtBeatGap);
+            const nearEndEdge = (noteEndBeat - endBeat) <= Math.max(0.5, vtBeatGap);
+            // Ignore tiny edge flicker misses to avoid noisy overlap on otherwise-correct notes.
+            if (missDurationBeat < Math.max(0.7, vtBeatGap) && (nearStartEdge || nearEndEdge)) {
+              i++;
+              continue;
+            }
             const missY  = pitchToY(missPitch);
             const xStart = beatToX(frame.beat);
             const xEnd   = beatToX(endBeat);
@@ -2594,6 +2628,30 @@
           i++;
         }
       }
+    }
+
+    // ── Live word tokens (from analyze-at-cursor) ──
+    if (liveWordsVisible && liveWordTokens.length > 0) {
+      ctx.save();
+      ctx.font = '11px sans-serif';
+      ctx.textBaseline = 'middle';
+      for (const tok of liveWordTokens) {
+        const beat = timeToBeat(tok.start);
+        const x = beatToX(beat);
+        if (x < -60 || x > w + 60) continue;
+        const label = tok.word || '';
+        if (!label) continue;
+        const tw = ctx.measureText(label).width;
+        const padX = 6;
+        const boxW = tw + padX * 2;
+        const boxH = 18;
+        const y = showWaveform ? waveformHeight + 10 : 12;
+        ctx.fillStyle = 'rgba(38, 166, 154, 0.78)';
+        ctx.fillRect(x - boxW / 2, y - boxH / 2, boxW, boxH);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, x - tw / 2, y);
+      }
+      ctx.restore();
     }
 
     // ── USDX-style sung note blocks ──
@@ -5540,6 +5598,8 @@
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
       // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+      quickTraceActive = false;
+      quickTraceEndSec = null;
       audioEl.pause();
       currentTimeSec = audioEl.currentTime;
       isPlaying = false;
@@ -5595,12 +5655,12 @@
     }
   }
 
-  function logVocalTraceState() {
-    console.group('[VocalTrace] Stop summary');
+  function logVocalTraceState(label = 'Stop summary', noteSubset = notes) {
+    console.group(`[VocalTrace] ${label}`);
     console.log(`Total frames recorded: ${vocalTraceFrames.length}`);
     const vtBeatGap = vocalTraceFrames.length > 1
       ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5 : 0.15;
-    for (const note of notes) {
+    for (const note of noteSubset) {
       if (note.type === 'break') continue;
       const noteEndBeat = note.startBeat + note.duration;
       // Find frames for this note
@@ -5650,6 +5710,8 @@
   function stopPlayback() {
     console.log('[Stop] Resetting to 0');
     // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
+    quickTraceActive = false;
+    quickTraceEndSec = null;
     if (audioEl) {
       audioEl.pause();
       audioEl.currentTime = 0;
@@ -6227,7 +6289,874 @@
         vocalTraceNextSampleSec += VOCAL_TRACE_STEP_SEC;
       }
     }
+
+    if (quickTraceActive && quickTraceEndSec !== null && currentTimeSec >= quickTraceEndSec) {
+      quickTraceActive = false;
+      quickTraceEndSec = null;
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${TRACE_SCOPE_LABEL} summary`);
+      // Pause at the end of the short trace window so users can iterate quickly.
+      togglePlayback();
+      return;
+    }
     animFrame = requestAnimationFrame(updatePlayback);
+  }
+
+  async function runQuickTraceWindow() {
+    console.log('[Trace] UI click');
+    if (!audioEl) return;
+    if (!hasVocalsAudio) {
+      handleMissingAudio('vocals');
+      return;
+    }
+    if (vocalTraceLoading) return;
+
+    if (!vocalTraceEnabled) {
+      vocalTraceEnabled = true;
+      if (micEnabled) {
+        micEnabled = false;
+        stopMic();
+      }
+      await toggleVocalTrace();
+    }
+
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      errorMessage.set('Vocal trace is not ready yet. Try again in a second.');
+      return;
+    }
+
+    const maxTime = audioEl.duration || audioDuration || 300;
+    const traceStartSec = TRACE_SCOPE === 'song' ? 0 : currentTimeSec;
+    const traceEndSec = TRACE_SCOPE === 'song' ? maxTime : Math.min(maxTime, traceStartSec + QUICK_TRACE_DURATION_SEC);
+
+    // Song trace runs in a fast offline pass instead of real-time playback.
+    if (TRACE_SCOPE === 'song') {
+      if (isPlaying) togglePlayback();
+      if (currentTimeSec > 0) seekToTime(0);
+
+      vocalTraceFrames = [];
+      vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+      warmupVocalTrace(traceStartSec);
+      vocalTraceVisible = true;
+      draw();
+
+      const totalSamples = Math.max(1, Math.floor((traceEndSec - vocalTraceNextSampleSec) / VOCAL_TRACE_STEP_SEC) + 1);
+      let sampled = 0;
+      for (let t = vocalTraceNextSampleSec; t <= traceEndSec; t += VOCAL_TRACE_STEP_SEC) {
+        sampleVocalTrace(t);
+        sampled += 1;
+        if (sampled % 800 === 0) {
+          const percent = Math.min(100, Math.round((sampled / totalSamples) * 100));
+          errorMessage.set(`Tracing ${TRACE_SCOPE_LABEL}... ${percent}%`);
+          draw();
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      quickTraceActive = false;
+      quickTraceEndSec = null;
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Trace ${TRACE_SCOPE_LABEL} summary`);
+      errorMessage.set(`Trace ${TRACE_SCOPE_LABEL} complete (${vocalTraceFrames.length} frames).`);
+      draw();
+      return;
+    }
+
+    quickTraceEndSec = traceEndSec;
+    quickTraceActive = true;
+
+    if (TRACE_SCOPE === 'song' && currentTimeSec > 0) {
+      seekToTime(0);
+    }
+
+    vocalTraceFrames = [];
+    vocalTraceNextSampleSec = Math.ceil(traceStartSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    warmupVocalTrace(traceStartSec);
+    vocalTraceVisible = true;
+    draw();
+
+    if (!isPlaying) togglePlayback();
+  }
+
+  function medianPitch(values) {
+    if (!values || values.length === 0) return 60;
+    const s = [...values].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  }
+
+  function groupPitchFrames(frames, maxGapBeat = 0.45, maxPitchJump = 2) {
+    if (!frames.length) return [];
+    const sorted = [...frames].sort((a, b) => a.beat - b.beat);
+    const groups = [];
+    let current = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1];
+      const cur = sorted[i];
+      const beatGap = cur.beat - prev.beat;
+      const pitchJump = Math.abs(cur.pitch - prev.pitch);
+      if (beatGap <= maxGapBeat && pitchJump <= maxPitchJump) {
+        current.push(cur);
+      } else {
+        groups.push(current);
+        current = [cur];
+      }
+    }
+    groups.push(current);
+    return groups;
+  }
+
+  function mergePlaceholderNotes(inputNotes, maxGapBeat = 0.35, maxPitchJump = 3) {
+    if (!inputNotes.length) return [];
+    const sorted = [...inputNotes].sort((a, b) => a.startBeat - b.startBeat);
+    const merged = [sorted[0]];
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = merged[merged.length - 1];
+      const cur = sorted[i];
+      const prevEnd = prev.startBeat + prev.duration;
+      const gap = cur.startBeat - prevEnd;
+      const pitchJump = Math.abs(cur.pitch - prev.pitch);
+      if (gap <= maxGapBeat && pitchJump <= maxPitchJump) {
+        const newEnd = Math.max(prevEnd, cur.startBeat + cur.duration);
+        prev.duration = newEnd - prev.startBeat;
+        prev.pitch = Math.round((prev.pitch + cur.pitch) / 2);
+      } else {
+        merged.push(cur);
+      }
+    }
+    return merged;
+  }
+
+  function trimPlaceholdersAgainstNotes(placeholders, fixedNotes) {
+    if (!placeholders.length) {
+      return { trimmed: [], dropped: 0, split: 0 };
+    }
+    const blockers = fixedNotes
+      .map(note => ({ startBeat: note.startBeat, endBeat: note.startBeat + note.duration }))
+      .sort((a, b) => a.startBeat - b.startBeat);
+
+    let dropped = 0;
+    let split = 0;
+    const trimmed = [];
+
+    for (const note of placeholders) {
+      let segments = [{ startBeat: note.startBeat, endBeat: note.startBeat + note.duration }];
+
+      for (const blocker of blockers) {
+        const nextSegments = [];
+        for (const segment of segments) {
+          if (blocker.endBeat <= segment.startBeat || blocker.startBeat >= segment.endBeat) {
+            nextSegments.push(segment);
+            continue;
+          }
+          if (blocker.startBeat > segment.startBeat) {
+            nextSegments.push({ startBeat: segment.startBeat, endBeat: blocker.startBeat });
+          }
+          if (blocker.endBeat < segment.endBeat) {
+            nextSegments.push({ startBeat: blocker.endBeat, endBeat: segment.endBeat });
+          }
+        }
+        segments = nextSegments;
+        if (!segments.length) break;
+      }
+
+      const keptSegments = segments
+        .map(segment => ({
+          startBeat: Math.floor(segment.startBeat),
+          endBeat: Math.ceil(segment.endBeat),
+        }))
+        .filter(segment => segment.endBeat - segment.startBeat >= 1);
+
+      if (keptSegments.length === 0) {
+        dropped += 1;
+        continue;
+      }
+      if (keptSegments.length > 1) split += 1;
+
+      for (const segment of keptSegments) {
+        trimmed.push({
+          ...note,
+          id: note.id,
+          startBeat: segment.startBeat,
+          duration: segment.endBeat - segment.startBeat,
+        });
+      }
+    }
+
+    return { trimmed, dropped, split };
+  }
+
+  function buildPitchSplitGroups(frames, startBeat, endBeat, vtBeatGap) {
+    const sortedFrames = [...frames].sort((a, b) => a.beat - b.beat);
+    const runs = [];
+    if (sortedFrames.length > 0) {
+      let current = { pitch: sortedFrames[0].pitch, frames: [sortedFrames[0]] };
+      for (let i = 1; i < sortedFrames.length; i++) {
+        const prev = sortedFrames[i - 1];
+        const cur = sortedFrames[i];
+        const beatGap = cur.beat - prev.beat;
+        // Frames are sampled on a coarse beat grid (~0.8 beat spacing at current BPM),
+        // so allow bigger continuity gaps and +/-1 semitone jitter inside a run.
+        const sameRun = Math.abs(cur.pitch - current.pitch) <= 1 && beatGap <= 1.35;
+        if (sameRun) {
+          current.frames.push(cur);
+        } else {
+          runs.push(current);
+          current = { pitch: cur.pitch, frames: [cur] };
+        }
+      }
+      runs.push(current);
+    }
+
+    const runStats = runs.map(run => {
+      const runStart = Math.round(Math.max(startBeat, run.frames[0].beat));
+      const runEnd = Math.round(Math.min(endBeat, run.frames[run.frames.length - 1].beat + vtBeatGap));
+      return {
+        pitch: medianPitch(run.frames.map(f => f.pitch)),
+        frameCount: run.frames.length,
+        startBeat: runStart,
+        endBeat: runEnd,
+        duration: Math.max(1, runEnd - runStart),
+      };
+    });
+
+    const stableRuns = runStats.filter(run => run.frameCount >= 2 && run.duration >= 2);
+    const splitGroups = [];
+    for (const run of stableRuns) {
+      const prev = splitGroups[splitGroups.length - 1];
+      if (!prev) {
+        splitGroups.push({ ...run });
+        continue;
+      }
+      const pitchDiff = Math.abs(run.pitch - prev.pitch);
+      const startDiff = run.startBeat - prev.startBeat;
+      if (pitchDiff >= 2 && startDiff >= 3) {
+        splitGroups.push({ ...run });
+      } else {
+        // Merge unstable continuation into previous run.
+        prev.endBeat = Math.max(prev.endBeat, run.endBeat);
+        prev.duration = Math.max(1, prev.endBeat - prev.startBeat);
+      }
+    }
+
+    return { runStats, stableRuns, splitGroups };
+  }
+
+  function splitPlaceholderNotesByPitchRuns(placeholders, framePool, startBeat, endBeat, vtBeatGap) {
+    if (!placeholders.length) return { notes: [], split: 0 };
+
+    const splitNotes = [];
+    let split = 0;
+
+    for (const note of [...placeholders].sort((a, b) => a.startBeat - b.startBeat)) {
+      const noteStart = Math.round(Math.max(startBeat, note.startBeat));
+      const noteEnd = Math.round(Math.min(endBeat, note.startBeat + note.duration));
+      const noteFrames = framePool.filter(f => f.beat >= noteStart && f.beat <= noteEnd);
+      const { runStats, stableRuns, splitGroups } = buildPitchSplitGroups(noteFrames, noteStart, noteEnd, vtBeatGap);
+
+      if (splitGroups.length < 2) {
+        splitNotes.push(note);
+        continue;
+      }
+
+      split += 1;
+      console.log('[Analyze5s] placeholder split', {
+        startBeat: noteStart,
+        endBeat: noteEnd,
+        duration: noteEnd - noteStart,
+        runs: runStats,
+        stableRuns,
+        splitGroups,
+      });
+
+      for (let gi = 0; gi < splitGroups.length; gi++) {
+        const group = splitGroups[gi];
+        const nextGroup = splitGroups[gi + 1] || null;
+        const durationWithTail = Math.max(1, (group.endBeat - group.startBeat) + Math.max(0, Math.round(vtBeatGap)));
+        const rawEnd = group.startBeat + durationWithTail;
+        // Prevent overlap between split placeholder segments.
+        const clippedEnd = nextGroup ? Math.min(rawEnd, nextGroup.startBeat) : rawEnd;
+        splitNotes.push({
+          ...note,
+          startBeat: group.startBeat,
+          duration: Math.max(1, clippedEnd - group.startBeat),
+          pitch: group.pitch,
+          syllable: '... ',
+        });
+      }
+    }
+
+    return { notes: splitNotes, split };
+  }
+
+  function splitWordIntoSyllablesSimple(word) {
+    const lettersOnly = (word || '').replace(/[^A-Za-z]/g, '');
+    if (!lettersOnly) return [word || ''];
+
+    // Readability-first exceptions for high-frequency words where the
+    // generic onset heuristic often feels unintuitive in karaoke text.
+    const preferred = {
+      another: ['a', 'no', 'ther'],
+    };
+    const preferredSplit = preferred[lettersOnly.toLowerCase()];
+    if (preferredSplit) return preferredSplit;
+
+    const lower = lettersOnly.toLowerCase();
+    const isVowel = ch => /[aeiouy]/.test(ch);
+    const parts = [];
+    let i = 0;
+
+    while (i < lettersOnly.length) {
+      const onsetStart = i;
+
+      // Onset: leading consonants before the vowel nucleus.
+      while (i < lettersOnly.length && !isVowel(lower[i])) i += 1;
+      if (i >= lettersOnly.length) {
+        if (parts.length) parts[parts.length - 1] += lettersOnly.slice(onsetStart);
+        else parts.push(lettersOnly);
+        break;
+      }
+
+      // Nucleus: contiguous vowel group.
+      while (i < lettersOnly.length && isVowel(lower[i])) i += 1;
+
+      // Following consonant cluster before the next vowel.
+      const consonantStart = i;
+      while (i < lettersOnly.length && !isVowel(lower[i])) i += 1;
+      const hasNextVowel = i < lettersOnly.length;
+
+      // If there is another vowel ahead, keep one consonant for next syllable onset
+      // (maximal onset style). Otherwise keep the tail in this final syllable.
+      let syllableEnd = i;
+      if (hasNextVowel) {
+        const clusterLen = i - consonantStart;
+        syllableEnd = clusterLen <= 1 ? consonantStart : i - 1;
+      }
+
+      const piece = lettersOnly.slice(onsetStart, Math.max(onsetStart + 1, syllableEnd));
+      if (piece) parts.push(piece);
+
+      if (hasNextVowel) {
+        i = syllableEnd;
+      }
+    }
+
+    return parts.length > 1 ? parts : [word];
+  }
+
+  function isSyllableSplitLowConfidence(originalWord, parts) {
+    if (!Array.isArray(parts) || parts.length < 2) return true;
+    const lettersOnly = (originalWord || '').replace(/[^A-Za-z]/g, '').toLowerCase();
+    if (!lettersOnly) return true;
+
+    // Guard against clearly unnatural boundaries in consonant clusters.
+    for (let i = 0; i < parts.length - 1; i++) {
+      const left = (parts[i] || '').toLowerCase();
+      const right = (parts[i + 1] || '').toLowerCase();
+      if (!left || !right) return true;
+
+      const leftLast = left[left.length - 1] || '';
+      const rightFirst = right[0] || '';
+      if ((leftLast === 't' && rightFirst === 'h') ||
+          (leftLast === 'c' && rightFirst === 'h') ||
+          (leftLast === 'n' && rightFirst === 'g')) {
+        return true;
+      }
+    }
+
+    // Very short first chunk followed by a long consonant-start chunk is
+    // often a bad split (e.g. ho-meless, ma-keup).
+    if (parts.length === 2) {
+      const left = parts[0];
+      const right = parts[1];
+      const rightStartsWithVowel = /^[aeiouy]/i.test(right);
+      if (left.length <= 2 && right.length >= 4 && !rightStartsWithVowel) return true;
+      if (left.length <= 3 && right.length >= 4 && /^h/i.test(right)) return true;
+    }
+
+    return false;
+  }
+
+  function formatContinuationSegments(originalWord, segmentCount) {
+    if (segmentCount <= 1) return [`${originalWord} `];
+    const out = [];
+    for (let i = 0; i < segmentCount; i++) {
+      if (i === 0) out.push(`${originalWord}`);
+      else if (i === segmentCount - 1) out.push('~ ');
+      else out.push('~');
+    }
+    return out;
+  }
+
+  function formatSyllablesForSegments(originalWord, segmentCount) {
+    if (segmentCount <= 1) return [`${originalWord} `];
+
+    const syllables = splitWordIntoSyllablesSimple(originalWord);
+    if (isSyllableSplitLowConfidence(originalWord, syllables)) {
+      // Keep pitch segmentation, but avoid forcing unreliable text hyphenation.
+      return formatContinuationSegments(originalWord, segmentCount);
+    }
+    if (syllables.length <= 1) {
+      // One syllable split by pitch only: continuation marker, no word space break.
+      return formatContinuationSegments(originalWord, segmentCount);
+    }
+
+    // Map syllables onto note segments proportionally and preserve word ending only
+    // on the final segment.
+    const out = [];
+    for (let i = 0; i < segmentCount; i++) {
+      const start = Math.floor((i * syllables.length) / segmentCount);
+      const end = Math.floor(((i + 1) * syllables.length) / segmentCount);
+      const part = syllables.slice(start, Math.max(start + 1, end)).join('');
+      if (i < segmentCount - 1) out.push(`${part}-`);
+      else out.push(`${part} `);
+    }
+    return out;
+  }
+
+  function mergeSplitGroupsToCount(splitGroups, targetCount) {
+    if (!Array.isArray(splitGroups) || splitGroups.length <= targetCount) {
+      return splitGroups || [];
+    }
+    const merged = [];
+    for (let i = 0; i < splitGroups.length; i++) {
+      const bucketStart = Math.floor((i * targetCount) / splitGroups.length);
+      const bucket = Math.min(targetCount - 1, bucketStart);
+      const group = splitGroups[i];
+      const prev = merged[bucket];
+      if (!prev) {
+        merged[bucket] = { ...group };
+        continue;
+      }
+      prev.startBeat = Math.min(prev.startBeat, group.startBeat);
+      const prevEnd = prev.startBeat + prev.duration;
+      const groupEnd = group.startBeat + group.duration;
+      prev.duration = Math.max(1, Math.max(prevEnd, groupEnd) - prev.startBeat);
+      prev.pitch = Math.round((prev.pitch + group.pitch) / 2);
+    }
+    return merged.filter(Boolean);
+  }
+
+  function normalizeWordSegments(segments, noteStart, noteEnd) {
+    if (!Array.isArray(segments) || !segments.length) return [];
+    const sorted = [...segments].sort((a, b) => a.startBeat - b.startBeat);
+    const normalized = [];
+    let cursor = Math.round(noteStart);
+    const finalEnd = Math.round(Math.max(noteStart + 1, noteEnd));
+
+    for (let i = 0; i < sorted.length; i++) {
+      const seg = sorted[i];
+      const rawStart = Math.round(seg.startBeat);
+      const rawEnd = Math.round(seg.startBeat + seg.duration);
+      const nextRawStart = i < sorted.length - 1 ? Math.round(sorted[i + 1].startBeat) : finalEnd;
+
+      let start = Math.max(cursor, rawStart);
+      start = Math.min(start, finalEnd - 1);
+
+      let end;
+      if (i === sorted.length - 1) {
+        end = finalEnd;
+      } else {
+        const cappedByNext = Math.max(start + 1, Math.min(rawEnd, nextRawStart));
+        end = Math.min(finalEnd, cappedByNext);
+      }
+
+      if (end <= start) {
+        if (i === sorted.length - 1) {
+          start = Math.max(noteStart, finalEnd - 1);
+          end = finalEnd;
+        } else {
+          end = Math.min(finalEnd, start + 1);
+        }
+      }
+
+      normalized.push({
+        ...seg,
+        startBeat: start,
+        duration: Math.max(1, end - start),
+      });
+      cursor = end;
+      if (cursor >= finalEnd) break;
+    }
+
+    if (!normalized.length) {
+      return [{ ...segments[0], startBeat: Math.round(noteStart), duration: Math.max(1, Math.round(noteEnd - noteStart)) }];
+    }
+
+    const last = normalized[normalized.length - 1];
+    const lastEnd = last.startBeat + last.duration;
+    if (lastEnd < finalEnd) {
+      last.duration += (finalEnd - lastEnd);
+    }
+    return normalized;
+  }
+
+  function splitRecognizedWordNotes(wordSpan, spanFrames, fallbackFrames, startBeat, endBeat, vtBeatGap, wordIndex) {
+    const pitchSource = spanFrames.length > 0 ? spanFrames : fallbackFrames;
+    if (!pitchSource.length) return [];
+    const { runStats, stableRuns, splitGroups } = buildPitchSplitGroups(spanFrames, startBeat, endBeat, vtBeatGap);
+    const noteStart = Math.round(Math.max(startBeat, wordSpan.startBeat));
+    const noteEnd = Math.round(Math.min(endBeat, wordSpan.endBeat + vtBeatGap));
+    const baseDuration = Math.max(1, noteEnd - noteStart);
+    const syllables = splitWordIntoSyllablesSimple(wordSpan.word);
+
+    console.log('[Analyze5s] split decision', {
+      word: wordSpan.word,
+      spanFrames: spanFrames.length,
+      runs: runStats,
+      stableRuns,
+      splitGroups,
+    });
+
+    if (splitGroups.length < 2) {
+      // No stable multi-pitch evidence: keep recognized word as a single note.
+      // This avoids text-only forced splits that can create spelling artifacts.
+      return [{
+        startBeat: noteStart,
+        duration: baseDuration,
+        pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
+        syllable: `${wordSpan.word} `,
+        analyzeWordIndex: wordIndex,
+      }];
+    }
+
+    // Keep one-syllable words intact to avoid hyphen-only fragments like "-".
+    if (syllables.length < 2) {
+      return [{
+        startBeat: noteStart,
+        duration: baseDuration,
+        pitch: medianPitch(pitchSource.map(frame => frame.pitch)),
+        syllable: `${wordSpan.word} `,
+        analyzeWordIndex: wordIndex,
+      }];
+    }
+
+    const targetSplitCount = Math.min(3, syllables.length);
+    const compressedGroups = mergeSplitGroupsToCount(splitGroups, targetSplitCount);
+    const normalizedGroups = normalizeWordSegments(compressedGroups, noteStart, noteEnd);
+    const hasSplit = normalizedGroups.length > 1;
+    const syllableParts = formatSyllablesForSegments(wordSpan.word, normalizedGroups.length);
+    console.log('[Analyze5s] syllable map', {
+      word: wordSpan.word,
+      splitCount: normalizedGroups.length,
+      syllableParts,
+    });
+    return normalizedGroups.map((group, index) => ({
+      startBeat: group.startBeat,
+      duration: Math.max(1, group.duration),
+      pitch: group.pitch,
+      // Use conservative syllable mapping for split words while preserving
+      // old continuation behavior for 1-syllable words.
+      syllable: hasSplit ? (syllableParts[index] || '-') : `${wordSpan.word} `,
+      analyzeWordIndex: wordIndex,
+    }));
+  }
+
+  function capRecognizedWordOverlaps(proposals) {
+    // Sort ALL notes by start beat, then by type (recognized words before placeholders for stable ordering)
+    const sorted = proposals
+      .map(n => ({ note: n, isRecognized: Number.isInteger(n.analyzeWordIndex) }))
+      .sort((a, b) => {
+        if (a.note.startBeat !== b.note.startBeat) return a.note.startBeat - b.note.startBeat;
+        // Recognized words before placeholders at same start beat (shouldn't happen, but for stability)
+        return (b.isRecognized ? 1 : 0) - (a.isRecognized ? 1 : 0);
+      });
+
+    // Cap overlaps between all adjacent notes
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const cur = sorted[i].note;
+      const next = sorted[i + 1].note;
+      const curEnd = cur.startBeat + cur.duration;
+
+      // Keep at least a 1-beat gap to avoid touching/overlapping notes.
+      if (curEnd >= next.startBeat) {
+        const newDur = Math.max(1, next.startBeat - cur.startBeat - 1);
+        cur.duration = newDur;
+      }
+    }
+  }
+
+  function assignWordsToProposals(proposals, wordSpans) {
+    if (!proposals.length || !wordSpans.length) return { assigned: 0, unassigned: wordSpans.length };
+    let assigned = 0;
+    for (const w of wordSpans) {
+      const indexed = proposals.find(n => n.analyzeWordIndex === w.index);
+      if (indexed) {
+        if (!indexed.syllable || indexed.syllable.trim() === '' || indexed.syllable.trim() === '...') {
+          indexed.syllable = `${w.word} `;
+        }
+        assigned += 1;
+        continue;
+      }
+      let best = null;
+      let bestOverlap = -1;
+      for (const n of proposals) {
+        const nStart = n.startBeat;
+        const nEnd = n.startBeat + n.duration;
+        const overlap = Math.max(0, Math.min(nEnd, w.endBeat) - Math.max(nStart, w.startBeat));
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          best = n;
+        }
+      }
+      if (!best) continue;
+
+      // If no overlap exists, attach to nearest note center.
+      if (bestOverlap <= 0) {
+        const wc = (w.startBeat + w.endBeat) / 2;
+        let nearest = proposals[0];
+        let bestDist = Infinity;
+        for (const n of proposals) {
+          const nc = n.startBeat + n.duration / 2;
+          const d = Math.abs(wc - nc);
+          if (d < bestDist) {
+            bestDist = d;
+            nearest = n;
+          }
+        }
+        best = nearest;
+      }
+
+      if (!best.syllable || best.syllable.trim() === '' || best.syllable.trim() === '...') {
+        best.syllable = `${w.word} `;
+      }
+      assigned += 1;
+    }
+    return { assigned, unassigned: Math.max(0, wordSpans.length - assigned) };
+  }
+
+  function buildNotesFromAnalyzeWindow(startSec, endSec, words) {
+    const startBeat = timeToBeat(startSec);
+    const endBeat = timeToBeat(endSec);
+    const framePool = vocalTraceFrames.filter(f => f.beat >= startBeat && f.beat <= endBeat);
+    const vtBeatGap = (VOCAL_TRACE_STEP_SEC * bpm) / 15;
+
+    const proposalNotes = [];
+    const unknownProposalNotes = [];
+    let nextId = Math.max(0, ...notes.map(n => typeof n.id === 'number' ? n.id : 0));
+
+    const wordSpans = (words || []).map(w => ({
+      ...w,
+      index: Number.parseInt(w.id, 10),
+      startBeat: timeToBeat(w.start),
+      endBeat: timeToBeat(w.end),
+    }));
+    console.log('[Analyze5s] frame pool', {
+      frameCount: framePool.length,
+      startBeat,
+      endBeat,
+      wordSpans: wordSpans.length,
+    });
+
+    // 1) Recognized words → one note per word span to avoid over-segmentation.
+    for (let wi = 0; wi < wordSpans.length; wi++) {
+      const w = wordSpans[wi];
+      const spanFrames = framePool.filter(f => f.beat >= w.startBeat && f.beat <= w.endBeat);
+      const hasWordFrames = spanFrames.length > 0;
+      const fallbackPool = framePool.filter(f => f.beat >= (w.startBeat - 1.5) && f.beat <= (w.endBeat + 1.5));
+      const pitchSource = hasWordFrames ? spanFrames : (fallbackPool.length > 0 ? fallbackPool : framePool);
+      const wordNotes = splitRecognizedWordNotes(w, spanFrames, pitchSource, startBeat, endBeat, vtBeatGap, wi);
+      for (let noteIndex = 0; noteIndex < wordNotes.length; noteIndex++) {
+        const note = wordNotes[noteIndex];
+        proposalNotes.push({
+          id: ++nextId,
+          startBeat: note.startBeat,
+          duration: note.duration,
+          pitch: note.pitch,
+          syllable: note.syllable,
+          type: ':',
+          isRap: false,
+          isGolden: false,
+          analyzeWordIndex: note.analyzeWordIndex,
+        });
+        console.log('[Analyze5s] word note', {
+          idx: wi,
+          segment: noteIndex,
+          word: w.word,
+          startBeat: note.startBeat,
+          endBeat: note.startBeat + note.duration,
+          dur: note.duration,
+          hasWordFrames,
+          spanFrames: spanFrames.length,
+          fallbackFrames: fallbackPool.length,
+          pitch: note.pitch,
+          splitCount: wordNotes.length,
+        });
+      }
+    }
+
+    // 2) Unrecognized voiced regions → placeholder notes
+    const uncoveredFrames = framePool.filter(f => !wordSpans.some(w => f.beat >= w.startBeat && f.beat <= w.endBeat));
+    const unknownGroups = groupPitchFrames(uncoveredFrames, 0.65, 4);
+    console.log('[Analyze5s] uncovered pitch groups', {
+      uncoveredFrames: uncoveredFrames.length,
+      unknownGroups: unknownGroups.length,
+    });
+    for (const g of unknownGroups) {
+      const gStart = Math.round(Math.max(startBeat, g[0].beat));
+      const gEnd = Math.round(Math.min(endBeat, g[g.length - 1].beat + vtBeatGap));
+      const dur = Math.max(1, gEnd - gStart);
+      const pitch = medianPitch(g.map(x => x.pitch));
+      unknownProposalNotes.push({
+        id: ++nextId,
+        startBeat: gStart,
+        duration: dur,
+        pitch,
+        syllable: '... ',
+        type: ':',
+        isRap: false,
+        isGolden: false,
+      });
+    }
+
+    const mergedUnknown = mergePlaceholderNotes(unknownProposalNotes);
+    capRecognizedWordOverlaps(proposalNotes);
+    const overlapCleanup = trimPlaceholdersAgainstNotes(mergedUnknown, proposalNotes);
+    const placeholderSplit = splitPlaceholderNotesByPitchRuns(overlapCleanup.trimmed, framePool, startBeat, endBeat, vtBeatGap);
+    proposalNotes.push(...placeholderSplit.notes);
+    // Split placeholders can reintroduce overlaps (tail extension), so cap again on full proposal set.
+    capRecognizedWordOverlaps(proposalNotes);
+    const assignment = assignWordsToProposals(proposalNotes, wordSpans);
+    console.log('[Analyze5s] proposal post-process', {
+      recognizedWordNotes: wordSpans.length,
+      unknownRaw: unknownProposalNotes.length,
+      unknownMerged: mergedUnknown.length,
+      unknownTrimmed: overlapCleanup.trimmed.length,
+      unknownDropped: overlapCleanup.dropped,
+      unknownSplit: overlapCleanup.split,
+      placeholderSplit: placeholderSplit.split,
+      wordAssignments: assignment,
+      totalProposals: proposalNotes.length,
+    });
+
+    // Replace non-break notes in analyzed window with proposals.
+    const remaining = notes.filter(n => n.type === 'break' || (n.startBeat + n.duration <= startBeat || n.startBeat >= endBeat));
+    let reassignedId = Math.max(0, ...remaining.map(n => typeof n.id === 'number' ? n.id : 0));
+    const proposalNotesWithUniqueIds = proposalNotes.map(note => ({
+      ...note,
+      id: ++reassignedId,
+    }));
+    console.log('[Analyze5s] replacement', {
+      existingNotes: notes.length,
+      keptOutsideWindow: remaining.length,
+      inserted: proposalNotesWithUniqueIds.length,
+    });
+    notes = [...remaining, ...proposalNotesWithUniqueIds]
+      .map(note => {
+        const { analyzeWordIndex, ...cleanNote } = note;
+        return cleanNote;
+      })
+      .sort((a, b) => a.startBeat - b.startBeat);
+    return {
+      proposalCount: proposalNotes.length,
+      frameCount: framePool.length,
+      wordCount: wordSpans.length,
+      unknownMergedCount: overlapCleanup.trimmed.length,
+      assignedWords: assignment.assigned,
+    };
+  }
+
+  async function analyzeWindowAtCursor() {
+    console.group('[Analyze] start');
+    console.log('[Analyze] prereq snapshot', {
+      hasAudioElement: !!audioEl,
+      hasVocalsAudio,
+      sessionId: $sessionId || null,
+      vocalTraceReady: !!(vocalTraceDecodedBuffer && vocalTraceDetector && vocalTraceSampleBuf),
+      analyzeScope: ANALYZE_SCOPE,
+    });
+
+    if (!audioEl) {
+      errorMessage.set('Analyze failed: audio element is not ready yet.');
+      console.warn('[Analyze] abort: missing audio element');
+      console.groupEnd();
+      return;
+    }
+    if (!hasVocalsAudio) {
+      handleMissingAudio('vocals');
+      console.warn('[Analyze] abort: no vocals audio available');
+      console.groupEnd();
+      return;
+    }
+    if (!$sessionId) {
+      errorMessage.set('Analyze failed: missing session ID. Go back to Step 1 and load audio again.');
+      console.warn('[Analyze] abort: missing session ID');
+      console.groupEnd();
+      return;
+    }
+
+    const maxTime = audioEl.duration || audioDuration || 300;
+    const startSec = ANALYZE_SCOPE === 'song' ? 0 : Math.max(0, currentTimeSec);
+    const endSec = ANALYZE_SCOPE === 'song' ? maxTime : Math.min(maxTime, startSec + ANALYZE_WINDOW_SEC);
+    console.log('[Analyze] window', { startSec, endSec, duration: endSec - startSec, currentTimeSec, analyzeScope: ANALYZE_SCOPE });
+
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      const wasEnabled = vocalTraceEnabled;
+      vocalTraceEnabled = true;
+      await startVocalTrace();
+      if (!wasEnabled) vocalTraceEnabled = false;
+    }
+    if (!vocalTraceDecodedBuffer || !vocalTraceDetector || !vocalTraceSampleBuf) {
+      errorMessage.set('Could not initialize vocal trace analyzer.');
+      console.error('[Analyze] abort: analyzer could not initialize');
+      console.groupEnd();
+      return;
+    }
+
+    vocalTraceFrames = [];
+    vocalTraceVisible = true;
+    warmupVocalTrace(startSec);
+    let t = Math.ceil(startSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
+    while (t <= endSec) {
+      sampleVocalTrace(t);
+      t += VOCAL_TRACE_STEP_SEC;
+    }
+
+    try {
+      // Run fresh Whisper on just this window — independent of Step 2
+      const wordsResult = await analyzeWindow($sessionId, startSec, endSec);
+      liveWordTokens = (wordsResult.words || []).map((w, idx) => ({
+        id: `${idx}-${w.start}-${w.end}`,
+        word: w.word,
+        start: w.start,
+        end: w.end,
+        score: w.score ?? 0,
+      }));
+      console.log('[Analyze5s] words result', {
+        method: wordsResult.method,
+        wordsInWindow: liveWordTokens.length,
+        words: liveWordTokens.map(w => w.word),
+      });
+
+      pushUndo();
+      const stats = buildNotesFromAnalyzeWindow(startSec, endSec, liveWordTokens);
+      const analyzedStartBeat = timeToBeat(startSec);
+      const analyzedEndBeat = timeToBeat(endSec);
+      const analyzedNotes = notes.filter(n => n.type !== 'break' && n.startBeat < analyzedEndBeat && (n.startBeat + n.duration) > analyzedStartBeat);
+      markUnsaved();
+      updatePitchRange();
+      console.log('[Analyze] note generation', stats);
+      if (vocalTraceFrames.length > 0) logVocalTraceState(`Analyze ${ANALYZE_SCOPE_LABEL} trace vs notes`, analyzedNotes);
+      if (!stats || stats.proposalCount === 0) {
+        errorMessage.set('Analyze ran, but no note proposals were generated in this range. Try a different section or run Trace first.');
+        console.warn('[Analyze] completed with zero proposals');
+      } else {
+        console.log(`[Analyze] inserted ${stats.proposalCount} notes in range`);
+      }
+    } catch (err) {
+      errorMessage.set(err.message);
+      liveWordTokens = [];
+      console.error('[Analyze] failed', err);
+    }
+
+    draw();
+    console.groupEnd();
+  }
+
+  function onAnalyzeButtonClick() {
+    console.log('[Analyze] UI click');
+    errorMessage.set(`Analyze ${ANALYZE_SCOPE_LABEL} started… check console for [Analyze] logs.`);
+    analyzeWindowAtCursor().catch((err) => {
+      console.error('[Analyze] unhandled error', err);
+      errorMessage.set(err?.message || 'Analyze failed unexpectedly.');
+    });
   }
 
   // Set playback speed
@@ -8255,6 +9184,24 @@
         <button class="tool-btn" id="toggle-playback-btn" on:click={() => { console.log('[UI] togglePlayback'); togglePlayback(); }} title="Space">
           {isPlaying ? '⏸ Pause' : '▶ Play'}
         </button>
+        <button class="tool-btn btn-trace" class:active={quickTraceActive} class:disabled-audio={!hasVocalsAudio}
+          on:click={runQuickTraceWindow}
+          title={hasVocalsAudio ? `TRACE: Plays ${TRACE_SCOPE_LABEL} of audio with real-time pink pitch dots` : 'No vocals — go to Step 1 to extract or upload'}>
+          🎙 Trace {TRACE_SCOPE_LABEL}
+        </button>
+        <button class="tool-btn btn-analyze" class:disabled-audio={!hasVocalsAudio}
+          on:click={onAnalyzeButtonClick}
+          title={hasVocalsAudio ? `ANALYZE: Silently scans ${ANALYZE_SCOPE_LABEL} and inserts note proposals (no playback)` : 'No vocals — go to Step 1 to extract or upload'}>
+          🔬 Analyze {ANALYZE_SCOPE_LABEL}
+        </button>
+        {#if liveWordTokens.length > 0}
+          <button class="tool-btn sm" class:active={liveWordsVisible}
+            on:click={() => { liveWordsVisible = !liveWordsVisible; draw(); }}
+            title={liveWordsVisible ? 'Hide analyzed words' : 'Show analyzed words'}>
+            Words {liveWordsVisible ? '👁' : '🙈'}
+          </button>
+          <button class="tool-btn sm" on:click={() => { liveWordTokens = []; draw(); }} title="Clear analyzed words">🗑W</button>
+        {/if}
         <button class="tool-btn" on:click={() => { console.log('[UI] togglePlayback'); toggleLoop(); }} class:active={loopEnabled} title="Loop (L)">
           <span class="mic-icon-wrap" class:mic-off={!loopEnabled}>🔁</span>
         </button>
@@ -9886,6 +10833,13 @@
   }
 
   .tool-btn:hover { background: #333; }
+  /* Trace = warm pink tint */
+  .tool-btn.btn-trace { background: #3a1a2a; color: #f48fb1; border-color: #c2185b; }
+  .tool-btn.btn-trace:hover { background: #4a2035; }
+  .tool-btn.btn-trace.active { background: #6a1030; border-color: #f06292; }
+  /* Analyze = cool cyan tint */
+  .tool-btn.btn-analyze { background: #0a2a3a; color: #80deea; border-color: #00838f; }
+  .tool-btn.btn-analyze:hover { background: #0f3545; }
 
   .zoom-label {
     color: #888;
