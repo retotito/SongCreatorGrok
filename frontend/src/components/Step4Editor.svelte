@@ -1182,6 +1182,11 @@
   let segRecStopTimer = null;       // auto-stop at end of segment
   let segRecUploading = false;
   let segRecPatched = new Set();    // segment ids that have been successfully spliced
+  let segRecApplied = false;        // true after successful splice for current modal segment
+  let segRecLyricsLoading = false;
+  let segRecLyricsError = '';
+  let segRecLyricsLines = [];
+  let segRecLyricsHyphenated = false;
   $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording';
 
   // Auto-regenerate cleaned audio after cleanup changes
@@ -4899,6 +4904,9 @@
     }
     // Re-load waveform for new source
     loadWaveform(url);
+    if (pitchLineVisible) {
+      computePitchLine();
+    }
     console.log('[Step4] Audio source:', source, 'at', time.toFixed(2) + 's', wasPlaying ? '(resuming)' : '(paused)');
     saveEditorUiPrefs('audio-source');
   }
@@ -6069,6 +6077,91 @@
   }
 
   // ── Segment recording functions ──
+  function resetSegRecLyricsPreview() {
+    segRecLyricsLoading = false;
+    segRecLyricsError = '';
+    segRecLyricsLines = [];
+    segRecLyricsHyphenated = false;
+  }
+
+  async function generateLyricsForRecordedSegment(silent = false) {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!$sessionId) return;
+    if (!segRecApplied && !segRecBlob) return;
+    if (segRecApplied && !seg) return;
+
+    segRecLyricsLoading = true;
+    segRecLyricsError = '';
+    segRecLyricsLines = [];
+    segRecLyricsHyphenated = false;
+
+    const language = SUPPORTED_LANGUAGES.some(l => l.code === $lyricsData?.language)
+      ? $lyricsData.language
+      : 'auto';
+
+    try {
+      let previewResp;
+      if (segRecApplied) {
+        previewResp = await fetch(`/api/segment-preview/${$sessionId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start_ms: seg.startMs,
+            end_ms: seg.endMs,
+            language,
+            model_preset: segRegenPreset,
+            audio_source: 'edited',
+            source_type: 'cleanup',
+          }),
+        });
+      } else {
+        const fd = new FormData();
+        const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
+        fd.append('recording', segRecBlob, `segment_preview.${ext}`);
+        fd.append('language', language);
+        previewResp = await fetch(`/api/segment-preview-upload/${$sessionId}`, {
+          method: 'POST',
+          body: fd,
+        });
+      }
+
+      const previewData = await previewResp.json().catch(() => ({}));
+      if (!previewResp.ok) {
+        throw new Error(previewData?.detail || previewData?.message || 'Preview lyrics failed');
+      }
+
+      let lines = [];
+      if (Array.isArray(previewData?.lyrics_lines) && previewData.lyrics_lines.length > 0) {
+        lines = previewData.lyrics_lines.map(v => String(v));
+      } else if (typeof previewData?.lyrics === 'string' && previewData.lyrics.trim()) {
+        lines = previewData.lyrics.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      } else if (typeof previewData?.text === 'string' && previewData.text.trim()) {
+        lines = previewData.text.split(/\n+/).map(v => v.trim()).filter(Boolean);
+      }
+
+      if (lines.length > 0) {
+        try {
+          const hyphenated = await hyphenateSegmentPreviewLines(lines, true);
+          segRecLyricsLines = hyphenated;
+          segRecLyricsHyphenated = true;
+        } catch {
+          segRecLyricsLines = lines;
+          segRecLyricsHyphenated = false;
+        }
+      } else {
+        segRecLyricsLines = ['(No lyrics recognized for this segment)'];
+      }
+
+      if (!silent) showToast('Segment lyrics generated');
+    } catch (err) {
+      console.error('[SegRec] Lyrics generation failed:', err);
+      segRecLyricsError = String(err?.message || err || 'Lyrics generation failed');
+      if (!silent) showToast('Segment lyrics failed');
+    } finally {
+      segRecLyricsLoading = false;
+    }
+  }
+
   async function armSegmentRecording(segId) {
     const seg = cleanupSegments.find(s => s.id === segId);
     console.log(`[SegRec] Arm segment id=${segId} | startMs=${seg?.startMs?.toFixed(0)} endMs=${seg?.endMs?.toFixed(0)} dur=${seg ? (seg.endMs - seg.startMs).toFixed(0) : '?'}ms`);
@@ -6096,7 +6189,9 @@
     }
 
     segRecSegmentId = segId;
+    segRecApplied = false;
     segRecBlob = null;
+    resetSegRecLyricsPreview();
     if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
     segRecChunks = [];
 
@@ -6157,6 +6252,7 @@
       segRecObjectUrl = URL.createObjectURL(segRecBlob);
       console.log(`[SegRec] Recording done: mimeType=${segRecRecorder.mimeType} size=${segRecBlob.size} bytes objectUrl=${segRecObjectUrl}`);
       segRecPhase = 'review';
+      generateLyricsForRecordedSegment(true);
       draw();
     };
     segRecRecorder.start();
@@ -6184,6 +6280,8 @@
     segRecBlob = null;
     segRecChunks = [];
     segRecSegmentId = null;
+    segRecApplied = false;
+    resetSegRecLyricsPreview();
     segRecPhase = 'idle';
     micEnabled = false;
     stopMic();
@@ -6208,6 +6306,7 @@
 
       const spliceResult = await resp.json();
       console.log(`[SegRec] Splice OK:`, spliceResult);
+      const appliedSegId = segRecSegmentId;
       segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
       // Bust vocal URL cache so the editor plays the new spliced audio
       const cacheBust = `?v=${Date.now()}`;
@@ -6243,8 +6342,16 @@
       // Keep waveform in sync with the patched vocal immediately.
       loadWaveform(currentAudioUrl);
       cleanedAudioDirty = true;
-      cancelSegmentRecording();
+      segRecApplied = true;
+      segRecPhase = 'review';
+      micEnabled = false;
+      stopMic();
       handleSave(); // triggers auto-regenerate
+      // Keep modal open; if preview was generated pre-splice, users already saw it.
+      if (segRecSegmentId === appliedSegId && segRecLyricsLines.length === 0 && !segRecLyricsError) {
+        await generateLyricsForRecordedSegment(true);
+      }
+      showToast('Recording applied');
     } catch (err) {
       console.error('[SegRec] Splice failed:', err);
       alert('Failed to splice recording: ' + err.message);
@@ -6532,13 +6639,21 @@
 
   // ── Pitch line: offline full-song pitch analysis ──
 
+  function getPitchLineAnalysisUrl() {
+    if (audioSource === 'edited') return getEditedAudioUrl();
+    // "Vocals" source should use the same baseline currently used for playback.
+    return originalVocalUrl || vocalUrl;
+  }
+
   async function computePitchLine() {
-    if (!vocalUrl) return;
+    const analysisUrl = getPitchLineAnalysisUrl();
+    if (!analysisUrl) return;
     pitchLineLoading = true;
-    pitchLineSourceUrl = vocalUrl;
+    pitchLineSourceUrl = analysisUrl;
     pitchLineFrames = [];
     try {
-      const response = await fetch(vocalUrl);
+      console.log('[PitchLine] Analysing source', { audioSource, analysisUrl });
+      const response = await fetch(analysisUrl);
       const arrayBuffer = await response.arrayBuffer();
       const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
       const buffer = await tmpCtx.decodeAudioData(arrayBuffer);
@@ -6581,8 +6696,9 @@
   async function togglePitchLine() {
     pitchLineVisible = !pitchLineVisible;
     if (pitchLineVisible) {
-      // Recompute if no data yet or vocal file changed
-      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== vocalUrl) {
+      const expectedSourceUrl = getPitchLineAnalysisUrl();
+      // Recompute if no data yet or selected source changed
+      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== expectedSourceUrl) {
         await computePitchLine();
       } else {
         draw();
@@ -7147,6 +7263,28 @@
       {#if segRecPhase === 'review' && segRecObjectUrl}
         <audio controls src={segRecObjectUrl} style="width:100%;margin:6px 0;"></audio>
       {/if}
+      {#if segRecPhase === 'review'}
+        <div class="seg-rec-lyrics-panel" style="margin-top:6px; border:1px solid var(--border-weak, #3a3f52); border-radius:8px; padding:8px; background:rgba(17,21,30,0.45);">
+          {#if !segRecApplied && !segRecLyricsLoading && segRecLyricsLines.length === 0 && !segRecLyricsError}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.75;">Recognizing lyrics from recording preview...</div>
+          {:else if segRecLyricsLoading}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.9;display:flex;align-items:center;gap:8px;">
+              <span class="loading-spinner"></span>
+              <span>Recognizing and hyphenating lyrics...</span>
+            </div>
+          {:else if segRecLyricsError}
+            <div style="margin-top:6px;font-size:0.82rem;color:#ff9b9b;">{segRecLyricsError}</div>
+          {:else if segRecLyricsLines.length > 0}
+            <div style="margin-top:6px;max-height:120px;overflow:auto;font-size:0.85rem;line-height:1.35;">
+              {#each segRecLyricsLines as line}
+                <div>{line}</div>
+              {/each}
+            </div>
+          {:else}
+            <div style="margin-top:6px;font-size:0.82rem;opacity:0.75;">No lyrics generated yet.</div>
+          {/if}
+        </div>
+      {/if}
       <div class="seg-rec-modal-actions">
         {#if segRecPhase === 'armed'}
           <button class="tool-btn sm active" on:click={startSegmentRecording}>▶ Start</button>
@@ -7154,7 +7292,7 @@
         {:else if segRecPhase === 'recording'}
           <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
         {:else if segRecPhase === 'review'}
-          <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading}>
+          <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
             {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
           </button>
           <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
@@ -7322,14 +7460,14 @@
         <div id="pitch-line-controls-wrapper">
           <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} disabled={uiModalGuardActive}
             on:click={() => { if (uiModalGuardActive) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
-            title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute full-song pitch from vocal audio (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
+            title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute pitch from selected Vocals/Edited source (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
             Pitch <span style="font-size:0.85em">〰️</span>
           </button>
           {#if pitchLineLoading}
             <div class="loading-modal-overlay">
               <div class="loading-modal">
                 <span class="loading-spinner"></span>
-                <span class="loading-label">Analysing vocal pitch…</span>
+                <span class="loading-label">Analysing pitch…</span>
               </div>
             </div>
           {/if}

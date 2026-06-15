@@ -1674,6 +1674,54 @@ async def segment_preview(session_id: str, request: Request):
         _safe_unlink(clip_path)
 
 
+@app.post("/api/segment-preview-upload/{session_id}")
+async def segment_preview_upload(
+    session_id: str,
+    recording: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    """Transcribe an uploaded temporary recording clip for Step4 review modal.
+
+    This endpoint is used before splicing so users can verify recognized lyrics
+    immediately after recording.
+    """
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    temp_dir = os.path.join(SESSIONS_DIR, session_id, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    _cleanup_session_temp_dir(session_id)
+
+    ext = os.path.splitext(recording.filename or "recording.webm")[1] or ".webm"
+    upload_name = f"segment_preview_upload_{int(time.time() * 1000)}{ext}"
+    upload_path = os.path.join(temp_dir, upload_name)
+
+    try:
+        with open(upload_path, "wb") as f:
+            shutil.copyfileobj(recording.file, f)
+
+        lines, confidence, engine = _transcribe_preview_clip(upload_path, language=language)
+        if not lines:
+            lines = ["(no speech recognized)"]
+
+        log_step(
+            "SEGMENT_PREVIEW",
+            f"Upload preview session={session_id} file={os.path.basename(upload_path)} -> {len(lines)} line(s) via {engine}",
+        )
+
+        return {
+            "status": "ok",
+            "lyrics_lines": lines,
+            "confidence": confidence,
+            "engine": engine,
+            "source_type": "recording_upload",
+            "audio_source": "recording_upload",
+        }
+    finally:
+        _safe_unlink(upload_path)
+
+
 def _transcribe_clip_for_alignment(audio_path: str, language: str = "en") -> tuple:
     """Transcribe a short clip and return word-level (and optionally char-level) timestamps.
 
@@ -1830,7 +1878,7 @@ async def segment_generate(session_id: str, request: Request):
         whisper_words, whisper_chars = _transcribe_clip_for_alignment(clip_path, language)
 
         # Pitch detection on the clip (clip-relative times)
-        from services.pitch_detection import detect_pitches, get_pitch_for_segment
+        from services.pitch_detection import detect_pitches, get_pitch_for_segment, get_pitch_subsegments
         pitch_data = detect_pitches(clip_path)
 
         # Align hyphenated lyrics to ASR word timestamps
@@ -1880,40 +1928,61 @@ async def segment_generate(session_id: str, request: Request):
                 note_id += 1
                 last_end_beat = break_start_beat
 
-            start_beat = max(0, int(((abs_start - gap_sec) * bpm) / 15))
-            end_beat = max(start_beat + 1, int(((abs_end - gap_sec) * bpm) / 15))
-            duration = max(1, end_beat - start_beat)
+            # Pitch from clip-relative times. For long syllables with clear pitch
+            # movement, split into continuation notes to preserve vibrato shape.
+            subnotes = []
+            if is_rap:
+                subnotes = [{"start": timing["start"], "end": timing["end"], "pitch": 0, "syllable": timing["syllable"]}]
+            else:
+                pitch_segments = get_pitch_subsegments(pitch_data, timing["start"], timing["end"])
 
-            if start_beat <= last_end_beat and notes:
-                start_beat = last_end_beat + 1
-                end_beat = max(start_beat + 1, end_beat)
+                if pitch_segments:
+                    for idx, seg in enumerate(pitch_segments):
+                        subnotes.append(
+                            {
+                                "start": seg["start"],
+                                "end": seg["end"],
+                                "pitch": int(seg["pitch"]),
+                                "syllable": timing["syllable"] if idx == 0 else "~",
+                            }
+                        )
+                else:
+                    pitch = get_pitch_for_segment(pitch_data, timing["start"], timing["end"])
+                    if pitch == 0:
+                        mid = (timing["start"] + timing["end"]) / 2
+                        pitch = get_pitch_for_segment(pitch_data, mid - 0.1, mid + 0.1)
+                    if pitch == 0:
+                        pitch = 60  # C4 fallback
+                    subnotes = [{"start": timing["start"], "end": timing["end"], "pitch": pitch, "syllable": timing["syllable"]}]
+
+            for sub in subnotes:
+                sub_abs_start = sub["start"] + offset_sec
+                sub_abs_end = sub["end"] + offset_sec
+
+                start_beat = max(0, int(((sub_abs_start - gap_sec) * bpm) / 15))
+                end_beat = max(start_beat + 1, int(((sub_abs_end - gap_sec) * bpm) / 15))
                 duration = max(1, end_beat - start_beat)
 
-            # Pitch from clip-relative times
-            if is_rap:
-                pitch = 0
-            else:
-                pitch = get_pitch_for_segment(pitch_data, timing["start"], timing["end"])
-                if pitch == 0:
-                    mid = (timing["start"] + timing["end"]) / 2
-                    pitch = get_pitch_for_segment(pitch_data, mid - 0.1, mid + 0.1)
-                if pitch == 0:
-                    pitch = 60  # C4 fallback
+                if start_beat <= last_end_beat and notes:
+                    start_beat = last_end_beat + 1
+                    end_beat = max(start_beat + 1, end_beat)
+                    duration = max(1, end_beat - start_beat)
 
-            notes.append(
-                {
-                    "id": note_id,
-                    "startBeat": start_beat,
-                    "duration": duration,
-                    "pitch": pitch,
-                    "syllable": timing["syllable"],
-                    "isRap": is_rap,
-                    "confidence": timing.get("confidence", 1.0),
-                    "original": {"startBeat": start_beat, "duration": duration, "pitch": pitch},
-                }
-            )
-            note_id += 1
-            last_end_beat = start_beat + duration
+                notes.append(
+                    {
+                        "id": note_id,
+                        "startBeat": start_beat,
+                        "duration": duration,
+                        "pitch": int(sub["pitch"]),
+                        "syllable": sub["syllable"],
+                        "isRap": is_rap,
+                        "confidence": timing.get("confidence", 1.0),
+                        "original": {"startBeat": start_beat, "duration": duration, "pitch": int(sub["pitch"])},
+                    }
+                )
+                note_id += 1
+                last_end_beat = start_beat + duration
+
             prev_line_index = line_index
 
         # Absolute-time syllable timings for frontend rawTimings sync
