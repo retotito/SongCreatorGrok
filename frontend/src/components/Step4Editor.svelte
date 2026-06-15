@@ -7589,6 +7589,12 @@
     loopEndBeat = timeToBeat(endSec);
     loopEnabled = true;
 
+    // Recording must run at 1× so wall-clock timers and audio position stay
+    // in sync. Save the current rate and restore it after recording finishes.
+    if (playbackRate !== 1.0) {
+      setPlaybackRate(1.0);
+    }
+
     // Seek to pre-roll start.
     seekToTime(Math.max(0, startSec - segRecPrerollSec));
 
@@ -7654,6 +7660,11 @@
     if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
     if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
     if (isPlaying) togglePlayback();
+    // Rate was forced to 1× for recording; restore the user's preferred rate
+    // by reading back from the persisted UI prefs (same source setPlaybackRate saves to).
+    const savedPrefs = restoreEditorUiPrefs();
+    const savedRate = savedPrefs?.playbackRate ?? 1.0;
+    if (savedRate !== playbackRate) setPlaybackRate(savedRate);
   }
 
   function cancelSegmentRecording() {
