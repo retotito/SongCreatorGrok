@@ -6360,6 +6360,45 @@
     }
   }
 
+  async function openSegmentAiFromRecordedPreview() {
+    const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
+    if (!seg || !segRecBlob) return;
+
+    // Ensure the recorded take is inserted before opening AI generation.
+    if (!segRecApplied) {
+      await applySegmentRecording();
+      if (!segRecApplied) return;
+    }
+
+    // Ensure we have preview text to prefill the AI modal.
+    if (!segRecLyricsLoading && (segRecLyricsLines.length === 0 || segRecLyricsError)) {
+      await generateLyricsForRecordedSegment(true);
+    }
+
+    const usableLines = segRecLyricsLines
+      .map(v => String(v || '').trim())
+      .filter(v => v.length > 0 && !/^\(no lyrics recognized/i.test(v));
+
+    if (usableLines.length === 0) {
+      showToast('No usable lyrics recognized. Retry recording.');
+      return;
+    }
+
+    const prefillLines = [...usableLines];
+    const prefillHyphenated = !!segRecLyricsHyphenated;
+
+    // Close recording review and open AI modal at the same segment range.
+    cancelSegmentRecording();
+    openSegmentRegenerateFromCleanup(seg);
+
+    // Prefill AI modal state so Generate Notes is immediately available.
+    segRegenPreviewLines = prefillLines;
+    segRegenPreviewHyphenated = prefillHyphenated;
+    segRegenPreviewError = '';
+    segRegenPreviewConfidence = null;
+    showToast('AI modal prefilled from recording preview');
+  }
+
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
     if (micEnabled) {
@@ -7294,6 +7333,9 @@
         {:else if segRecPhase === 'review'}
           <button class="tool-btn sm active" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
             {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
+          </button>
+          <button class="tool-btn sm" on:click={openSegmentAiFromRecordedPreview} disabled={segRecUploading || segRecLyricsLoading || !segRecBlob}>
+            🤖 Generate AI
           </button>
           <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
           <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
