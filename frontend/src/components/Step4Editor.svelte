@@ -7693,6 +7693,7 @@
       formData.append('recording', segRecBlob, `segment_recording.${ext}`);
       formData.append('start_ms', String(seg.startMs));
       formData.append('end_ms', String(seg.endMs));
+      formData.append('playback_rate', String(Math.max(0.1, playbackRate || 1.0)));
 
       const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
       if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);

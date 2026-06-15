@@ -3798,7 +3798,13 @@ async def save_editor_state(session_id: str, request: Request):
 # Step 4: Splice a mic recording into the vocal track
 # ────────────────────────────────────────────────────────────
 @app.post("/api/splice-recording/{session_id}")
-async def splice_recording(session_id: str, recording: UploadFile = File(...), start_ms: float = Form(...), end_ms: float = Form(...)):
+async def splice_recording(
+    session_id: str,
+    recording: UploadFile = File(...),
+    start_ms: float = Form(...),
+    end_ms: float = Form(...),
+    playback_rate: float = Form(1.0),
+):
     """Splice a mic recording into the session vocal track at the given ms range.
     
     Replaces the audio between start_ms and end_ms in the vocal file with the
@@ -3840,13 +3846,30 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
             clip = clip[:vocal.shape[0]]
 
         start_sample = max(0, int(start_ms / 1000.0 * sr))
-        end_sample   = min(vocal.shape[1], int(end_ms   / 1000.0 * sr))
-        region_len   = end_sample - start_sample
+        end_sample = min(vocal.shape[1], int(end_ms / 1000.0 * sr))
+        region_len = end_sample - start_sample
 
         if region_len <= 0:
             raise ServiceError("Invalid range", "start_ms must be before end_ms")
 
-        # Trim or pad clip to exactly fit the region
+        if not math.isfinite(playback_rate) or playback_rate <= 0:
+            playback_rate = 1.0
+
+        # If recording was captured while playback was slowed/speeded, map it back
+        # to song-time by applying the inverse playback rate before fitting.
+        if abs(playback_rate - 1.0) > 1e-3 and clip.shape[1] > 0:
+            stretch_rate = 1.0 / playback_rate
+            stretched_channels = []
+            for ch in range(clip.shape[0]):
+                stretched_channels.append(librosa.effects.time_stretch(clip[ch].astype(np.float32), rate=stretch_rate))
+            if stretched_channels:
+                max_len = max(ch.shape[0] for ch in stretched_channels)
+                stretched = np.zeros((clip.shape[0], max_len), dtype=np.float32)
+                for idx, ch_data in enumerate(stretched_channels):
+                    stretched[idx, :ch_data.shape[0]] = ch_data
+                clip = stretched
+
+        # Final fit to exact target region length.
         if clip.shape[1] >= region_len:
             clip_fit = clip[:, :region_len]
         else:
@@ -3878,7 +3901,11 @@ async def splice_recording(session_id: str, recording: UploadFile = File(...), s
         save_session(session_id)
         _prune_patched_vocal_files(session_id, keep_last=1)
 
-        log_step("SPLICE", f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms → {patched_filename}")
+        log_step(
+            "SPLICE",
+            f"Session {session_id}: spliced recording into vocal @ {start_ms:.0f}–{end_ms:.0f}ms "
+            f"(playback_rate={playback_rate:.3f}) → {patched_filename}",
+        )
 
         return {"status": "ok", "patched_vocal_file": patched_filename}
     finally:
