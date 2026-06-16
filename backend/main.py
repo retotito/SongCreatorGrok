@@ -3640,7 +3640,8 @@ async def get_editor_data(session_id: str):
         "edit_count": result.get("edit_count", 0),
         "last_saved": result.get("last_saved"),
         "cleanup_segments": result.get("cleanup_segments", []),
-        "cleaned_audio_available": bool(result.get("cleaned_vocal_path")),
+        "cleaned_audio_available": bool(result.get("cleaned_vocal_path")) and
+            result.get("cleaned_for_segments") == result.get("cleanup_segments", []),
         "has_vocal_splice": bool(session.get("original_demucs_vocal")) or (
             vocal is not None and "vocal_patched_" in os.path.basename(vocal)
         ),
@@ -4038,6 +4039,7 @@ async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
     result["cleaned_vocal_file"] = cleaned_filename
     result["cleaned_vocal_path"] = cleaned_path
     result["cleanup_audio_generated_at"] = time.time()
+    result["cleaned_for_segments"] = cleanup_segments
     save_session(session_id)
 
     merged_count = len(merge_overlapping_segments(cleanup_segments))
