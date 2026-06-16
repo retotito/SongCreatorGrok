@@ -5511,7 +5511,12 @@
     const prevSource = audioSource;
     audioSource = source;
     const editedUrl = getEditedAudioUrl();
-    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
+    // When recordings have been spliced, vocal_audio on the backend IS the patched version.
+    // Use the demucs endpoint to get the original unedited vocal for the "Vocals" button.
+    const vocalsUrl = segRecPatched.size > 0
+      ? getAudioUrl($sessionId, 'demucs')
+      : (originalVocalUrl || vocalUrl);
+    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : vocalsUrl;
     console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
