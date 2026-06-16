@@ -145,7 +145,14 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
         try:
             import soundfile as sf
             import numpy as np
-            DEMUCS_DELAY_SAMPLES = 1105  # fixed htdemucs latency at 44100Hz
+            # Fixed algorithmic latency of the htdemucs model at 44100Hz.
+            # This is a constant from the model architecture (not song-dependent).
+            # If you switch Demucs models, verify this value:
+            #   htdemucs (current):  1105 samples = ~25ms
+            #   htdemucs_ft:         1105 samples = ~25ms (same encoder)
+            #   htdemucs_6s:         1105 samples = ~25ms (same encoder)
+            #   future models:       may differ — re-measure with analyze_mic_trail.py
+            DEMUCS_DELAY_SAMPLES = 1105  # htdemucs at 44100Hz
             orig_data, orig_sr = sf.read(audio_path, always_2d=True)
             vocal_data, vocal_sr = sf.read(vocal_path, always_2d=True)
             # Scale delay to vocal sample rate (usually 44100, but be safe)
