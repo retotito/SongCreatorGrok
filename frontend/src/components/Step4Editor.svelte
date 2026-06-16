@@ -3,6 +3,11 @@
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
+
+  // In packaged Tauri there is no Vite proxy — call the backend directly.
+  const API_BASE = (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)
+    ? 'http://localhost:8001/api'
+    : '/api';
   import { showConfirm, showAlert } from '../stores/dialogStore.js';
   import { PitchDetector } from 'pitchy';
 
@@ -567,7 +572,7 @@
   }
 
   async function restoreSegmentRangeFromSource(startMs, endMs) {
-    const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
+    const resp = await fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start_ms: startMs, end_ms: endMs })
@@ -3756,7 +3761,7 @@
         }
         if (freedStart !== null) {
           console.log(`[SegResize] Spliced segment shrunk — restoring freed region ${freedStart.toFixed(0)}–${freedEnd.toFixed(0)}ms`);
-          fetch(`/api/restore-segment/${$sessionId}`, {
+          fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ start_ms: freedStart, end_ms: freedEnd }),
@@ -4894,7 +4899,7 @@
 
       const lyricsText = segRegenPreviewLines.join('\n');
 
-      const resp = await fetch(`/api/segment-generate/${$sessionId}`, {
+      const resp = await fetch(`${API_BASE}/segment-generate/${$sessionId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5078,7 +5083,7 @@
     segRegenPreviewConfidence = null;
     segRegenPreviewHyphenated = false;
     try {
-      const resp = await fetch(`/api/segment-preview/${$sessionId}`, {
+      const resp = await fetch(`${API_BASE}/segment-preview/${$sessionId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -7681,9 +7686,10 @@
 
   async function generateLyricsForRecordedSegment(silent = false) {
     const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
-    if (!$sessionId) return;
-    if (!segRecApplied && !segRecBlob) return;
-    if (segRecApplied && !seg) return;
+    console.log(`[SegRec] generateLyrics: sessionId=${$sessionId} applied=${segRecApplied} blob=${!!segRecBlob} seg=${!!seg}`);
+    if (!$sessionId) { console.warn('[SegRec] generateLyrics: no sessionId, abort'); return; }
+    if (!segRecApplied && !segRecBlob) { console.warn('[SegRec] generateLyrics: no blob, abort'); return; }
+    if (segRecApplied && !seg) { console.warn('[SegRec] generateLyrics: applied but no seg, abort'); return; }
 
     segRecLyricsLoading = true;
     segRecLyricsError = '';
@@ -7697,7 +7703,7 @@
     try {
       let previewResp;
       if (segRecApplied) {
-        previewResp = await fetch(`/api/segment-preview/${$sessionId}`, {
+        previewResp = await fetch(`${API_BASE}/segment-preview/${$sessionId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -7714,7 +7720,7 @@
         const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
         fd.append('recording', segRecBlob, `segment_preview.${ext}`);
         fd.append('language', language);
-        previewResp = await fetch(`/api/segment-preview-upload/${$sessionId}`, {
+        previewResp = await fetch(`${API_BASE}/segment-preview-upload/${$sessionId}`, {
           method: 'POST',
           body: fd,
         });
@@ -7932,7 +7938,7 @@
       formData.append('end_ms', String(seg.endMs));
       formData.append('playback_rate', String(Math.max(0.1, playbackRate || 1.0)));
 
-      const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
+      const resp = await fetch(`${API_BASE}/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
       if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
 
       const spliceResult = await resp.json();
@@ -8423,7 +8429,7 @@
         console.log(`[Mic] Uploading audio: ${(audioBlob.size / 1024).toFixed(1)} KB`);
       }
 
-      const resp = await fetch(`/api/save-mic-trail/${$sessionId}`, {
+      const resp = await fetch(`${API_BASE}/save-mic-trail/${$sessionId}`, {
         method: 'POST',
         body: formData
       });
