@@ -7776,11 +7776,15 @@
     if (!micStream) {
       micStarting = true;
       await startMic();
+      await tick();
       micStarting = false;
       if (!micStream) {
         console.error('[SegRec] Mic failed to start');
         return;
       }
+      console.log(`[SegRec] Mic started: stream=${!!micStream} analyser=${!!micAnalyser} levelTimer=${!!micLevelTimer}`);
+    } else {
+      console.log(`[SegRec] Mic already running: stream=${!!micStream} analyser=${!!micAnalyser} levelTimer=${!!micLevelTimer}`);
     }
 
     segRecSegmentId = segId;
@@ -8034,7 +8038,7 @@
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
     saveEditorUiPrefs('mic-device-change');
-    if (micEnabled) {
+    if (micEnabled || segRecPhase !== 'idle') {
       stopMic();
       await startMic();
     }
