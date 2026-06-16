@@ -137,26 +137,39 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
         if vocal_path is None:
             raise RuntimeError(f"Demucs did not produce a vocals file. Files found: {all_files}")
         
-        # Trim Demucs output to exactly match the original audio duration.
-        # Demucs pads its output by ~26ms (convolutional kernel window) which causes
-        # the vocal waveform to appear shifted vs the original mix in the editor.
+        # Correct the Demucs temporal offset.
+        # Demucs introduces a ~25ms lag in its output (causal padding from convolutional layers).
+        # We measure the actual lag via cross-correlation and shift the vocal back so it
+        # aligns with the original mix — ensuring the waveforms display in sync.
         try:
             import soundfile as sf
             import numpy as np
-            orig_info = sf.info(audio_path)
-            orig_samples = orig_info.frames
+            orig_data, orig_sr = sf.read(audio_path, always_2d=True)
             vocal_data, vocal_sr = sf.read(vocal_path, always_2d=True)
-            # Resample original sample count to vocal sample rate if they differ
-            orig_samples_at_vocal_sr = int(round(orig_info.duration * vocal_sr))
-            if vocal_data.shape[0] > orig_samples_at_vocal_sr:
+            orig_mono = orig_data[:, 0]
+            vocal_mono = vocal_data[:, 0]
+            # Cross-correlate first 2 seconds to find lag
+            win = min(2 * orig_sr, len(orig_mono), len(vocal_mono))
+            corr = np.correlate(vocal_mono[:win], orig_mono[:win], mode='full')
+            lag = int(np.argmax(np.abs(corr)) - (win - 1))
+            log_step("SEPARATE", f"Demucs lag: {lag} samples = {lag/vocal_sr*1000:.1f}ms")
+            if lag > 0:
+                # Shift vocal back by removing the leading lag samples, pad end with zeros
+                vocal_data = np.concatenate([
+                    vocal_data[lag:, :],
+                    np.zeros((lag, vocal_data.shape[1]), dtype=vocal_data.dtype)
+                ], axis=0)
+                log_step("SEPARATE", f"Shifted vocal back by {lag} samples ({lag/vocal_sr*1000:.1f}ms)")
+            # Also trim to exact original length to remove any trailing padding
+            orig_samples_at_vocal_sr = int(round(len(orig_data) * vocal_sr / orig_sr))
+            if vocal_data.shape[0] != orig_samples_at_vocal_sr:
                 vocal_data = vocal_data[:orig_samples_at_vocal_sr, :]
-                log_step("SEPARATE", f"Trimmed vocal from {len(vocal_data) + (vocal_data.shape[0] - orig_samples_at_vocal_sr)} to {orig_samples_at_vocal_sr} samples to match original duration ({orig_info.duration:.4f}s)")
-            # Write trimmed audio back to a temp WAV so we always have exact sample count
-            trimmed_path = os.path.join(temp_dir, "vocals_trimmed.wav")
-            sf.write(trimmed_path, vocal_data, vocal_sr)
-            vocal_path = trimmed_path
+                log_step("SEPARATE", f"Trimmed to {orig_samples_at_vocal_sr} samples to match original")
+            corrected_path = os.path.join(temp_dir, "vocals_corrected.wav")
+            sf.write(corrected_path, vocal_data, vocal_sr)
+            vocal_path = corrected_path
         except Exception as e:
-            log_step("SEPARATE", f"Warning: could not trim vocal to original duration: {e}")
+            log_step("SEPARATE", f"Warning: could not correct vocal timing: {e}")
         
         # Copy vocals to output directory
         ext = os.path.splitext(vocal_path)[1] or ".wav"
