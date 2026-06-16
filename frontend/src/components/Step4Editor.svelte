@@ -8576,13 +8576,13 @@
       scrubAudioBuffer = decoded;
 
       // Downsample to 750 peaks per second for smooth waveform at all zoom levels.
-      // Normalize to audioDuration (not decoded.duration) so all audio sources produce
-      // the same totalPeaks and identical sampleRate — preventing waveform shift when
-      // switching sources (e.g. original mix is 26ms shorter than demucs output).
+      // Use the actual decoded duration so peak indices map to accurate timestamps.
+      // (Demucs adds ~26ms silence at the END — padding is tail-only, so all sources
+      // start at sample 0 and align correctly. Using actual duration keeps sample→time
+      // mapping exact, with negligible drift only at the very end of the file.)
       const rawData = decoded.getChannelData(0);
       const peaksPerSec = 750;
-      const targetDuration = audioDuration || decoded.duration;
-      const totalPeaks = Math.ceil(targetDuration * peaksPerSec);
+      const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
       const totalSamples = rawData.length;
       const peaks = new Float32Array(totalPeaks);
 
@@ -8598,8 +8598,8 @@
       }
 
       waveformPeaks = peaks;
-      waveformDuration = targetDuration;  // normalized — same for all sources
-      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(2)}s audio (normalized to ${targetDuration.toFixed(2)}s)`);
+      waveformDuration = decoded.duration;
+      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(2)}s audio (normalized to ${decoded.duration.toFixed(2)}s)`);
       draw();
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);
