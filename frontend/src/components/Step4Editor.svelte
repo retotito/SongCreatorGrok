@@ -572,7 +572,7 @@
   }
 
   async function restoreSegmentRangeFromSource(startMs, endMs) {
-    const resp = await fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
+    const resp = await fetch(`/api/restore-segment/${$sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start_ms: startMs, end_ms: endMs })
@@ -2298,6 +2298,8 @@
     const beatsPerMeasure = Math.max(0.0001, getMetronomeDownbeatInterval());
     const beatsPerBeatUnit = Math.max(0.0001, getMetronomeBeatUnitInterval());
     const beatsPerSubUnit = Math.max(0.0001, beatsPerBeatUnit / 2);
+    // Finest grid step: 1 US beat if zoomed in enough, else beatsPerSubUnit
+    const gridStep = zoom >= 4 ? 1 : beatsPerSubUnit;
 
     // Find the downbeat gridline beat — use fractional offset for sub-beat precision
     let downbeatBeat = getMetronomeDownbeatAnchorBeat();
@@ -2310,11 +2312,11 @@
       const ratio = value / step;
       return Math.abs(ratio - Math.round(ratio)) < 1e-4;
     };
-    const firstSubIndex = Math.floor((startBeat - downbeatBeat) / beatsPerSubUnit) - 2;
-    const lastSubIndex = Math.ceil((endBeat - downbeatBeat) / beatsPerSubUnit) + 2;
+    const firstSubIndex = Math.floor((startBeat - downbeatBeat) / gridStep) - 2;
+    const lastSubIndex = Math.ceil((endBeat - downbeatBeat) / gridStep) + 2;
 
     for (let i = firstSubIndex; i <= lastSubIndex; i++) {
-      const b = downbeatBeat + i * beatsPerSubUnit;
+      const b = downbeatBeat + i * gridStep;
       const x = beatToX(b) + gridOffsetPx;
       if (x < -1 || x > w + 1) continue;
       const rel = b - downbeatBeat;
@@ -2335,8 +2337,7 @@
         ctx.strokeStyle = isMetronomeBeat ? '#6666cc' : '#30305a';
         ctx.lineWidth = 0.5;
       } else {
-        // 16th note level — only show if zoomed in enough (> 4px per beat)
-        if (zoom < 4) continue;
+        // Individual US beat level — only visible when zoomed in
         ctx.strokeStyle = '#252545';
         ctx.lineWidth = 0.3;
       }
@@ -3761,7 +3762,7 @@
         }
         if (freedStart !== null) {
           console.log(`[SegResize] Spliced segment shrunk — restoring freed region ${freedStart.toFixed(0)}–${freedEnd.toFixed(0)}ms`);
-          fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
+          fetch(`/api/restore-segment/${$sessionId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ start_ms: freedStart, end_ms: freedEnd }),
@@ -4899,7 +4900,7 @@
 
       const lyricsText = segRegenPreviewLines.join('\n');
 
-      const resp = await fetch(`${API_BASE}/segment-generate/${$sessionId}`, {
+      const resp = await fetch(`/api/segment-generate/${$sessionId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5083,7 +5084,7 @@
     segRegenPreviewConfidence = null;
     segRegenPreviewHyphenated = false;
     try {
-      const resp = await fetch(`${API_BASE}/segment-preview/${$sessionId}`, {
+      const resp = await fetch(`/api/segment-preview/${$sessionId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5511,18 +5512,8 @@
     const prevSource = audioSource;
     audioSource = source;
     const editedUrl = getEditedAudioUrl();
-    // When recordings have been spliced, vocal_audio on the backend IS the patched version.
-    // Use the demucs endpoint to get the original unedited vocal for the "Vocals" button.
-    const vocalsUrl = segRecPatched.size > 0
-      ? getAudioUrl($sessionId, 'demucs')
-      : (originalVocalUrl || vocalUrl);
-    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : vocalsUrl;
-    // For the waveform we always use the /vocals endpoint (not /demucs) so the peak
-    // duration stays consistent regardless of which audio source is active.
-    // The demucs file can have a slightly different encoded duration, which would
-    // shift the waveform's sampleRate and cause it to appear misaligned.
-    const waveformUrl = source === 'vocals' ? (originalVocalUrl || vocalUrl) : url;
-    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} waveformUrl=${waveformUrl} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
+    const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : originalVocalUrl || vocalUrl;
+    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -5546,8 +5537,8 @@
         }
       };
     }
-    // Re-load waveform for new source (use waveformUrl, not url, to keep consistent duration)
-    loadWaveform(waveformUrl);
+    // Re-load waveform for new source
+    loadWaveform(url);
     if (pitchLineVisible) {
       computePitchLine();
     }
@@ -7696,10 +7687,9 @@
 
   async function generateLyricsForRecordedSegment(silent = false) {
     const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
-    console.log(`[SegRec] generateLyrics: sessionId=${$sessionId} applied=${segRecApplied} blob=${!!segRecBlob} seg=${!!seg}`);
-    if (!$sessionId) { console.warn('[SegRec] generateLyrics: no sessionId, abort'); return; }
-    if (!segRecApplied && !segRecBlob) { console.warn('[SegRec] generateLyrics: no blob, abort'); return; }
-    if (segRecApplied && !seg) { console.warn('[SegRec] generateLyrics: applied but no seg, abort'); return; }
+    if (!$sessionId) return;
+    if (!segRecApplied && !segRecBlob) return;
+    if (segRecApplied && !seg) return;
 
     segRecLyricsLoading = true;
     segRecLyricsError = '';
@@ -7713,7 +7703,7 @@
     try {
       let previewResp;
       if (segRecApplied) {
-        previewResp = await fetch(`${API_BASE}/segment-preview/${$sessionId}`, {
+        previewResp = await fetch(`/api/segment-preview/${$sessionId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -7730,7 +7720,7 @@
         const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
         fd.append('recording', segRecBlob, `segment_preview.${ext}`);
         fd.append('language', language);
-        previewResp = await fetch(`${API_BASE}/segment-preview-upload/${$sessionId}`, {
+        previewResp = await fetch(`/api/segment-preview-upload/${$sessionId}`, {
           method: 'POST',
           body: fd,
         });
@@ -7792,15 +7782,11 @@
     if (!micStream) {
       micStarting = true;
       await startMic();
-      await tick();
       micStarting = false;
       if (!micStream) {
         console.error('[SegRec] Mic failed to start');
         return;
       }
-      console.log(`[SegRec] Mic started: stream=${!!micStream} analyser=${!!micAnalyser} levelTimer=${!!micLevelTimer}`);
-    } else {
-      console.log(`[SegRec] Mic already running: stream=${!!micStream} analyser=${!!micAnalyser} levelTimer=${!!micLevelTimer}`);
     }
 
     segRecSegmentId = segId;
@@ -7948,7 +7934,7 @@
       formData.append('end_ms', String(seg.endMs));
       formData.append('playback_rate', String(Math.max(0.1, playbackRate || 1.0)));
 
-      const resp = await fetch(`${API_BASE}/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
+      const resp = await fetch(`/api/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
       if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
 
       const spliceResult = await resp.json();
@@ -8054,7 +8040,7 @@
   async function changeMicDevice(e) {
     micDeviceId = e.target.value;
     saveEditorUiPrefs('mic-device-change');
-    if (micEnabled || segRecPhase !== 'idle') {
+    if (micEnabled) {
       stopMic();
       await startMic();
     }
@@ -8439,7 +8425,7 @@
         console.log(`[Mic] Uploading audio: ${(audioBlob.size / 1024).toFixed(1)} KB`);
       }
 
-      const resp = await fetch(`${API_BASE}/save-mic-trail/${$sessionId}`, {
+      const resp = await fetch(`/api/save-mic-trail/${$sessionId}`, {
         method: 'POST',
         body: formData
       });
@@ -8576,10 +8562,7 @@
       scrubAudioBuffer = decoded;
 
       // Downsample to 750 peaks per second for smooth waveform at all zoom levels.
-      // Use the actual decoded duration so peak indices map to accurate timestamps.
-      // (Demucs adds ~26ms silence at the END — padding is tail-only, so all sources
-      // start at sample 0 and align correctly. Using actual duration keeps sample→time
-      // mapping exact, with negligible drift only at the very end of the file.)
+      // Use floating-point sample boundaries to avoid accumulated rounding drift.
       const rawData = decoded.getChannelData(0);
       const peaksPerSec = 750;
       const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
@@ -8599,7 +8582,7 @@
 
       waveformPeaks = peaks;
       waveformDuration = decoded.duration;
-      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(2)}s audio (normalized to ${decoded.duration.toFixed(2)}s)`);
+      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(1)}s audio`);
       draw();
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);
