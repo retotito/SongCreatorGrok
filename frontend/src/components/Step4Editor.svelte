@@ -4835,7 +4835,7 @@
       fd.append('lyrics', raw.join('\n'));
       fd.append('language', segRegenLanguage === 'auto' ? 'en' : segRegenLanguage);
 
-      const resp = await fetch('/api/hyphenate', {
+      const resp = await fetch(`${API_BASE}/hyphenate`, {
         method: 'POST',
         body: fd,
       });
