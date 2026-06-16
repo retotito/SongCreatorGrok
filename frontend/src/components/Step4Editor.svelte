@@ -190,6 +190,25 @@
     return clampValue(moveDelta, minDelta, maxDelta);
   }
 
+  function getSongBeatBounds() {
+    const minBeat = timeToBeat(0);
+    const durationSec = Math.max(0, audioEl?.duration || audioDuration || 0);
+    return {
+      minBeat,
+      maxBeat: durationSec > 0 ? timeToBeat(durationSec) : Infinity,
+    };
+  }
+
+  function clampSelectedMoveDeltaToSongBounds(moveDelta, selection) {
+    if (!selection?.length) return moveDelta;
+    const { minBeat, maxBeat } = getSongBeatBounds();
+    const selectionStart = Math.min(...selection.map(note => note.startBeat));
+    const selectionEnd = Math.max(...selection.map(note => note.startBeat + note.duration));
+    const minDelta = Math.ceil(minBeat - selectionStart);
+    const maxDelta = Number.isFinite(maxBeat) ? Math.floor(maxBeat - selectionEnd) : Infinity;
+    return clampValue(moveDelta, minDelta, maxDelta);
+  }
+
   // Rubber-band (box) selection
   let isBoxSelecting = false;
   let boxSelectStart = { x: 0, y: 0 };
@@ -5997,12 +6016,16 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const { maxBeat } = getVisibleBeatBounds();
-          const maxDur = Math.max(snap, Math.floor(maxBeat - note.startBeat));
+          const { maxBeat } = getSongBeatBounds();
+          const maxDur = Number.isFinite(maxBeat)
+            ? Math.max(snap, Math.floor(maxBeat - note.startBeat))
+            : Infinity;
           const newDur = clampValue(note.duration + delta, snap, maxDur);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, duration: newDur } : n);
+            const updated = notes.find(n => n.id === selectedNote);
+            if (updated) ensureBeatVisible(updated.startBeat + updated.duration, 8);
             markUnsaved();
             draw();
           }
@@ -6017,13 +6040,15 @@
         const delta = e.code === 'ArrowRight' ? snap : -snap;
         const note = notes.find(n => n.id === selectedNote);
         if (note && note.type !== 'break') {
-          const { minBeat } = getVisibleBeatBounds();
+          const { minBeat } = getSongBeatBounds();
           const maxStart = note.startBeat + note.duration - snap;
           const newStart = clampValue(note.startBeat + delta, Math.ceil(minBeat), maxStart);
           const newDur = note.duration - (newStart - note.startBeat);
           if (newDur !== note.duration) {
             pushUndo();
             notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
+            const updated = notes.find(n => n.id === selectedNote);
+            if (updated) ensureBeatVisible(updated.startBeat, 8);
             markUnsaved();
             draw();
           }
@@ -6037,7 +6062,7 @@
         const isHorizontalMove = e.code === 'ArrowLeft' || e.code === 'ArrowRight';
         const selectedNoteObjects = notes.filter(n => ids.has(n.id) && n.type !== 'break');
         const moveDelta = isHorizontalMove
-          ? clampSelectedMoveDeltaToVisibleCanvas(
+          ? clampSelectedMoveDeltaToSongBounds(
               e.code === 'ArrowLeft' ? -(e.shiftKey ? 4 : 1) : (e.shiftKey ? 4 : 1),
               selectedNoteObjects,
             )
@@ -6060,6 +6085,11 @@
             startDragOsc(movedNote.pitch);
             dragOscStopTimer = setTimeout(() => { stopDragOsc(); dragOscStopTimer = null; }, 400);
           }
+        }
+        if (isHorizontalMove && selectedNoteObjects.length === 1) {
+          const movedStart = Math.min(...selectedNoteObjects.map(n => n.startBeat + moveDelta));
+          const movedEnd = Math.max(...selectedNoteObjects.map(n => n.startBeat + n.duration + moveDelta));
+          ensureBeatVisible(e.code === 'ArrowLeft' ? movedStart : movedEnd, 8);
         }
         markUnsaved();
         updatePitchRange();
