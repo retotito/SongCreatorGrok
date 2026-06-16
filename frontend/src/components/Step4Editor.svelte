@@ -5517,7 +5517,12 @@
       ? getAudioUrl($sessionId, 'demucs')
       : (originalVocalUrl || vocalUrl);
     const url = source === 'original' ? originalUrl : source === 'edited' ? editedUrl : vocalsUrl;
-    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
+    // For the waveform we always use the /vocals endpoint (not /demucs) so the peak
+    // duration stays consistent regardless of which audio source is active.
+    // The demucs file can have a slightly different encoded duration, which would
+    // shift the waveform's sampleRate and cause it to appear misaligned.
+    const waveformUrl = source === 'vocals' ? (originalVocalUrl || vocalUrl) : url;
+    console.log(`[AudioSource] Switch: ${prevSource} → ${source} | url=${url} waveformUrl=${waveformUrl} | spliced=${segRecPatched.size > 0} cleaned=${cleanedAudioAvailable}`);
     const wasPlaying = isPlaying;
     const time = currentTimeSec || audioEl?.currentTime || 0;
 
@@ -5541,8 +5546,8 @@
         }
       };
     }
-    // Re-load waveform for new source
-    loadWaveform(url);
+    // Re-load waveform for new source (use waveformUrl, not url, to keep consistent duration)
+    loadWaveform(waveformUrl);
     if (pitchLineVisible) {
       computePitchLine();
     }
@@ -8571,10 +8576,13 @@
       scrubAudioBuffer = decoded;
 
       // Downsample to 750 peaks per second for smooth waveform at all zoom levels.
-      // Use floating-point sample boundaries to avoid accumulated rounding drift.
+      // Normalize to audioDuration (not decoded.duration) so all audio sources produce
+      // the same totalPeaks and identical sampleRate — preventing waveform shift when
+      // switching sources (e.g. original mix is 26ms shorter than demucs output).
       const rawData = decoded.getChannelData(0);
       const peaksPerSec = 750;
-      const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
+      const targetDuration = audioDuration || decoded.duration;
+      const totalPeaks = Math.ceil(targetDuration * peaksPerSec);
       const totalSamples = rawData.length;
       const peaks = new Float32Array(totalPeaks);
 
@@ -8590,8 +8598,8 @@
       }
 
       waveformPeaks = peaks;
-      waveformDuration = decoded.duration;
-      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(1)}s audio`);
+      waveformDuration = targetDuration;  // normalized — same for all sources
+      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(2)}s audio (normalized to ${targetDuration.toFixed(2)}s)`);
       draw();
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);

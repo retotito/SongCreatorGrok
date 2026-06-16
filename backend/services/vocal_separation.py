@@ -137,6 +137,27 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
         if vocal_path is None:
             raise RuntimeError(f"Demucs did not produce a vocals file. Files found: {all_files}")
         
+        # Trim Demucs output to exactly match the original audio duration.
+        # Demucs pads its output by ~26ms (convolutional kernel window) which causes
+        # the vocal waveform to appear shifted vs the original mix in the editor.
+        try:
+            import soundfile as sf
+            import numpy as np
+            orig_info = sf.info(audio_path)
+            orig_samples = orig_info.frames
+            vocal_data, vocal_sr = sf.read(vocal_path, always_2d=True)
+            # Resample original sample count to vocal sample rate if they differ
+            orig_samples_at_vocal_sr = int(round(orig_info.duration * vocal_sr))
+            if vocal_data.shape[0] > orig_samples_at_vocal_sr:
+                vocal_data = vocal_data[:orig_samples_at_vocal_sr, :]
+                log_step("SEPARATE", f"Trimmed vocal from {len(vocal_data) + (vocal_data.shape[0] - orig_samples_at_vocal_sr)} to {orig_samples_at_vocal_sr} samples to match original duration ({orig_info.duration:.4f}s)")
+            # Write trimmed audio back to a temp WAV so we always have exact sample count
+            trimmed_path = os.path.join(temp_dir, "vocals_trimmed.wav")
+            sf.write(trimmed_path, vocal_data, vocal_sr)
+            vocal_path = trimmed_path
+        except Exception as e:
+            log_step("SEPARATE", f"Warning: could not trim vocal to original duration: {e}")
+        
         # Copy vocals to output directory
         ext = os.path.splitext(vocal_path)[1] or ".wav"
         output_path = os.path.join(output_dir, f"{song_name}_vocals{ext}")
