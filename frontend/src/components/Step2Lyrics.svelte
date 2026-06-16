@@ -32,6 +32,7 @@
 
   async function handleGenerateEmpty() {
     if (!$sessionId) { errorMessage.set('No session. Please upload audio first.'); return; }
+    if (!artist.trim() || !title.trim()) { errorMessage.set('Please enter Artist and Title before generating.'); return; }
     isProcessing.set(true);
     processingStatus.set('Creating empty Ultrastar file…');
     try {
@@ -360,48 +361,31 @@
       </div>
     {/if}
 
-    {#if cleanupSegments.length > 0}
+    {#if cleanupSegments.length > 0 && cleanedAudioAvailable && $sessionId}
       <div class="cleanup-banner">
         <div class="cleanup-banner-content">
           <span class="cleanup-banner-icon">🧹</span>
           <div class="cleanup-banner-text">
-            <strong>Cleanup segments detected in Step 4</strong>
-            <p class="cleanup-banner-hint">You've marked {cleanupSegments.length} vocal {cleanupSegments.length === 1 ? 'region' : 'regions'} for cleanup. Generate a cleaned audio preview to hear the effect before regenerating the song.</p>
-          </div>
-          <div class="cleanup-status">
-            {#if isGeneratingCleaned}
-              <div class="cleanup-status-badge generating">⏳ Generating...</div>
-            {:else if cleanedAudioAvailable}
-              <div class="cleanup-status-badge ready">✓ Preview Ready</div>
-            {:else}
-              <button
-                class="btn btn-cleanup"
-                on:click={handleGenerateCleanedAudio}
-                disabled={$isProcessing}
-              >
-                Generate Cleaned Preview
-              </button>
-            {/if}
+            <strong>{cleanupSegments.length} cleanup {cleanupSegments.length === 1 ? 'section' : 'sections'} applied</strong>
+            <p class="cleanup-banner-hint">The cleaned vocal preview reflects your current cleanup sections from Step 4.</p>
           </div>
         </div>
-        {#if cleanedAudioAvailable && $sessionId}
-          <div class="cleanup-audio-compare">
-            <div class="audio-label">✨ Cleaned Vocals (Preview)</div>
-            <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
-              Your browser does not support the audio element.
-            </audio>
-            <div class="cleanup-transcribe-row">
-              <button
-                class="btn btn-transcribe"
-                on:click={handleTranscribeFromCleaned}
-                disabled={isTranscribing || $isProcessing}
-              >
-                🎙️ Generate Lyrics from Cleaned Vocals
-              </button>
-              <p class="transcribe-hint">Use AI to re-transcribe the cleaned audio. This will replace the current lyrics.</p>
-            </div>
+        <div class="cleanup-audio-compare">
+          <div class="audio-label">✨ Cleaned Vocals</div>
+          <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
+            Your browser does not support the audio element.
+          </audio>
+          <div class="cleanup-transcribe-row">
+            <button
+              class="btn btn-transcribe"
+              on:click={handleTranscribeFromCleaned}
+              disabled={isTranscribing || $isProcessing}
+            >
+              🎙️ Generate Lyrics from Cleaned Vocals
+            </button>
+            <p class="transcribe-hint">Use AI to re-transcribe the cleaned audio. This will replace the current lyrics.</p>
           </div>
-        {/if}
+        </div>
       </div>
     {/if}
 
@@ -438,7 +422,7 @@
       <button class="btn btn-primary btn-generate" on:click={() => handleSubmit(false)} disabled={$isProcessing || !lyricsText.trim() || !artist.trim() || !title.trim() || !$sessionId}>
         🚀 Generate Full Ultrastar Files
       </button>
-      <button class="btn btn-secondary btn-generate" on:click={handleGenerateEmpty} disabled={$isProcessing || !$sessionId} title="Skip note alignment — open editor with empty file">
+      <button class="btn btn-secondary btn-generate" on:click={handleGenerateEmpty} disabled={$isProcessing || !$sessionId || !artist.trim() || !title.trim()} title="Skip note alignment — open editor with empty file">
         📄 Generate Empty Ultrastar File
       </button>
       {#if cleanedAudioAvailable}
