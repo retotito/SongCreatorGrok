@@ -119,6 +119,41 @@
     return true;
   }
 
+  // While dragging cleanup segments, auto-scroll based on the segment edge that
+  // is approaching the viewport edge, not only the mouse pointer position.
+  function autoScrollCleanupSegment(seg, mode, msDelta = 0) {
+    if (!seg) return false;
+    const w = canvasEl?.width || canvasW || 800;
+    const edgePaddingPx = 12;
+    const startX = beatToX(timeToBeat(seg.startMs / 1000));
+    const endX = beatToX(timeToBeat(seg.endMs / 1000));
+
+    let deltaPx = 0;
+    if (mode === 'start') {
+      if (startX < edgePaddingPx) deltaPx = startX - edgePaddingPx;
+      else if (startX > w - edgePaddingPx) deltaPx = startX - (w - edgePaddingPx);
+    } else if (mode === 'end') {
+      if (endX < edgePaddingPx) deltaPx = endX - edgePaddingPx;
+      else if (endX > w - edgePaddingPx) deltaPx = endX - (w - edgePaddingPx);
+    } else {
+      if (msDelta >= 0 && endX > w - edgePaddingPx) {
+        deltaPx = endX - (w - edgePaddingPx);
+      } else if (msDelta < 0 && startX < edgePaddingPx) {
+        deltaPx = startX - edgePaddingPx;
+      } else if (startX < edgePaddingPx) {
+        deltaPx = startX - edgePaddingPx;
+      } else if (endX > w - edgePaddingPx) {
+        deltaPx = endX - (w - edgePaddingPx);
+      }
+    }
+
+    if (!deltaPx) return false;
+    const next = clampScrollX(scrollX + deltaPx);
+    if (next === scrollX) return false;
+    scrollX = next;
+    return true;
+  }
+
   // Keep dragged loop boundaries visually inside the canvas while edge-scrolling.
   function clampDragXToCanvas(mx) {
     const w = canvasEl?.width || canvasW || 800;
@@ -398,7 +433,7 @@
       } else if (mode === 'end') {
         focusMs = updatedSeg.endMs;
       }
-      ensureBeatVisible(timeToBeat(focusMs / 1000), 84);
+      ensureBeatVisible(timeToBeat(focusMs / 1000), 12);
     }
 
     cleanedAudioDirty = true;
@@ -3273,7 +3308,6 @@
     }
 
     if (cleanupDrag) {
-      autoScrollAtCanvasEdge(mx);
       const seg = cleanupSegments.find(s => s.id === cleanupDrag.id);
       if (!seg) {
         cleanupDrag = null;
@@ -3288,7 +3322,9 @@
       const prevN = [...sortedOthers].reverse().find(s => s.endMs <= cleanupDrag.startMs);
       const nextN = sortedOthers.find(s => s.startMs >= cleanupDrag.endMs);
       const minStart = prevN ? prevN.endMs + CLAMP_GAP : 0;
-      const maxEnd   = nextN ? nextN.startMs - CLAMP_GAP : Infinity;
+      const songEndMs = Math.max(0, (audioEl?.duration || audioDuration || 0) * 1000);
+      const maxEndBound = songEndMs > 0 ? songEndMs : Infinity;
+      const maxEnd = nextN ? Math.min(nextN.startMs - CLAMP_GAP, maxEndBound) : maxEndBound;
 
       if (cleanupDrag.mode === 'move') {
         const duration = cleanupDrag.endMs - cleanupDrag.startMs;
@@ -3311,6 +3347,7 @@
         seg.endMs = newEnd;
       }
       cleanupSegments = [...cleanupSegments].map(normalizeCleanupSegment).sort((a, b) => a.startMs - b.startMs);
+      autoScrollCleanupSegment(seg, cleanupDrag.mode, msDelta);
       cleanedAudioDirty = true;
       markUnsaved();
       draw();
