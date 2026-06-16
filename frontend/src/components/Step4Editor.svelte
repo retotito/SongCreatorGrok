@@ -6097,6 +6097,69 @@
         }
       }
 
+      // ── Option+Left/Right: Extend selection to adjacent touching notes ──
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
+          selectedNote !== null && selectedNotes.size <= 1) {
+        e.preventDefault();
+        const realNotes = notes.filter(n => n.type !== 'break').sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+        const currentNote = notes.find(n => n.id === selectedNote);
+        if (currentNote) {
+          if (e.code === 'ArrowRight') {
+            // Find next touching note (starts where current ends)
+            const nextNote = realNotes.find(n => n.startBeat === currentNote.startBeat + currentNote.duration);
+            if (nextNote) {
+              selectedNotes.add(nextNote.id);
+              selectedNote = nextNote.id;
+              draw();
+            }
+          } else {
+            // Find previous touching note (ends where current starts)
+            const prevNote = realNotes.find(n => n.startBeat + n.duration === currentNote.startBeat);
+            if (prevNote) {
+              selectedNotes.add(prevNote.id);
+              selectedNote = prevNote.id;
+              draw();
+            }
+          }
+        }
+        return;
+      }
+
+      // ── Shift+Option+Left/Right: Move shared boundary (only when 2 touching notes selected) ──
+      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+        e.preventDefault();
+        const pair = getTouchingSelectedPair();
+        if (pair) {
+          const snap = snapBeatValue(1);
+          const direction = e.code === 'ArrowRight' ? 1 : -1;
+          const delta = direction * snap;
+          
+          // Left note keeps start fixed, adjusts duration
+          const leftNote = notes.find(n => n.id === pair.left.id);
+          // Right note adjusts start, keeps end fixed
+          const rightNote = notes.find(n => n.id === pair.right.id);
+          
+          if (leftNote && rightNote) {
+            const newLeftDur = clampValue(leftNote.duration + delta, snap, pair.sharedBeat - leftNote.startBeat + (rightNote.duration - snap));
+            const newRightStart = pair.sharedBeat + delta;
+            const newRightDur = rightNote.duration - delta;
+            
+            // Ensure both notes have minimum duration
+            if (newLeftDur >= snap && newRightDur >= snap) {
+              pushUndo();
+              notes = notes.map(n => {
+                if (n.id === pair.left.id) return { ...n, duration: newLeftDur };
+                if (n.id === pair.right.id) return { ...n, startBeat: newRightStart, duration: newRightDur };
+                return n;
+              });
+              markUnsaved();
+              draw();
+            }
+          }
+        }
+        return;
+      }
+
       // Ctrl+Left/Right (single note only): resize duration from right edge
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight') &&
           selectedNotes.size <= 1 && selectedNote !== null) {
@@ -9796,6 +9859,8 @@
       <span class="shortcut"><kbd>Shift+Drag</kbd> move X only</span>
       <span class="shortcut"><kbd>Tab</kbd> next note</span>
       <span class="shortcut"><kbd>Shift+Tab</kbd> previous note</span>
+      <span class="shortcut"><kbd>Option+←→</kbd> extend to adjacent</span>
+      <span class="shortcut"><kbd>Shift+Option+←→</kbd> move boundary</span>
       <span class="shortcut"><kbd>↑↓</kbd> pitch ±1 semitone</span>
       <span class="shortcut"><kbd>Ctrl+↑↓</kbd> pitch ±1 octave</span>
       <span class="shortcut"><kbd>S</kbd> split</span>
