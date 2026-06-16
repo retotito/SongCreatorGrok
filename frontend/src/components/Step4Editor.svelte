@@ -3180,7 +3180,7 @@
           selectedNote = null;
           selectedNotes = new Set();
           isDragging = true;
-          dragStart = { x: mx, y: my, beat: flag.beat };
+          dragStart = { x: mx, y: my, beat: flag.beat, scrollX };
           draw();
           return;
         }
@@ -3255,7 +3255,7 @@
         }
         selectedFlag = null;
         isDragging = true;
-        dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration, endBeat: found.endBeat };
+        dragStart = { x: mx, y: my, beat: found.startBeat, pitch: found.pitch, duration: found.duration, endBeat: found.endBeat, scrollX };
         if (found.type !== 'break') {
           pushUndo();
           if (dragMode === 'move') {
@@ -3549,15 +3549,19 @@
 
     if (!isDragging || selectedNote === null) return;
 
+    autoScrollAtCanvasEdge(mx);
+
     const note = notes.find(n => n.id === selectedNote);
     if (!note) return;
 
     const dx = mx - dragStart.x;
+    const scrollBeatDelta = (scrollX - (dragStart.scrollX ?? scrollX)) / zoom;
     const dy = my - dragStart.y;
 
     // Break drag: horizontal only
     if (note.type === 'break' && dragMode === 'move-break') {
-      note.startBeat = Math.round(dragStart.beat + dx / zoom);
+      const { minBeat } = getSongBeatBounds();
+      note.startBeat = Math.max(Math.ceil(minBeat), Math.round(dragStart.beat + (dx / zoom) + scrollBeatDelta));
       if (note.endBeat !== null && note.endBeat !== undefined) {
         const origDiff = (dragStart.endBeat || note.endBeat) - dragStart.beat;
         note.endBeat = note.startBeat + origDiff;
@@ -3573,8 +3577,8 @@
 
     // ── Multi-note drag ──
     if (dragMode === 'move' && selectedNotes.size > 1 && selectedNotes.has(note.id)) {
-      const rawBeatDelta = Math.round(dx / zoom);
-      const pitchDelta = yToPitch(dragStart.y + dy) - dragStart.pitch;
+      const rawBeatDelta = Math.round((dx / zoom) + scrollBeatDelta);
+      const pitchDelta = event.shiftKey ? 0 : (yToPitch(dragStart.y + dy) - dragStart.pitch);
       
       if (!dragStart.groupOffsets) {
         // Capture initial positions of all selected notes
@@ -3590,7 +3594,7 @@
         startBeat: offset.beat,
         duration: notes.find(nn => nn.id === offset.id)?.duration ?? 1,
       }));
-      const beatDelta = clampSelectedMoveDeltaToVisibleCanvas(rawBeatDelta, groupSelection);
+      const beatDelta = clampSelectedMoveDeltaToSongBounds(rawBeatDelta, groupSelection);
       
       for (const offset of dragStart.groupOffsets) {
         const n = notes.find(nn => nn.id === offset.id);
@@ -3604,22 +3608,27 @@
         if (dragStart.groupOffsets.length <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'move') {
-      const desiredStartBeat = Math.round(dragStart.beat + dx / zoom);
-      note.startBeat = clampNoteStartToVisibleCanvas(desiredStartBeat, note.duration);
-      note.pitch = Math.max(minPitch, Math.min(maxPitch, yToPitch(dragStart.y + dy)));
+      const desiredStartBeat = Math.round(dragStart.beat + (dx / zoom) + scrollBeatDelta);
+      const { minBeat, maxBeat } = getSongBeatBounds();
+      const maxStart = Number.isFinite(maxBeat) ? Math.floor(maxBeat - note.duration) : desiredStartBeat;
+      note.startBeat = clampValue(desiredStartBeat, Math.ceil(minBeat), maxStart);
+      const nextPitch = event.shiftKey ? dragStart.pitch : yToPitch(dragStart.y + dy);
+      note.pitch = Math.max(minPitch, Math.min(maxPitch, nextPitch));
       // Update pitch preview if pitch changed — only for single note
       if (note.pitch !== dragLastPitch) {
         if (selectedNotes.size <= 1) updateDragOsc(note.pitch);
       }
     } else if (dragMode === 'resize-right') {
-      const { maxBeat } = getVisibleBeatBounds();
-      const maxDuration = Math.max(1, Math.floor(maxBeat - note.startBeat));
-      note.duration = clampValue(Math.round(dragStart.duration + dx / zoom), 1, maxDuration);
+      const { maxBeat } = getSongBeatBounds();
+      const maxDuration = Number.isFinite(maxBeat)
+        ? Math.max(1, Math.floor(maxBeat - note.startBeat))
+        : Math.max(1, Math.round(dragStart.duration + (dx / zoom) + scrollBeatDelta));
+      note.duration = clampValue(Math.round(dragStart.duration + (dx / zoom) + scrollBeatDelta), 1, maxDuration);
     } else if (dragMode === 'resize-left') {
-      const { minBeat } = getVisibleBeatBounds();
+      const { minBeat } = getSongBeatBounds();
       const originalEnd = dragStart.beat + dragStart.duration;
       const newStart = clampValue(
-        Math.round(dragStart.beat + dx / zoom),
+        Math.round(dragStart.beat + (dx / zoom) + scrollBeatDelta),
         Math.ceil(minBeat),
         originalEnd - 1,
       );
