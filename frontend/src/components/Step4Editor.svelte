@@ -6004,6 +6004,7 @@
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
       if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); return; }
+      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); return; }
       if (e.code === 'Escape') {
         e.preventDefault();
         if (loopStartBeat !== null) clearLoop();
@@ -9126,7 +9127,41 @@
       {/if}
 
       </div>
-      <div id="pitch-line-controls-wrapper">
+      <div id="vocal_trace_outer_wrapper">
+        <div id="vocal_trace-controls-wrapper">
+          <button class="tool-btn" class:active={vocalTraceEnabled} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} on:click={(e) => {
+            if (uiModalGuardActive) return;
+            if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; }
+            vocalTraceEnabled = !vocalTraceEnabled;
+            if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+            toggleVocalTrace();
+            e.currentTarget.blur();
+          }} title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Vocal trace — plays the vocal audio through pitch detection. Draw pink pitch lines (V)' : 'No vocals — go to Step 1 to extract or upload'}>
+            Vocal <span class="mic-icon-wrap" class:mic-off={!vocalTraceEnabled}>🎙️</span>
+          </button>
+          {#if vocalTraceLoading}
+            <div class="loading-modal-overlay">
+              <div class="loading-modal">
+                <span class="loading-spinner"></span>
+                <span class="loading-label">Loading vocal trace…</span>
+                <button class="tool-btn sm" on:click={() => {
+                  if (vocalTraceAbortController) vocalTraceAbortController.abort();
+                  vocalTraceEnabled = false;
+                  vocalTraceLoading = false;
+                }} title="Cancel">Cancel</button>
+              </div>
+            </div>
+          {/if}
+          {#if vocalTraceFrames.length > 0}
+            {#if vocalTraceVisible}
+              <button class="tool-btn sm active" on:click={() => { vocalTraceVisible = false; draw(); }} title="Hide vocal trace"><span class="mic-icon-wrap">👁</span></button>
+            {:else}
+              <button class="tool-btn sm" on:click={() => { vocalTraceVisible = true; draw(); }} title="Show vocal trace"><span class="mic-icon-wrap mic-off">👁</span></button>
+            {/if}
+            <button class="tool-btn sm" on:click={clearVocalTrace} title="Clear vocal trace">🗑</button>
+          {/if}
+        </div>
+        <div id="pitch-line-controls-wrapper">
           <button class="tool-btn" class:active={pitchLineVisible} class:disabled-audio={!hasVocalsAudio || uiModalGuardActive} disabled={uiModalGuardActive}
             on:click={() => { if (uiModalGuardActive) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } togglePitchLine(); }}
             title={uiModalGuardActive ? 'Disabled while modal is active' : hasVocalsAudio ? 'Pitch line — precompute pitch from selected Vocals/Edited source (cyan dots)' : 'No vocals — go to Step 1 to extract or upload'}>
@@ -9144,6 +9179,7 @@
             <button class="tool-btn sm" on:click={() => { pitchLineFrames = []; pitchLineSourceUrl = null; pitchLineVisible = false; draw(); }} title="Clear pitch line">🗑</button>
           {/if}
         </div>
+      </div>
       <div id="BPM-controls-wrapper">
         <div class="bpm-controls">
           <span class="bpm-label">BPM</span>
@@ -10831,6 +10867,15 @@
   }
 
   .tool-btn:hover { background: #333; }
+
+  #vocal_trace-controls-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 175px;
+    border: 1px solid #333;
+    border-radius: 4px;
+  }
 
   .zoom-label {
     color: #888;
