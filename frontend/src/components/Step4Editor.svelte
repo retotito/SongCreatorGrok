@@ -53,7 +53,7 @@
   // Interaction
   let selectedNote = null;
   let selectedNotes = new Set(); // multi-select
-  let dragMode = null;     // 'move' | 'resize-left' | 'resize-right'
+  let dragMode = null;     // 'move' | 'resize-left' | 'resize-right' | 'resize-shared'
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
   // Custom scrollbar state (replaces native <input type="range">)
@@ -3171,6 +3171,30 @@
 
     const isMultiKey = event.metaKey || event.ctrlKey;
 
+    if (!isMultiKey) {
+      const sharedBoundaryHit = hitTestTouchingSelectedPairBoundary(mx, my);
+      if (sharedBoundaryHit) {
+        selectedFlag = null;
+        selectedNote = sharedBoundaryHit.left.id;
+        isDragging = true;
+        dragMode = 'resize-shared';
+        dragStart = {
+          x: mx,
+          y: my,
+          beat: sharedBoundaryHit.left.startBeat,
+          scrollX,
+          sharedLeftId: sharedBoundaryHit.left.id,
+          sharedRightId: sharedBoundaryHit.right.id,
+          sharedBeat: sharedBoundaryHit.sharedBeat,
+          sharedLeftStart: sharedBoundaryHit.leftStart,
+          sharedRightEnd: sharedBoundaryHit.rightEnd,
+        };
+        pushUndo();
+        draw();
+        return;
+      }
+    }
+
     // Check flag hit first so flags are selectable even if a note overlaps the same x-position.
     if (!isMultiKey) {
       for (const flag of flags) {
@@ -3507,6 +3531,13 @@
 
       // Check note hover (if no flag matched)
       if (!cursor) {
+        const sharedBoundaryHit = hitTestTouchingSelectedPairBoundary(mx, my);
+        if (sharedBoundaryHit) {
+          cursor = 'ew-resize';
+        }
+      }
+
+      if (!cursor) {
         for (const note of notes) {
           if (note.type === 'break') {
             const bx = beatToX(note.startBeat);
@@ -3574,6 +3605,30 @@
     }
 
     if (note.type === 'break') return;
+
+    if (dragMode === 'resize-shared') {
+      const left = notes.find(n => n.id === dragStart.sharedLeftId && n.type !== 'break');
+      const right = notes.find(n => n.id === dragStart.sharedRightId && n.type !== 'break');
+      if (!left || !right) return;
+
+      const minDur = 1;
+      const proposedBoundary = Math.round((dragStart.sharedBeat ?? left.startBeat + left.duration) + (dx / zoom) + scrollBeatDelta);
+      const minBoundary = (dragStart.sharedLeftStart ?? left.startBeat) + minDur;
+      const maxBoundary = (dragStart.sharedRightEnd ?? (right.startBeat + right.duration)) - minDur;
+      const newBoundary = clampValue(proposedBoundary, minBoundary, maxBoundary);
+
+      left.startBeat = dragStart.sharedLeftStart ?? left.startBeat;
+      left.duration = Math.max(minDur, newBoundary - left.startBeat);
+      right.startBeat = newBoundary;
+      right.duration = Math.max(minDur, (dragStart.sharedRightEnd ?? (right.startBeat + right.duration)) - newBoundary);
+
+      editorState.update(s => ({ ...s, hasChanges: true }));
+      hasUnsavedChanges = true;
+      notes = [...notes];
+      updatePitchRange();
+      draw();
+      return;
+    }
 
     // ── Multi-note drag ──
     if (dragMode === 'move' && selectedNotes.size > 1 && selectedNotes.has(note.id)) {
@@ -3878,6 +3933,30 @@
       return n ? [n] : [];
     }
     return [];
+  }
+
+  function getTouchingSelectedPair() {
+    const sel = getSelectedNoteObjects().slice().sort((a, b) => (a.startBeat - b.startBeat) || (a.id - b.id));
+    if (sel.length !== 2) return null;
+    const [left, right] = sel;
+    const leftEnd = left.startBeat + left.duration;
+    if (leftEnd !== right.startBeat) return null;
+    return { left, right, sharedBeat: leftEnd, leftStart: left.startBeat, rightEnd: right.startBeat + right.duration };
+  }
+
+  function hitTestTouchingSelectedPairBoundary(mx, my) {
+    const pair = getTouchingSelectedPair();
+    if (!pair) return null;
+    const boundaryX = beatToX(pair.sharedBeat);
+    if (Math.abs(mx - boundaryX) > 6) return null;
+
+    const leftY = pitchToY(pair.left.pitch);
+    const rightY = pitchToY(pair.right.pitch);
+    const leftHit = my >= leftY - noteHeight / 2 && my <= leftY + noteHeight / 2;
+    const rightHit = my >= rightY - noteHeight / 2 && my <= rightY + noteHeight / 2;
+    if (!leftHit && !rightHit) return null;
+
+    return { ...pair, boundaryX };
   }
 
   function clipboardCut() {
@@ -9714,6 +9793,7 @@
     <div class="shortcut-group">
       <span class="shortcut-label">Edit</span>
       <span class="shortcut"><kbd>Drag</kbd> move</span>
+      <span class="shortcut"><kbd>Shift+Drag</kbd> move X only</span>
       <span class="shortcut"><kbd>Tab</kbd> next note</span>
       <span class="shortcut"><kbd>Shift+Tab</kbd> previous note</span>
       <span class="shortcut"><kbd>↑↓</kbd> pitch ±1 semitone</span>
