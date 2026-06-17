@@ -266,7 +266,7 @@
     if (!flags.length) return;
     flags = flags.map(f => {
       const norm = normalizeFlag(f);
-      return { ...norm, beat: snapToMetronomeGrid(norm.beat) };
+      return { ...norm, beat: snapBeatValue(norm.beat) };
     });
     saveFlags();
   }
@@ -276,9 +276,9 @@
       if (n.type !== 'break') return n;
       // If break has a stored timeMs, re-derive beat from it using current BPM/GAP
       if (Number.isFinite(n.timeMs)) {
-        const newBeat = snapToMetronomeGrid(Math.round(timeToBeat(n.timeMs / 1000)));
+        const newBeat = snapBeatValue(Math.round(timeToBeat(n.timeMs / 1000)));
         const newEndBeat = Number.isFinite(n.endTimeMs)
-          ? Math.max(newBeat + 1, snapToMetronomeGrid(Math.round(timeToBeat(n.endTimeMs / 1000))))
+          ? Math.max(newBeat + 1, snapBeatValue(Math.round(timeToBeat(n.endTimeMs / 1000))))
           : n.endBeat;
         return { ...n, startBeat: newBeat, endBeat: newEndBeat };
       }
@@ -1315,7 +1315,6 @@
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
   let isRegeneratingCleaned = false; // blocking modal while regenerating
-  let isRecalculating = false; // true while BPM/grid recalc runs — blocks canvas input
   $: uiBusy = isSaving || isRegeneratingCleaned || segRecUploading || editedAudioLoading || waveformLoading;
 
   // Vocal trace (simulated mic from vocal audio file)
@@ -1900,23 +1899,6 @@
     draw();
   }
 
-  /**
-   * Snap a beat to the nearest metronome beat-unit grid line when active,
-   * otherwise fall back to snapBeatValue.
-   */
-  function snapToMetronomeGrid(beat) {
-    if (
-      metronomeEnabled &&
-      metronomeManualDownbeatAnchorBeat !== null &&
-      metronomeManualBeatUnitInterval > 0
-    ) {
-      const anchor = metronomeManualDownbeatAnchorBeat;
-      const iv = metronomeManualBeatUnitInterval;
-      return anchor + Math.round((beat - anchor) / iv) * iv;
-    }
-    return snapBeatValue(beat);
-  }
-
   /** Convert a ms offset to a pixel offset at the current zoom/bpm */
   function msToPixels(ms) {
     // 1 beat = zoom pixels, 1 beat = 15000/bpm ms
@@ -1987,10 +1969,6 @@
 
   /** Called when only BPM changes — snaps GAP to nearest beat first, then requantizes. */
   function handleBpmChange() {
-    if (isRecalculating) return;
-    isRecalculating = true;
-    if (canvasEl) canvasEl.style.cursor = 'wait';
-    try {
     // Clear undo/redo history — old snapshots reference beat positions at the previous BPM
     // and would produce corrupted notes if restored after a BPM change.
     undoStack = [];
@@ -2014,10 +1992,6 @@
     snapGapToGrid();
     handleBpmGapChange(true, previousTimingRef);
     markUnsaved();
-    } finally {
-      isRecalculating = false;
-      if (canvasEl) canvasEl.style.cursor = '';
-    }
   }
 
   function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
@@ -3036,7 +3010,6 @@
 
   // ──── Interaction ────────────────────────────
   function handleMouseDown(event) {
-    if (isRecalculating) return;
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
@@ -3864,19 +3837,10 @@
       downbeatHandleHovered = false;
       if (canvasEl) canvasEl.style.cursor = '';
       // Commit: recalculate metronome intervals from the new anchor beat
-      isRecalculating = true;
-      if (canvasEl) canvasEl.style.cursor = 'wait';
-      try {
-        recalcMetronomeFromControls('handle-drag');
-        resyncBreaksToGrid();
-        resyncFlagsToGrid();
-        markUnsaved();
-        lastMetronomeBeat = -1;
-        console.log(`[DownbeatHandle] Committed anchor=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`);
-      } finally {
-        isRecalculating = false;
-        if (canvasEl) canvasEl.style.cursor = '';
-      }
+      recalcMetronomeFromControls('handle-drag');
+      markUnsaved();
+      lastMetronomeBeat = -1;
+      console.log(`[DownbeatHandle] Committed anchor=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`);
       draw();
       return;
     }
