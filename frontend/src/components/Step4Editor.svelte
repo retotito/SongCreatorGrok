@@ -1986,7 +1986,24 @@
   }
 
   /** Called when only BPM changes — requantizes all beat-positioned items. */
-  function handleBpmChange() {
+  async function handleBpmChange() {
+    // Guard: reject BPM below 100 (too coarse for useful grid)
+    if (bpm < 100) {
+      await showAlert(`BPM ${bpm} is too low (minimum is 100).\n\nUltrastar BPM is 4× the musical BPM — a musical tempo of 120 BPM = Ultrastar 480.`, { title: 'BPM Too Low' });
+      bpm = previousBpm > 0 ? previousBpm : 480;
+      return;
+    }
+    // Guard: warn if BPM is between 100–199 (unusual, likely a mistake)
+    if (bpm < 200) {
+      const ok = await showConfirm(
+        `BPM ${bpm} is very low (musical tempo ≈ ${Math.round(bpm / 4)} BPM).\n\nRemember: Ultrastar BPM is 4× the musical BPM.\nDo you want to continue with BPM ${bpm}?`,
+        { confirmLabel: 'Continue', cancelLabel: 'Cancel' }
+      );
+      if (!ok) {
+        bpm = previousBpm > 0 ? previousBpm : 480;
+        return;
+      }
+    }
     // Clear undo/redo history — old snapshots reference beat positions at the previous BPM
     // and would produce corrupted notes if restored after a BPM change.
     undoStack = [];
@@ -9254,7 +9271,7 @@
           <!-- <button class="tool-btn sm" on:click={() => { bpm = Math.max(10, bpm - 1); handleBpmChange(); }}>−</button> -->
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.1)) * 1000) / 1000; handleBpmChange(); }}>−.1</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((Math.max(10, bpm - 0.01)) * 1000) / 1000; handleBpmChange(); }}>−.01</button> -->
-          <input type="number" class="bpm-input" class:disabled-audio={uiModalGuardActive} bind:value={bpm} on:change={() => { if (uiModalGuardActive) return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="10" max="1000" disabled={uiModalGuardActive} />
+          <input type="number" class="bpm-input" class:disabled-audio={uiModalGuardActive} bind:value={bpm} on:change={() => { if (uiModalGuardActive) return; console.log('[UI] bpm input', bpm); handleBpmChange(); }} step="0.001" min="100" max="1000" disabled={uiModalGuardActive} />
           <!-- <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.01) * 1000) / 1000; handleBpmChange(); }}>.01+</button>
           <button class="tool-btn sm nudge" on:click={() => { bpm = Math.round((bpm + 0.1) * 1000) / 1000; handleBpmChange(); }}>.1+</button> -->
           <!-- <button class="tool-btn sm" on:click={() => { bpm = bpm + 1; handleBpmChange(); }}>+</button> -->
