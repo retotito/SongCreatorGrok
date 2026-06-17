@@ -3,11 +3,24 @@
 ## Core formula
 
 ```
-newBeat = round(oldBeat * newBpm / oldBpm)
+time_ms = GAP + beat × 15000 / BPM
 ```
 
-The beat value stored in the `.txt` file (or in session storage for flags) is the **source of truth**.  
-We never convert to ms and back. We scale beats proportionally from old BPM to new BPM.
+**Beat 0 is at GAP ms.** GAP defines the origin of the beat grid.  
+The inverse (ms → beat) is:
+
+```
+beat = round((time_ms - GAP) × BPM / 15000)
+```
+
+When BPM changes, beat positions scale proportionally:
+
+```
+newBeat = round(oldBeat × newBpm / oldBpm)
+```
+
+The beat value stored in the `.txt` file is the **source of truth** for notes and breaks.  
+We scale beats directly — no conversion to ms and back.
 
 ---
 
