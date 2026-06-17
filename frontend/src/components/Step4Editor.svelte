@@ -8391,19 +8391,21 @@
   }
 
   async function computeRecordedPitchLine() {
-    // Green line: edited vocal (spliced recordings), filtered to patched segments only
+    // Green line: spliced vocal track filtered to patched segments.
+    // Always use vocalUrl (the patched vocal) — NOT the cleaned audio, which may be
+    // stale/missing after a new splice and before cleaned audio is regenerated.
     if (segRecPatched.size === 0) {
       recordedPitchFrames = [];
       draw();
       return;
     }
-    const editedUrl = getEditedAudioUrl();
-    if (!editedUrl) return;
+    const sourceUrl = vocalUrl || originalVocalUrl;
+    if (!sourceUrl) return;
     recordedPitchLoading = true;
     recordedPitchFrames = [];
     try {
-      console.log('[PitchLine] Analysing recorded patches', editedUrl);
-      const allFrames = await _detectPitchFrames(editedUrl);
+      console.log('[PitchLine] Analysing recorded patches', sourceUrl);
+      const allFrames = await _detectPitchFrames(sourceUrl);
       // Keep only frames that fall inside a patched (green) segment
       const patchedSegs = cleanupSegments.filter(s => segRecPatched.has(s.id));
       recordedPitchFrames = allFrames.filter(({ beat }) => {
