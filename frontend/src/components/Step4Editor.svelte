@@ -263,7 +263,10 @@
 
   function resyncFlagsToGrid() {
     if (!flags.length) return;
-    flags = flags.map(normalizeFlag);
+    flags = flags.map(f => {
+      const norm = normalizeFlag(f);
+      return { ...norm, beat: snapBeatValue(norm.beat) };
+    });
     saveFlags();
   }
 
@@ -1624,10 +1627,10 @@
 
     if (preserveExistingBreaks) {
       for (const b of preservedBreaks) {
-        const startBeat = Math.round(((b.startSec - gapSec) * bpm) / 15);
+        const startBeat = snapBeatValue(Math.round(((b.startSec - gapSec) * bpm) / 15));
         let endBeat = null;
         if (b.endSec !== null) {
-          endBeat = Math.max(startBeat + 1, Math.round(((b.endSec - gapSec) * bpm) / 15));
+          endBeat = Math.max(startBeat + 1, snapBeatValue(Math.round(((b.endSec - gapSec) * bpm) / 15)));
         }
         newNotes.push({ id: id++, type: 'break', startBeat, endBeat });
       }
@@ -2342,16 +2345,6 @@
     }
 
     // ── Downbeat handle strip (top DOWNBEAT_HANDLE_H px) ──
-    // Dark background strip
-    ctx.fillStyle = '#111827';
-    ctx.fillRect(0, 0, w, DOWNBEAT_HANDLE_H);
-    // Bottom border of the strip
-    ctx.strokeStyle = '#2a3040';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, DOWNBEAT_HANDLE_H);
-    ctx.lineTo(w, DOWNBEAT_HANDLE_H);
-    ctx.stroke();
     // Draw repeating diamonds at each downbeat position (only when metronome enabled + downbeat set)
     if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null) {
       const anchorBeat = metronomeManualDownbeatAnchorBeat;
@@ -2399,10 +2392,6 @@
         ctx.lineTo(x, pianoH);
         ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle = color;
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(label, x, 12);
         ctx.restore();
       };
       drawDownbeatGuide(metronomeDownbeat1Beat, 'DB1', '#7dd3fc');
@@ -11341,7 +11330,7 @@
 
   .wave-height-overlay {
     position: absolute;
-    top: 15px;
+    top: 20px;
     right: 10px;
     pointer-events: all;
     cursor: pointer;
