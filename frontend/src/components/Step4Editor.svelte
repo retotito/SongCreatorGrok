@@ -294,14 +294,18 @@
     // Notes (only when rawTimings absent — requantizeFromMs handles them otherwise)
     if (!rawTimings || rawTimings.length === 0) {
       const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
+      console.log(`[resync] notes: srcBpm=${srcBpm} newBpm=${bpm} gapMs=${gapMs} prevRef=${JSON.stringify(previousTimingRef)}`);
       notes = notes.map(n => {
         if (n.type === 'break') return n;
-        if (!Number.isFinite(n.timeMs)) return n;
+        if (!Number.isFinite(n.timeMs)) { console.warn(`  note id=${n.id} missing timeMs`); return n; }
         const endTimeMs = n.timeMs + n.duration * 15000 / srcBpm;
         const newStart = msToBeat(n.timeMs);
         const newEnd = Math.max(newStart + 1, msToBeat(endTimeMs));
+        console.log(`  note id=${n.id} timeMs=${n.timeMs} ${n.startBeat}→${newStart}`);
         return { ...n, startBeat: newStart, duration: newEnd - newStart };
       }).sort((a, b) => a.startBeat - b.startBeat);
+    } else {
+      console.log(`[resync] notes SKIPPED rawTimings=${rawTimings.length}`);
     }
 
     // Breaks
@@ -3960,6 +3964,11 @@
       console.log('[Mouse] mouseUp, drag ended');
       // Sync manual note positions back into rawTimings so requantize preserves them
       syncRawTimingsFromNotes();
+      // Keep timeMs in sync with current beat positions so BPM recalc uses the correct audio position
+      notes = notes.map(n => {
+        if (n.type === 'break') return n;
+        return { ...n, timeMs: Math.max(0, gapMs + n.startBeat * 15000 / bpm) };
+      });
     }
     stopDragOsc();
     isDragging = false;
@@ -6219,7 +6228,7 @@
               pushUndo();
               notes = notes.map(n => {
                 if (n.id === pair.left.id) return { ...n, duration: newLeftDur };
-                if (n.id === pair.right.id) return { ...n, startBeat: newRightStart, duration: newRightDur };
+                if (n.id === pair.right.id) return { ...n, startBeat: newRightStart, duration: newRightDur, timeMs: Math.max(0, gapMs + newRightStart * 15000 / bpm) };
                 return n;
               });
               markUnsaved();
@@ -6267,7 +6276,7 @@
           const newDur = note.duration - (newStart - note.startBeat);
           if (newDur !== note.duration) {
             pushUndo();
-            notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
+            notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur, timeMs: Math.max(0, gapMs + newStart * 15000 / bpm) } : n);
             const updated = notes.find(n => n.id === selectedNote);
             if (updated) ensureBeatVisible(updated.startBeat, 8);
             markUnsaved();
@@ -6292,7 +6301,10 @@
         pushUndo();
         notes = notes.map(n => {
           if (!ids.has(n.id) || n.type === 'break') return n;
-          if (isHorizontalMove) return { ...n, startBeat: n.startBeat + moveDelta };
+          if (isHorizontalMove) {
+            const newStart = n.startBeat + moveDelta;
+            return { ...n, startBeat: newStart, timeMs: Math.max(0, gapMs + newStart * 15000 / bpm) };
+          }
           if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + pitchStep };
           if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - pitchStep };
           return n;
