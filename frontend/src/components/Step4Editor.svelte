@@ -281,8 +281,11 @@
   // msToBeat(ms)  = Math.round((ms - gapMs) * bpm / 15000)  — rounded for discrete positions
   // msToFracBeat  = (ms - gapMs) * bpm / 15000              — unrounded for continuous positions
 
+  // See docs/RECALCULATION.md for the design rules.
   function resyncAllToGrid(previousTimingRef = null) {
-    // GAP — snap to nearest beat boundary relative to downbeat
+    const oldBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
+
+    // 1. GAP — snap to nearest beat boundary relative to downbeat
     if (Number.isFinite(downbeatOffsetMs)) {
       const beatDur = 15000 / bpm;
       const beatsFromDownbeat = (gapMs - downbeatOffsetMs) / beatDur;
@@ -291,40 +294,30 @@
       gapMs = Math.abs(gapMs - lo) <= Math.abs(gapMs - hi) ? Math.round(lo) : Math.round(hi);
     }
 
-    // Notes (only when rawTimings absent — requantizeFromMs handles them otherwise)
+    // 2 & 3. Notes and Breaks — proportional beat scaling: newBeat = round(oldBeat * newBpm / oldBpm)
+    // Only when rawTimings absent; otherwise requantizeFromMs handles notes/breaks.
     if (!rawTimings || rawTimings.length === 0) {
-      const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
-      console.log(`[resync] notes: srcBpm=${srcBpm} newBpm=${bpm} gapMs=${gapMs} prevRef=${JSON.stringify(previousTimingRef)}`);
       notes = notes.map(n => {
-        if (n.type === 'break') return n;
-        if (!Number.isFinite(n.timeMs)) { console.warn(`  note id=${n.id} missing timeMs`); return n; }
-        const endTimeMs = n.timeMs + n.duration * 15000 / srcBpm;
-        const newStart = msToBeat(n.timeMs);
-        const newEnd = Math.max(newStart + 1, msToBeat(endTimeMs));
-        console.log(`  note id=${n.id} timeMs=${n.timeMs} ${n.startBeat}→${newStart}`);
-        return { ...n, startBeat: newStart, duration: newEnd - newStart };
+        if (n.type === 'break') {
+          const newBeat    = snapBeatValue(Math.round(n.startBeat * bpm / oldBpm));
+          const newEndBeat = n.endBeat != null
+            ? Math.max(newBeat + 1, snapBeatValue(Math.round(n.endBeat * bpm / oldBpm)))
+            : null;
+          return { ...n, startBeat: newBeat, endBeat: newEndBeat };
+        }
+        const newStart    = Math.round(n.startBeat * bpm / oldBpm);
+        const newDuration = Math.max(1, Math.round(n.duration  * bpm / oldBpm));
+        return { ...n, startBeat: newStart, duration: newDuration };
       }).sort((a, b) => a.startBeat - b.startBeat);
-    } else {
-      console.log(`[resync] notes SKIPPED rawTimings=${rawTimings.length}`);
     }
 
-    // Breaks
-    notes = notes.map(n => {
-      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) return n;
-      const newBeat = snapBeatValue(msToBeat(n.timeMs));
-      const newEndBeat = Number.isFinite(n.endTimeMs)
-        ? Math.max(newBeat + 1, snapBeatValue(msToBeat(n.endTimeMs)))
-        : n.endBeat;
-      return { ...n, startBeat: newBeat, endBeat: newEndBeat };
-    });
-
-    // Flags
+    // 4. Flags — source of truth is flag.timeMs (audio position); recalc beat from ms
     if (flags.length) {
       flags = flags.map(normalizeFlag);
       saveFlags();
     }
 
-    // Downbeat anchor (fractional beat — same formula, not rounded)
+    // 5. Downbeat anchor — source of truth is downbeatOffsetMs (audio position)
     if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
       metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
     }
@@ -3964,11 +3957,6 @@
       console.log('[Mouse] mouseUp, drag ended');
       // Sync manual note positions back into rawTimings so requantize preserves them
       syncRawTimingsFromNotes();
-      // Keep timeMs in sync with current beat positions so BPM recalc uses the correct audio position
-      notes = notes.map(n => {
-        if (n.type === 'break') return n;
-        return { ...n, timeMs: Math.max(0, gapMs + n.startBeat * 15000 / bpm) };
-      });
     }
     stopDragOsc();
     isDragging = false;
@@ -5690,15 +5678,7 @@
   }
 
   function applyTextEditorContent() {
-    const rawParsed = parseUltrastar(textEditorContent);
-    const newNotes = rawParsed.map(n => {
-      const startMs = Math.max(0, gapMs + n.startBeat * 15000 / bpm);
-      if (n.type === 'break') {
-        const endMs = n.endBeat != null ? Math.max(0, gapMs + n.endBeat * 15000 / bpm) : null;
-        return { ...n, timeMs: startMs, endTimeMs: endMs };
-      }
-      return { ...n, timeMs: startMs };
-    });
+    const newNotes = parseUltrastar(textEditorContent);
     if (newNotes.length === 0) {
       showAlert('No valid notes found in the text. Check the format.');
       return;
@@ -6228,7 +6208,7 @@
               pushUndo();
               notes = notes.map(n => {
                 if (n.id === pair.left.id) return { ...n, duration: newLeftDur };
-                if (n.id === pair.right.id) return { ...n, startBeat: newRightStart, duration: newRightDur, timeMs: Math.max(0, gapMs + newRightStart * 15000 / bpm) };
+                if (n.id === pair.right.id) return { ...n, startBeat: newRightStart, duration: newRightDur };
                 return n;
               });
               markUnsaved();
@@ -6276,7 +6256,7 @@
           const newDur = note.duration - (newStart - note.startBeat);
           if (newDur !== note.duration) {
             pushUndo();
-            notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur, timeMs: Math.max(0, gapMs + newStart * 15000 / bpm) } : n);
+            notes = notes.map(n => n.id === selectedNote ? { ...n, startBeat: newStart, duration: newDur } : n);
             const updated = notes.find(n => n.id === selectedNote);
             if (updated) ensureBeatVisible(updated.startBeat, 8);
             markUnsaved();
@@ -6301,10 +6281,7 @@
         pushUndo();
         notes = notes.map(n => {
           if (!ids.has(n.id) || n.type === 'break') return n;
-          if (isHorizontalMove) {
-            const newStart = n.startBeat + moveDelta;
-            return { ...n, startBeat: newStart, timeMs: Math.max(0, gapMs + newStart * 15000 / bpm) };
-          }
+          if (isHorizontalMove) return { ...n, startBeat: n.startBeat + moveDelta };
           if (e.code === 'ArrowUp')    return { ...n, pitch: n.pitch + pitchStep };
           if (e.code === 'ArrowDown')  return { ...n, pitch: n.pitch - pitchStep };
           return n;
@@ -8708,15 +8685,6 @@
       console.log('[Step4] Editor data:', { bpm: data.bpm, gap: data.gap_ms, duration: data.audio_duration, contentLen: data.ultrastar_content?.length });
       
       notes = parseUltrastar(data.ultrastar_content);
-      // Stamp timeMs on all notes using loaded BPM/GAP so resyncAllToGrid can recalc on any BPM change
-      notes = notes.map(n => {
-        const startMs = Math.max(0, data.gap_ms + n.startBeat * 15000 / data.bpm);
-        if (n.type === 'break') {
-          const endMs = n.endBeat != null ? Math.max(0, data.gap_ms + n.endBeat * 15000 / data.bpm) : null;
-          return { ...n, timeMs: startMs, endTimeMs: endMs };
-        }
-        return { ...n, timeMs: startMs };
-      });
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
       // Parse extra headers from ultrastar content
