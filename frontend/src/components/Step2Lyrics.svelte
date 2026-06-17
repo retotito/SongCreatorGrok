@@ -99,8 +99,10 @@
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar } from '../services/api.js';
 
   async function syncMetadata() {
-    if (!$sessionId || !$lyricsData.syllableCount) return; // only if a result exists
+    if (!$sessionId) return;
     if (!artist.trim() || !title.trim()) return;
+    // Always persist artist/title to the store so navigation doesn't lose them
+    lyricsData.update(s => ({ ...s, artist: artist.trim(), title: title.trim() }));
     try {
       await updateMetadata($sessionId, artist.trim(), title.trim());
     } catch (e) {
