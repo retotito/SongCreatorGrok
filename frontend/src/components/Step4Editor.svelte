@@ -280,15 +280,19 @@
   function resyncAllToGrid(previousTimingRef = null) {
     // Recalc regular notes only when rawTimings is absent (txt-loaded songs).
     // When rawTimings is present, requantizeFromMs already handles notes.
-    if ((!rawTimings || rawTimings.length === 0) && previousTimingRef) {
-      const prevBpm = Math.max(1, Number(previousTimingRef.bpm) || bpm);
-      const prevGapMs = Number.isFinite(previousTimingRef.gapMs) ? previousTimingRef.gapMs : gapMs;
+    if (!rawTimings || rawTimings.length === 0) {
       notes = notes.map(n => {
         if (n.type === 'break') return n; // breaks handled below
-        const noteTimeMs = prevGapMs + n.startBeat * 15000 / prevBpm;
-        const noteEndTimeMs = prevGapMs + (n.startBeat + n.duration) * 15000 / prevBpm;
-        const newStart = msToBeat(noteTimeMs);
-        const newEnd = Math.max(newStart + 1, msToBeat(noteEndTimeMs));
+        // Use stored timeMs (stamped at load or after each recalc) for drift-free recalc
+        const srcTimeMs = Number.isFinite(n.timeMs) ? n.timeMs
+          : (previousTimingRef ? Math.max(0, (Number.isFinite(previousTimingRef.gapMs) ? previousTimingRef.gapMs : gapMs) + n.startBeat * 15000 / Math.max(1, Number(previousTimingRef?.bpm) || bpm)) : null);
+        if (!Number.isFinite(srcTimeMs)) return n;
+        // Preserve note duration in ms using the bpm before this change
+        const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
+        const srcEndTimeMs = srcTimeMs + n.duration * 15000 / srcBpm;
+        const newStart = msToBeat(srcTimeMs);
+        const newEnd = Math.max(newStart + 1, msToBeat(srcEndTimeMs));
+        // Keep timeMs in sync so the next BPM change also recalcs correctly
         return { ...n, startBeat: newStart, duration: newEnd - newStart };
       });
     }
@@ -5666,10 +5670,12 @@
   function applyTextEditorContent() {
     const rawParsed = parseUltrastar(textEditorContent);
     const newNotes = rawParsed.map(n => {
-      if (n.type !== 'break') return n;
       const startMs = Math.max(0, gapMs + n.startBeat * 15000 / bpm);
-      const endMs = n.endBeat != null ? Math.max(0, gapMs + n.endBeat * 15000 / bpm) : null;
-      return { ...n, timeMs: startMs, endTimeMs: endMs };
+      if (n.type === 'break') {
+        const endMs = n.endBeat != null ? Math.max(0, gapMs + n.endBeat * 15000 / bpm) : null;
+        return { ...n, timeMs: startMs, endTimeMs: endMs };
+      }
+      return { ...n, timeMs: startMs };
     });
     if (newNotes.length === 0) {
       showAlert('No valid notes found in the text. Check the format.');
@@ -8677,12 +8683,14 @@
       console.log('[Step4] Editor data:', { bpm: data.bpm, gap: data.gap_ms, duration: data.audio_duration, contentLen: data.ultrastar_content?.length });
       
       notes = parseUltrastar(data.ultrastar_content);
-      // Stamp timeMs on breaks using loaded BPM/GAP so resyncAllToGrid can recalc them later
+      // Stamp timeMs on all notes using loaded BPM/GAP so resyncAllToGrid can recalc on any BPM change
       notes = notes.map(n => {
-        if (n.type !== 'break') return n;
         const startMs = Math.max(0, data.gap_ms + n.startBeat * 15000 / data.bpm);
-        const endMs = n.endBeat != null ? Math.max(0, data.gap_ms + n.endBeat * 15000 / data.bpm) : null;
-        return { ...n, timeMs: startMs, endTimeMs: endMs };
+        if (n.type === 'break') {
+          const endMs = n.endBeat != null ? Math.max(0, data.gap_ms + n.endBeat * 15000 / data.bpm) : null;
+          return { ...n, timeMs: startMs, endTimeMs: endMs };
+        }
+        return { ...n, timeMs: startMs };
       });
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
