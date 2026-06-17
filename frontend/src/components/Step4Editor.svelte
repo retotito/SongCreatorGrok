@@ -27,6 +27,7 @@
   let rawTimings = [];   // syllable_timings from backend (start/end in seconds)
   let pitchMap = [];     // midi pitch per syllable (extracted from initial Ultrastar parse)
   let initialBpm = 0;    // original detected BPM
+  let previousBpm = 0;   // BPM before the last user change (for break re-quantization)
   let initialGap = 0;    // original detected GAP
   let bpmChanged = false; // track if user modified BPM/GAP
 
@@ -1965,8 +1966,9 @@
     clearMicTrail();
     const previousTimingRef = {
       gapMs,
-      bpm: Number(rawTimings?.[0]?.syncedBpm) || bpm,
+      bpm: previousBpm > 0 ? previousBpm : (Number(rawTimings?.[0]?.syncedBpm) || bpm),
     };
+    previousBpm = bpm;
     snapGapToGrid();
     handleBpmGapChange(true, previousTimingRef);
     markUnsaved();
@@ -8709,6 +8711,7 @@
 
       // Store initial values and raw timings for BPM re-quantization
       initialBpm = data.bpm;
+      previousBpm = data.bpm;
       initialGap = data.gap_ms;
       bpmChanged = false;
       rawTimings = data.syllable_timings || [];
