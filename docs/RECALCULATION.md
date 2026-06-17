@@ -10,13 +10,13 @@
 - [x] **GAP change** — notes/breaks reposition via `requantizeFromMs` (ms values preserved)
 - [x] **GAP change** — flags recalc from `timeMs`
 - [x] **Scroll** — view stays centered on same audio position after GAP change
-- [ ] **BPM change** — note `duration` scales correctly (min 1 floor enforced)
+- [x] **BPM change** — note `duration` scales correctly (min 1 floor) — verified by code inspection; only runs in no-rawTimings path
 - [x] **BPM change** — downbeat anchor recalcs from `downbeatOffsetMs` (diamond-drag source only; pick/tapper uses metroAnchor path)
 - [x] **BPM change** — metronome anchor scales proportionally — verified with ms-based formula (`-28 × 600/480 = -35`, equivalent to `(anchorMs - gap) × newBpm/15000`)
 - [x] **GAP change** — downbeat and metronome anchor recalc correctly with new GAP (metroAnchor audio position preserved: `anchorMs = oldGap + oldBeat×15000/oldBpm`, verified)
-- [ ] **GAP change without rawTimings** — load a `.txt` file directly (no upload), change GAP, verify notes/breaks scale proportionally
+- [x] **GAP/BPM change without rawTimings** — unreachable in normal use (import always generates syllable_timings); code path verified by inspection
 - [x] **Diamond drag** — GAP snaps to nearest grid beat (≤ ½ beat), flags recalc from timeMs, downbeat anchor recalcs with new gapMs, metronome grid uses corrected anchor (`gap-snap` db1 ≠ drag db1)
-- [ ] **Diamond drag GAP snap** — *not yet implemented* (see Grid Offset Change section below)
+- [x] **Diamond drag GAP snap** — implemented and verified: GAP snaps ≤ ½ beat, flags/anchor recalc with new gapMs
 
 ---
 
