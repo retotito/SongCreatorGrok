@@ -1,5 +1,25 @@
 # BPM / GAP Change — Recalculation Rules
 
+---
+
+## Test Checklist
+
+- [x] **BPM change** — notes/breaks proportional scale (verified with 218-note song)
+- [x] **BPM change** — flags recalc from `timeMs`
+- [x] **BPM change** — GAP stays fixed
+- [x] **GAP change** — notes/breaks reposition via `requantizeFromMs` (ms values preserved)
+- [x] **GAP change** — flags recalc from `timeMs`
+- [x] **Scroll** — view stays centered on same audio position after GAP change
+- [ ] **BPM change** — note `duration` scales correctly (min 1 floor enforced)
+- [x] **BPM change** — downbeat anchor recalcs from `downbeatOffsetMs` (diamond-drag source only; pick/tapper uses metroAnchor path)
+- [x] **BPM change** — metronome anchor scales proportionally — verified with ms-based formula (`-28 × 600/480 = -35`, equivalent to `(anchorMs - gap) × newBpm/15000`)
+- [x] **GAP change** — downbeat and metronome anchor recalc correctly with new GAP (metroAnchor audio position preserved: `anchorMs = oldGap + oldBeat×15000/oldBpm`, verified)
+- [ ] **GAP change without rawTimings** — load a `.txt` file directly (no upload), change GAP, verify notes/breaks scale proportionally
+- [x] **Diamond drag** — GAP snaps to nearest grid beat (≤ ½ beat), flags recalc from timeMs, downbeat anchor recalcs with new gapMs, metronome grid uses corrected anchor (`gap-snap` db1 ≠ drag db1)
+- [ ] **Diamond drag GAP snap** — *not yet implemented* (see Grid Offset Change section below)
+
+---
+
 ## Core formula
 
 ```
@@ -55,12 +75,20 @@ We scale beats directly — no conversion to ms and back.
   GAP only changes when the user explicitly edits the GAP field.
 
 ### Metronome anchor (`#METRONOMEANCHOR`)
-- Source of truth: beat (stored in `.txt` as beat)
-- On BPM change:
+- Source of truth: **audio time** (derived from beat + old GAP + old BPM at the moment of change)
+- On BPM or GAP change:
   ```
-  newBeat = oldBeat × newBpm / oldBpm
+  anchorTimeMs = oldGapMs + oldBeat × 15000 / oldBpm
+  newBeat = (anchorTimeMs - newGapMs) × newBpm / 15000
   ```
-  (no rounding — fractional beat is fine for the metronome)
+  When only BPM changes this simplifies to `oldBeat × newBpm / oldBpm`.  
+  When only GAP changes it recalculates from the audio position (preserving alignment with the song).
+
+### Downbeat offset (`#DOWNBEATOFFSET`)
+- Source of truth: `downbeatOffsetMs` (ms — audio position set by diamond drag)
+- On BPM change: recalc beat from ms: `(downbeatOffsetMs - gapMs) × newBpm / 15000`
+- **Only applies when the anchor was set via diamond drag** (`metronomeDownbeat1Beat === null`).
+  When set via pick/tapper tool, `metronomeDownbeat1Beat` is the source of truth and step 6 handles it.
 
 ---
 

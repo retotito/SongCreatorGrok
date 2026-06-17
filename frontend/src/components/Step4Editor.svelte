@@ -307,14 +307,23 @@
     // 4. Flags — source of truth is flag.timeMs (audio position); recalc beat from ms
     if (flags.length) { flags = flags.map(normalizeFlag); saveFlags(); }
 
-    // 5. Downbeat anchor — source of truth is downbeatOffsetMs (audio position)
-    if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
+    // 5. Downbeat anchor — source of truth is downbeatOffsetMs (audio position), but only
+    //    when the metronome anchor was set via diamond drag (not via pick/tapper tool).
+    //    If metronomeDownbeat1Beat is set, step 6 handles it instead.
+    if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0 && metronomeDownbeat1Beat === null) {
+      const oldAnchorBeat = metronomeManualDownbeatAnchorBeat;
       metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
+      console.log(`[resync] downbeat: offsetMs=${downbeatOffsetMs} gapMs=${gapMs} bpm=${bpm} → anchorBeat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)} (was ${oldAnchorBeat?.toFixed(3)})`);
     }
-    // 6. Metronome anchor beat — scales proportionally with BPM (beat is source of truth)
+    // 6. Metronome anchor beat — preserve audio position: compute timeMs from old state, recalc beat with new state.
+    //    This handles both BPM-only (simplifies to oldBeat × newBpm / oldBpm) and GAP-only changes.
     if (metronomeDownbeat1Beat !== null && previousTimingRef) {
       const oldBpmForMetro = Math.max(1, Number(previousTimingRef.bpm) || bpm);
-      metronomeDownbeat1Beat = metronomeDownbeat1Beat * bpm / oldBpmForMetro;
+      const oldGapForMetro = previousTimingRef.gapMs ?? gapMs;
+      const anchorTimeMs = oldGapForMetro + metronomeDownbeat1Beat * 15000 / oldBpmForMetro;
+      const oldMetroBeat = metronomeDownbeat1Beat;
+      metronomeDownbeat1Beat = (anchorTimeMs - gapMs) * bpm / 15000;
+      console.log(`[resync] metroAnchor: ${oldMetroBeat?.toFixed(3)} (${anchorTimeMs.toFixed(1)}ms) → ${metronomeDownbeat1Beat?.toFixed(3)}`);
       recalcMetronomeFromControls('bpm-change');
     }
   }
@@ -2029,6 +2038,19 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs(bpmActuallyChanged, previousTimingRef);
+
+    // Debug log before resync so we can verify positions
+    if (!bpmActuallyChanged) {
+      const regularNotes = notes.filter(n => n.type !== 'break');
+      const breaks = notes.filter(n => n.type === 'break');
+      const oldGap = previousTimingRef?.gapMs ?? gapMs;
+      console.log(`[GAP change] oldGap=${oldGap}ms newGap=${gapMs}ms bpm=${bpm} | notes=${regularNotes.length} breaks=${breaks.length} flags=${flags.length}`);
+      regularNotes.slice(0, 50).forEach((n, i) => console.log(`  note[${i}] "${n.syllable}" beat=${n.startBeat} → ms=${(gapMs + n.startBeat * 15000 / bpm).toFixed(1)}`));
+      if (regularNotes.length > 50) console.log(`  ... (${regularNotes.length - 50} more notes)`);
+      breaks.forEach(b => console.log(`  break beat=${b.startBeat} → ms=${(gapMs + b.startBeat * 15000 / bpm).toFixed(1)}`));
+      flags.forEach(f => console.log(`  flag timeMs=${f.timeMs?.toFixed(1)} beat=${f.beat} → newBeat=${Math.round((f.timeMs - gapMs) * bpm / 15000)}`));
+    }
+
     resyncAllToGrid(previousTimingRef);
   }
 
@@ -3138,11 +3160,16 @@
       const newGapSec = beatToTime(setGapHoverBeat);
       const newGapMs = Math.round(newGapSec * 1000);
       console.log(`[SetGAP] Setting GAP to ${newGapMs}ms (beat ${setGapHoverBeat} → time ${newGapSec.toFixed(3)}s)`);
+      // Save center time in ms so we can restore the scroll position after recalc
+      const centerTimeMs = beatToTime(scrollX / zoom + canvasW / (2 * zoom)) * 1000;
       pushUndo();
       const previousGapMs = gapMs;
       gapMs = newGapMs;
       cancelSetGapMode();
       handleBpmGapChange(false, { gapMs: previousGapMs, bpm });
+      // Restore scroll so the same audio position stays centered
+      const newCenterBeat = Math.round((centerTimeMs - gapMs) * bpm / 15000);
+      scrollX = clampScrollX(newCenterBeat * zoom - canvasW / 2);
       markUnsaved();
       return;
     }
@@ -3856,16 +3883,47 @@
       return;
     }
 
-    // Finish downbeat handle drag — commit: recalc metronome with new anchor
+    // Finish downbeat handle drag — commit: recalc metronome with new anchor, then snap GAP to grid
     if (downbeatHandleDragging) {
       downbeatHandleDragging = false;
       downbeatHandleHovered = false;
       if (canvasEl) canvasEl.style.cursor = '';
-      // Commit: recalculate metronome intervals from the new anchor beat
       recalcMetronomeFromControls('handle-drag');
+
+      // Snap GAP to nearest beat on the new grid (RECALCULATION.md: Grid Offset Change)
+      // downbeatOffsetMs is the new beat-1 position; GAP must land on a grid beat
+      const beatDur = 15000 / bpm;
+      const offsetMs = gapMs + metronomeManualDownbeatAnchorBeat * beatDur;
+      downbeatOffsetMs = offsetMs;
+      const oldGapMs = gapMs;
+      const snappedGapMs = Math.round(offsetMs + Math.round((gapMs - offsetMs) / beatDur) * beatDur);
+      const beatsBefore = Math.floor((gapMs - offsetMs) / beatDur);
+      const gridBefore = Math.round(offsetMs + beatsBefore * beatDur);
+      const gridAfter = Math.round(offsetMs + (beatsBefore + 1) * beatDur);
+      console.log(`[DownbeatHandle] Committed anchor=${metronomeManualDownbeatAnchorBeat?.toFixed(3)} offsetMs=${offsetMs.toFixed(1)}`);
+      console.log(`[DownbeatHandle] GAP snap: gapMs=${oldGapMs} | grid[${beatsBefore}]=${gridBefore}ms  GAP  grid[${beatsBefore+1}]=${gridAfter}ms | beatDur=${beatDur.toFixed(1)}ms → snapped to ${snappedGapMs}ms (shift=${snappedGapMs - oldGapMs}ms)`);
+      gapMs = snappedGapMs;
+
+      // Step 4: recalc flag beats from timeMs with new gapMs
+      if (flags.length) {
+        flags = flags.map(f => {
+          const oldBeat = f.beat;
+          const newBeat = Math.round((f.timeMs - gapMs) * bpm / 15000);
+          console.log(`  flag timeMs=${f.timeMs?.toFixed(1)} oldBeat=${oldBeat} → newBeat=${newBeat}`);
+          return { ...f, beat: newBeat };
+        });
+        saveFlags();
+      }
+
+      // Step 5: recalc downbeat anchor beat with new gapMs, update both anchor vars
+      const snappedAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
+      metronomeManualDownbeatAnchorBeat = snappedAnchorBeat;
+      if (metronomeDownbeat1Beat !== null) metronomeDownbeat1Beat = snappedAnchorBeat;
+      console.log(`[DownbeatHandle] Downbeat anchor recalc: (${downbeatOffsetMs.toFixed(1)} - ${gapMs}) × ${bpm}/15000 = ${snappedAnchorBeat?.toFixed(3)}`);
+      recalcMetronomeFromControls('gap-snap');
+
       markUnsaved();
       lastMetronomeBeat = -1;
-      console.log(`[DownbeatHandle] Committed anchor=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`);
       draw();
       return;
     }
