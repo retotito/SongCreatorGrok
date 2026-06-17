@@ -64,17 +64,15 @@
         hasOriginal,
         vocalUrl: hasVocals ? getAudioUrl(data.session_id, 'vocals') : (hasOriginal ? getAudioUrl(data.session_id, 'original') : null),
       });
-      if (data.has_lyrics) {
-        lyricsData.set({
-          text: data.lyrics || '',
-          artist: data.artist || '',
-          title: data.title || '',
-          language: data.language || 'en',
-          syllableCount: data.syllable_count || 0,
-          lineCount: data.line_count || 0,
-          preview: [],
-        });
-      }
+      lyricsData.set({
+        text: data.lyrics || '',
+        artist: data.artist || '',
+        title: data.title || '',
+        language: data.language || 'en',
+        syllableCount: data.syllable_count || 0,
+        lineCount: data.line_count || 0,
+        preview: [],
+      });
       if (data.has_result) {
         generationResult.set(data.result || {});
         currentStep.set(4);
