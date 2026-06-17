@@ -48,7 +48,7 @@
   let scrollX = 0;
   let zoom = 20;          // pixels per beat (default zoomed in)
   // viewHeight grows with waveformHeight so the note grid stays a fixed size
-  $: viewHeight = 533 + (showWaveform ? waveformHeight : 0);
+  $: viewHeight = 533 + DOWNBEAT_HANDLE_H + (showWaveform ? waveformHeight : 0);
   let noteHeight = 11;
 
   // Pitch range (MIDI)
@@ -229,13 +229,12 @@
   let setGapMode = false;       // user is picking a new GAP position
   let setGapHoverBeat = null;   // beat of the grid line currently hovered
 
-  // Grid Align mode (Ctrl/Cmd+G)
-  let gridAlignMode = false;       // user is sliding the grid
-  let gridAlignOffsetMs = 0;       // accumulated offset in ms (preview only)
-  let gridAlignOriginalGapMs = 0;  // gapMs before entering mode (for Esc revert)
-  let gridAlignDragging = false;   // currently dragging
-  let gridAlignDragStartX = 0;     // mouse X at drag start
-  let gridAlignDragStartOffsetMs = 0; // offset at drag start
+  // Downbeat handle drag (replaces Grid Align mode)
+  const DOWNBEAT_HANDLE_H = 14; // px height of the top strip reserved for diamonds
+  let downbeatHandleDragging = false;
+  let downbeatHandleDragStartX = 0;
+  let downbeatHandleDragStartAnchorBeat = 0;
+  let downbeatHandleHovered = false; // cursor is in the top strip over a diamond
 
   // Drag pitch preview (oscillator while dragging a note)
   let dragOsc = null;
@@ -1061,8 +1060,8 @@
       showToast('Pause playback before setting downbeats');
       return;
     }
-    if (setGapMode || gridAlignMode) {
-      showToast('Exit GAP/Grid align mode first');
+    if (setGapMode) {
+      showToast('Exit GAP mode first');
       return;
     }
     metronomePickTarget = target;
@@ -1441,7 +1440,7 @@
 
   // Waveform top offset (only when waveform is visible)
   function waveTop() {
-    return showWaveform ? waveformHeight : 0;
+    return DOWNBEAT_HANDLE_H + (showWaveform ? waveformHeight : 0);
   }
 
   // Pitch to Y pixel (piano area only, excluding time axis at bottom and waveform at top)
@@ -2296,10 +2295,8 @@
     // Grid lines (beats) — musical subdivisions
     // BEATS_PER_QUARTER = 8 ultrastar beats per real quarter note
     // Quarter note lines (thickest), 8th note lines (medium), fine lines (thinnest)
-    // In gridAlignMode, grid lines are offset by gridAlignOffsetMs (preview shift)
-    const gridOffsetPx = gridAlignMode ? msToPixels(gridAlignOffsetMs) : 0;
-    const startBeat = xToBeat(0 - gridOffsetPx);
-    const endBeat = xToBeat(w - gridOffsetPx);
+    const startBeat = xToBeat(0);
+    const endBeat = xToBeat(w);
     const beatsPerMeasure = Math.max(0.0001, getMetronomeDownbeatInterval());
     const beatsPerBeatUnit = Math.max(0.0001, getMetronomeBeatUnitInterval());
     const beatsPerSubUnit = Math.max(0.0001, beatsPerBeatUnit / 2);
@@ -2391,6 +2388,49 @@
         // New GAP = time of this grid line (since this line becomes beat 0)
         const newGapMs = Math.round(hoverTimeSec * 1000);
         ctx.fillText(`GAP ${newGapMs}ms`, hoverX, 12);
+        ctx.restore();
+      }
+    }
+
+    // ── Downbeat handle strip (top DOWNBEAT_HANDLE_H px) ──
+    // Dark background strip
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, w, DOWNBEAT_HANDLE_H);
+    // Bottom border of the strip
+    ctx.strokeStyle = '#2a3040';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, DOWNBEAT_HANDLE_H);
+    ctx.lineTo(w, DOWNBEAT_HANDLE_H);
+    ctx.stroke();
+    // Draw repeating diamonds at each downbeat position (only when metronome enabled + downbeat set)
+    if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null) {
+      const anchorBeat = metronomeManualDownbeatAnchorBeat;
+      const interval = getMetronomeDownbeatInterval();
+      const diamondSize = 5;
+      const cy = DOWNBEAT_HANDLE_H / 2;
+      // Find first diamond in view
+      const visStart = xToBeat(0);
+      const visEnd = xToBeat(w);
+      const firstIndex = Math.floor((visStart - anchorBeat) / interval) - 1;
+      const lastIndex = Math.ceil((visEnd - anchorBeat) / interval) + 1;
+      for (let i = firstIndex; i <= lastIndex; i++) {
+        const beat = anchorBeat + i * interval;
+        const x = beatToX(beat);
+        if (x < -diamondSize || x > w + diamondSize) continue;
+        const isHovered = downbeatHandleHovered || downbeatHandleDragging;
+        ctx.save();
+        ctx.fillStyle = isHovered ? '#a78bfa' : '#6d5ff0';
+        ctx.strokeStyle = isHovered ? '#c4b5fd' : '#9b8ef8';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, cy - diamondSize);
+        ctx.lineTo(x + diamondSize, cy);
+        ctx.lineTo(x, cy + diamondSize);
+        ctx.lineTo(x - diamondSize, cy);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
         ctx.restore();
       }
     }
@@ -3080,11 +3120,11 @@
       return;
     }
 
-    // ── Grid Align mode: start drag ──
-    if (gridAlignMode) {
-      gridAlignDragging = true;
-      gridAlignDragStartX = mx;
-      gridAlignDragStartOffsetMs = gridAlignOffsetMs;
+    // ── Downbeat handle strip: start drag ──
+    if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H) {
+      downbeatHandleDragging = true;
+      downbeatHandleDragStartX = mx;
+      downbeatHandleDragStartAnchorBeat = metronomeManualDownbeatAnchorBeat;
       return;
     }
 
@@ -3482,14 +3522,28 @@
       return;
     }
 
-    // ── Grid Align mode: drag to slide grid ──
-    if (gridAlignMode) {
-      if (gridAlignDragging) {
-        const dx = mx - gridAlignDragStartX;
-        gridAlignOffsetMs = gridAlignDragStartOffsetMs + pixelsToMs(dx);
-      }
+    // ── Downbeat handle drag: live-slide all downbeat diamonds ──
+    if (downbeatHandleDragging) {
+      const dx = mx - downbeatHandleDragStartX;
+      const deltaBeat = pixelsToMs(dx) * bpm / 15000;
+      metronomeManualDownbeatAnchorBeat = downbeatHandleDragStartAnchorBeat + deltaBeat;
+      // Keep metronomeDownbeat1Beat in sync for display
+      metronomeDownbeat1Beat = metronomeManualDownbeatAnchorBeat;
+      // Also update downbeatOffsetMs so confirmGridAlign-style logic stays in sync
+      downbeatOffsetMs = gapMs + metronomeManualDownbeatAnchorBeat * 15000 / bpm;
       draw();
       return;
+    }
+
+    // ── Downbeat handle hover detection ──
+    if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H) {
+      downbeatHandleHovered = true;
+      canvasEl.style.cursor = 'ew-resize';
+      draw();
+      return;
+    } else if (downbeatHandleHovered) {
+      downbeatHandleHovered = false;
+      draw();
     }
 
     // ── Set GAP mode hover: highlight nearest grid line ──
@@ -3812,6 +3866,20 @@
     if (isDragging && selectedFlag !== null) {
       isDragging = false;
       saveFlags();
+      draw();
+      return;
+    }
+
+    // Finish downbeat handle drag — commit: recalc metronome with new anchor
+    if (downbeatHandleDragging) {
+      downbeatHandleDragging = false;
+      downbeatHandleHovered = false;
+      if (canvasEl) canvasEl.style.cursor = '';
+      // Commit: recalculate metronome intervals from the new anchor beat
+      recalcMetronomeFromControls('handle-drag');
+      markUnsaved();
+      lastMetronomeBeat = -1;
+      console.log(`[DownbeatHandle] Committed anchor=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`);
       draw();
       return;
     }
@@ -5703,15 +5771,6 @@
   function handleWheel(event) {
     event.preventDefault();
 
-    // Grid Align mode: trackpad scroll adjusts grid offset
-    if (gridAlignMode) {
-      if (Math.abs(event.deltaX) > 0.5) {
-        gridAlignOffsetMs -= pixelsToMs(event.deltaX);
-        draw();
-      }
-      return;
-    }
-    
     if (event.ctrlKey || event.metaKey) {
       // Zoom — keep the point under the cursor fixed
       const oldZoom = zoom;
@@ -6005,15 +6064,6 @@
         e.preventDefault();
         closeVibratoModal();
       }
-      return;
-    }
-
-    // ── Grid Align mode: only allow Enter (confirm), Escape (cancel), Ctrl+G (cancel) ──
-    if (gridAlignMode) {
-      if (e.code === 'Enter') { e.preventDefault(); confirmGridAlign(); return; }
-      if (e.code === 'Escape') { e.preventDefault(); cancelGridAlign(); return; }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); cancelGridAlign(); return; }
-      e.preventDefault();
       return;
     }
 
@@ -6327,22 +6377,13 @@
       toggleMetronome();
     }
 
-    // Ctrl/Cmd+B: enter Grid Align mode (B = Beat) — blocked if Set GAP is active
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
-      e.preventDefault();
-      if (!setGapMode) enterGridAlignMode();
-      return;
-    }
-
-    // Ctrl/Cmd+G: Set GAP mode — blocked if Grid Align is active
+    // Ctrl/Cmd+G: Set GAP mode
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'g') {
       e.preventDefault();
-      if (!gridAlignMode) {
-        if (setGapMode) {
-          cancelSetGapMode();
-        } else {
-          enterSetGapMode();
-        }
+      if (setGapMode) {
+        cancelSetGapMode();
+      } else {
+        enterSetGapMode();
       }
       return;
     }
@@ -9393,20 +9434,6 @@
     {/if}
   </div>
 
-  <!-- Grid Align mode overlay bar -->
-  {#if gridAlignMode}
-    <div class="gridalign-mode-bar">
-      <span class="gridalign-mode-text">
-        GRID ALIGN MODE — Drag or scroll to slide grid, Enter to confirm, Esc to cancel
-      </span>
-      <span class="gridalign-mode-offset">
-        {gridAlignOffsetMs >= 0 ? '+' : ''}{gridAlignOffsetMs.toFixed(1)}ms
-      </span>
-      <button class="gridalign-confirm-btn" on:click={confirmGridAlign}>✓ Confirm</button>
-      <button class="gridalign-cancel-btn" on:click={cancelGridAlign}>✕ Cancel</button>
-    </div>
-  {/if}
-
   <!-- BPM Tapper modal -->
   {#if tapperOpen}
     <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -9974,7 +10001,6 @@
       <span class="shortcut"><kbd>Shift+Ctrl+Z</kbd> redo</span>
       <span class="shortcut"><kbd>Ctrl+S</kbd> save</span>
       <span class="shortcut"><kbd>Ctrl+G</kbd> set GAP</span>
-      <span class="shortcut"><kbd>Ctrl+B</kbd> grid align</span>
       <span class="shortcut"><kbd>9</kbd> MIDI · <kbd>0</kbd> metronome</span>
     </div>
   </div>
