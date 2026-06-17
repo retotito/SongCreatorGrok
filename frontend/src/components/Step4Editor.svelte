@@ -1986,15 +1986,15 @@
   }
 
   /** Called when only BPM changes — requantizes all beat-positioned items. */
-  async function handleBpmChange() {
-    // Guard: reject BPM below 100 (too coarse for useful grid)
-    if (bpm < 100) {
+  async function handleBpmChange(skipGuard = false) {
+    // Guard: reject BPM below 100
+    if (!skipGuard && bpm < 100) {
       await showAlert(`BPM ${bpm} is too low (minimum is 100).\n\nUltrastar BPM is 4× the musical BPM — a musical tempo of 120 BPM = Ultrastar 480.`, { title: 'BPM Too Low' });
       bpm = previousBpm > 0 ? previousBpm : 480;
       return;
     }
-    // Guard: warn if BPM is between 100–199 (unusual, likely a mistake)
-    if (bpm < 200) {
+    // Guard: warn if BPM is between 100–199
+    if (!skipGuard && bpm < 200) {
       const ok = await showConfirm(
         `BPM ${bpm} is very low (musical tempo ≈ ${Math.round(bpm / 4)} BPM).\n\nRemember: Ultrastar BPM is 4× the musical BPM.\nDo you want to continue with BPM ${bpm}?`,
         { confirmLabel: 'Continue', cancelLabel: 'Cancel' }
@@ -9472,7 +9472,7 @@
                     if (!ok) return;
                   }
                   bpm = multBpm;
-                  handleBpmChange();
+                  handleBpmChange(true); // true = skip low-BPM guard (already confirmed)
                   closeTapper();
                 }}>
                 <span class="tapper-mult">{mult}×</span>
