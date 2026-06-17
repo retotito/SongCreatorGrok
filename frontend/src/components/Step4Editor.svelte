@@ -1291,7 +1291,7 @@
   let segRecLyricsError = '';
   let segRecLyricsLines = [];
   let segRecLyricsHyphenated = false;
-  $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording';
+  $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording' || segRecPhase === 'armed';
 
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
@@ -9322,9 +9322,9 @@
       </div>
       <div id="audio-source-wrapper">
         <div class="audio-source-toggle" title="Audio source">
-          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
-          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0) || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
-          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording/preroll is active' : hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
+          <button class="tool-btn sm" class:active={audioSource === 'vocals'} class:disabled-audio={!hasVocalsAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasVocalsAudio ? switchAudioSource('vocals') : handleMissingAudio('vocals'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording is active' : hasVocalsAudio ? 'Original vocals (unedited)' : 'No vocals — go to Step 1'}>Vocals 🎤</button>
+          <button class="tool-btn sm" class:active={audioSource === 'edited'} class:disabled-audio={!hasVocalsAudio || (!cleanedAudioAvailable && segRecPatched.size === 0) || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; if (!hasVocalsAudio) { handleMissingAudio('vocals'); return; } if (!cleanedAudioAvailable && segRecPatched.size === 0) return; switchAudioSource('edited'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording is active' : cleanedAudioAvailable || segRecPatched.size > 0 ? (segRecPatched.size > 0 ? 'Edited vocals (with spliced recordings)' : 'Cleaned vocals (muted cleanup regions)') : 'No edits yet — add cleanup segments first'}>Edited 🎙</button>
+          <button class="tool-btn sm" class:active={audioSource === 'original'} class:disabled-audio={!hasOriginalAudio || segRecAudioSwitchLocked} disabled={segRecAudioSwitchLocked} on:click={() => { if (segRecAudioSwitchLocked) return; hasOriginalAudio ? switchAudioSource('original') : handleMissingAudio('original'); }} title={segRecAudioSwitchLocked ? 'Disabled while recording is active' : hasOriginalAudio ? 'Full mix' : 'No full mix — go to Step 1 to upload'}>Full Mix 🎵</button>
         </div>
         <div class="volume-control" title="Audio volume">
           <span class="volume-icon" on:click={toggleMuteVocal}>
