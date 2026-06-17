@@ -632,6 +632,7 @@
     closeContextMenu();
     draw();
     handleSave();
+    if (pitchLineVisible) computeRecordedPitchLine();
   }
 
   async function emptyRecordedCleanupSegment(id) {
@@ -649,6 +650,7 @@
       closeContextMenu();
       draw();
       handleSave();
+      if (pitchLineVisible) computeRecordedPitchLine();
     } catch (e) {
       console.warn('[CleanupSeg] Empty recorded segment failed:', e);
       showToast(e?.message || 'Failed to empty recorded segment');
@@ -1325,10 +1327,12 @@
   let vocalTraceNextSampleSec = 0;
 
   // Pitch line — precomputed offline pitch analysis of the full vocal file
-  let pitchLineFrames = [];       // [{beat, pitch}] for the whole song
-  let pitchLineVisible = false;   // default off
+  let pitchLineFrames = [];         // [{beat, pitch}] — original/baseline vocal (blue)
+  let recordedPitchFrames = [];     // [{beat, pitch}] — recorded patches only (green)
+  let pitchLineVisible = false;     // default off
   let pitchLineLoading = false;
-  let pitchLineSourceUrl = null;  // URL used for last computation (for cache invalidation)
+  let recordedPitchLoading = false;
+  let pitchLineSourceUrl = null;    // URL used for last computation (for cache invalidation)
 
   // Text editor modal
   let showTextEditor = false;
@@ -1999,6 +2003,7 @@
     redoStack = [];
     // Clear pitch line — its beat positions were computed at the old BPM and would be misaligned
     pitchLineFrames = [];
+    recordedPitchFrames = [];
     pitchLineVisible = false;
     pitchLineSourceUrl = null;
     // Clear vocal trace — beat positions are BPM-dependent
@@ -2593,6 +2598,21 @@
       const dotH = Math.max(2, noteHeight * 0.3);
       for (let i = 0; i < pitchLineFrames.length; i++) {
         const { beat, pitch } = pitchLineFrames[i];
+        if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
+        const x = beatToX(beat);
+        const y = pitchToY(pitch);
+        ctx.fillRect(x, y - dotH / 2, 2, dotH);
+      }
+    }
+
+    // Green pitch line — recorded patch regions
+    if (pitchLineVisible && recordedPitchFrames.length > 0) {
+      const visibleStartBeat = xToBeat(0);
+      const visibleEndBeat = xToBeat(w);
+      ctx.fillStyle = 'rgba(80, 240, 120, 0.70)';
+      const dotH = Math.max(2, noteHeight * 0.3);
+      for (let i = 0; i < recordedPitchFrames.length; i++) {
+        const { beat, pitch } = recordedPitchFrames[i];
         if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
         const x = beatToX(beat);
         const y = pitchToY(pitch);
@@ -5539,9 +5559,6 @@
     }
     // Re-load waveform for new source
     loadWaveform(url);
-    if (pitchLineVisible) {
-      computePitchLine();
-    }
     console.log('[Step4] Audio source:', source, 'at', time.toFixed(2) + 's', wasPlaying ? '(resuming)' : '(paused)');
     saveEditorUiPrefs('audio-source');
   }
@@ -7978,6 +7995,8 @@
       cleanedAudioDirty = true;
       segRecApplied = true;
       micEnabled = false;
+      // Refresh green pitch line for the newly patched segment
+      if (pitchLineVisible) computeRecordedPitchLine();
       stopMic();
       handleSave(); // triggers auto-regenerate
       if (closeAfterApply) {
@@ -8318,52 +8337,51 @@
 
   // ── Pitch line: offline full-song pitch analysis ──
 
-  function getPitchLineAnalysisUrl() {
-    if (audioSource === 'edited') return getEditedAudioUrl();
-    // "Vocals" source should use the same baseline currently used for playback.
-    return originalVocalUrl || vocalUrl;
+  // Run pitch detection on an audio URL; returns array of {beat, pitch} frames
+  async function _detectPitchFrames(audioUrl) {
+    const response = await fetch(audioUrl);
+    const arrayBuffer = await response.arrayBuffer();
+    const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const buffer = await tmpCtx.decodeAudioData(arrayBuffer);
+    tmpCtx.close();
+
+    const sampleRate = buffer.sampleRate;
+    const channelData = buffer.getChannelData(0);
+    const fftSize = 2048;
+    const hopSize = 512;
+    const detector = PitchDetector.forFloat32Array(fftSize);
+    const samples = new Float32Array(fftSize);
+    const frames = [];
+    const yieldEvery = 2000;
+
+    for (let startSample = 0; startSample + fftSize <= channelData.length; startSample += hopSize) {
+      for (let i = 0; i < fftSize; i++) samples[i] = channelData[startSample + i];
+      const timeSec = startSample / sampleRate;
+      const [frequency, clarity] = detector.findPitch(samples, sampleRate);
+      if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
+        let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+        if (midiPitch < 36) midiPitch += 12;
+        if (midiPitch > 84) midiPitch -= 12;
+        frames.push({ beat: timeToBeat(timeSec), pitch: midiPitch });
+      }
+      if (frames.length % yieldEvery === 0 && frames.length > 0) {
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    return frames;
   }
 
   async function computePitchLine() {
-    const analysisUrl = getPitchLineAnalysisUrl();
-    if (!analysisUrl) return;
+    // Blue line: always the original/baseline vocal track
+    const baseUrl = originalVocalUrl || vocalUrl;
+    if (!baseUrl) return;
     pitchLineLoading = true;
-    pitchLineSourceUrl = analysisUrl;
+    pitchLineSourceUrl = baseUrl;
     pitchLineFrames = [];
     try {
-      console.log('[PitchLine] Analysing source', { audioSource, analysisUrl });
-      const response = await fetch(analysisUrl);
-      const arrayBuffer = await response.arrayBuffer();
-      const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const buffer = await tmpCtx.decodeAudioData(arrayBuffer);
-      tmpCtx.close();
-
-      const sampleRate = buffer.sampleRate;
-      const channelData = buffer.getChannelData(0);
-      const fftSize = 2048;
-      const hopSize = 512; // ~11.6ms per frame at 44100 Hz
-      const detector = PitchDetector.forFloat32Array(fftSize);
-      const samples = new Float32Array(fftSize);
-      const frames = [];
-      const yieldEvery = 2000; // yield to UI every N frames
-
-      for (let startSample = 0; startSample + fftSize <= channelData.length; startSample += hopSize) {
-        for (let i = 0; i < fftSize; i++) samples[i] = channelData[startSample + i];
-        const timeSec = startSample / sampleRate;
-        const [frequency, clarity] = detector.findPitch(samples, sampleRate);
-        if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
-          let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
-          if (midiPitch < 36) midiPitch += 12;
-          if (midiPitch > 84) midiPitch -= 12;
-          frames.push({ beat: timeToBeat(timeSec), pitch: midiPitch });
-        }
-        // Yield periodically so UI stays responsive
-        if (frames.length % yieldEvery === 0 && frames.length > 0) {
-          await new Promise(r => setTimeout(r, 0));
-        }
-      }
-      pitchLineFrames = frames;
-      console.log(`[PitchLine] Done: ${frames.length} voiced frames`);
+      console.log('[PitchLine] Analysing baseline vocal', baseUrl);
+      pitchLineFrames = await _detectPitchFrames(baseUrl);
+      console.log(`[PitchLine] Done: ${pitchLineFrames.length} voiced frames`);
     } catch (err) {
       console.error('[PitchLine] Failed:', err);
     } finally {
@@ -8372,13 +8390,44 @@
     }
   }
 
+  async function computeRecordedPitchLine() {
+    // Green line: edited vocal (spliced recordings), filtered to patched segments only
+    if (segRecPatched.size === 0) {
+      recordedPitchFrames = [];
+      draw();
+      return;
+    }
+    const editedUrl = getEditedAudioUrl();
+    if (!editedUrl) return;
+    recordedPitchLoading = true;
+    recordedPitchFrames = [];
+    try {
+      console.log('[PitchLine] Analysing recorded patches', editedUrl);
+      const allFrames = await _detectPitchFrames(editedUrl);
+      // Keep only frames that fall inside a patched (green) segment
+      const patchedSegs = cleanupSegments.filter(s => segRecPatched.has(s.id));
+      recordedPitchFrames = allFrames.filter(({ beat }) => {
+        const ms = beatToTime(beat) * 1000;
+        return patchedSegs.some(s => ms >= s.startMs && ms <= s.endMs);
+      });
+      console.log(`[PitchLine] Recorded: ${recordedPitchFrames.length} voiced frames in patched segments`);
+    } catch (err) {
+      console.error('[PitchLine] Recorded pitch failed:', err);
+    } finally {
+      recordedPitchLoading = false;
+      draw();
+    }
+  }
+
   async function togglePitchLine() {
     pitchLineVisible = !pitchLineVisible;
     if (pitchLineVisible) {
-      const expectedSourceUrl = getPitchLineAnalysisUrl();
-      // Recompute if no data yet or selected source changed
-      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== expectedSourceUrl) {
+      const baseUrl = originalVocalUrl || vocalUrl;
+      if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== baseUrl) {
         await computePitchLine();
+      }
+      if (segRecPatched.size > 0 && recordedPitchFrames.length === 0) {
+        computeRecordedPitchLine(); // fire-and-forget, draws when done
       } else {
         draw();
       }
