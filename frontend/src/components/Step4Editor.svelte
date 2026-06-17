@@ -1856,7 +1856,7 @@
   }
 
   function enterSetGapMode() {
-    if (isPlaying || gridAlignMode) return;
+    if (isPlaying) return;
     clearMetronomePickTarget();
     setGapMode = true;
     setGapHoverBeat = null;
@@ -1871,57 +1871,6 @@
   function cancelSetGapMode() {
     setGapMode = false;
     setGapHoverBeat = null;
-    if (canvasEl) canvasEl.style.cursor = '';
-    draw();
-  }
-
-  // ── Grid Align mode functions ──
-  function enterGridAlignMode() {
-    if (isPlaying) return; // don't enter while playing
-    clearMetronomePickTarget();
-    gridAlignMode = true;
-    gridAlignOffsetMs = 0;
-    gridAlignOriginalGapMs = gapMs;
-    gridAlignDragging = false;
-    if (canvasEl) canvasEl.style.cursor = 'ew-resize';
-    draw();
-  }
-
-  function confirmGridAlign() {
-    pushUndo();
-
-    // Shift downbeat by the exact drag amount — grid stays where user placed it
-    downbeatOffsetMs += gridAlignOffsetMs;
-    downbeatFromHeader = true;
-
-    // Snap GAP to the closest grid line (before or after current GAP)
-    const beatDuration = 15000 / bpm; // ms per 1/8-note beat
-    const gapRelToDownbeat = gridAlignOriginalGapMs - downbeatOffsetMs; // ms from downbeat to GAP
-    const beatsFromDownbeat = gapRelToDownbeat / beatDuration;
-    const beatBefore = Math.floor(beatsFromDownbeat);
-    const beatAfter = Math.ceil(beatsFromDownbeat);
-    const msBefore = downbeatOffsetMs + beatBefore * beatDuration;
-    const msAfter = downbeatOffsetMs + beatAfter * beatDuration;
-    // Pick whichever grid line is closer to the original GAP
-    gapMs = Math.round(
-      Math.abs(gridAlignOriginalGapMs - msBefore) <= Math.abs(gridAlignOriginalGapMs - msAfter)
-        ? msBefore : msAfter
-    );
-
-    gridAlignMode = false;
-    gridAlignOffsetMs = 0;
-    gridAlignDragging = false;
-    if (canvasEl) canvasEl.style.cursor = '';
-    handleBpmGapChange(false, { gapMs: gridAlignOriginalGapMs, bpm });
-    markUnsaved();
-  }
-
-  function cancelGridAlign() {
-    console.log(`[GridAlign] Cancel, reverting to gap=${gridAlignOriginalGapMs}ms`);
-    gapMs = gridAlignOriginalGapMs;
-    gridAlignMode = false;
-    gridAlignOffsetMs = 0;
-    gridAlignDragging = false;
     if (canvasEl) canvasEl.style.cursor = '';
     draw();
   }
@@ -3884,14 +3833,6 @@
       return;
     }
 
-    // Finish grid align drag
-    if (gridAlignDragging) {
-      gridAlignDragging = false;
-      console.log(`[GridAlign] Drag done, offset=${gridAlignOffsetMs.toFixed(1)}ms`);
-      draw();
-      return;
-    }
-
     // Finish playhead drag
     if (playheadDrag) {
       playheadDrag = false;
@@ -4191,7 +4132,7 @@
   function handleContextMenu(event) {
     event.preventDefault();
     // No context menu during playback, grid align, segment recording, or vibrato modal.
-    if (isPlaying || gridAlignMode || segRecPhase !== 'idle' || vibratoModalOpen) return;
+    if (isPlaying || segRecPhase !== 'idle' || vibratoModalOpen) return;
 
     // Paste mode: show minimal paste/cancel menu
     if (pasteMode && clipboard) {
@@ -5833,7 +5774,7 @@
       console.log('[Play] No audioEl');
       return;
     }
-    if (gridAlignMode || setGapMode || metronomePickTarget !== 0) return; // block playback during transient editing modes
+    if (setGapMode || metronomePickTarget !== 0) return; // block playback during transient editing modes
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
