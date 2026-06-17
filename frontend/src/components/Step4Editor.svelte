@@ -277,16 +277,24 @@
    * using the current bpm/gapMs. Same formula for all.
    * Call after any BPM or GAP change.
    */
-  function resyncAllToGrid() {
-    const breaks = notes.filter(n => n.type === 'break');
-    console.log(`[resyncAllToGrid] bpm=${bpm} gapMs=${gapMs} | breaks=${breaks.length} flags=${flags.length}`);
-    breaks.forEach(n => console.log(`  break id=${n.id} startBeat=${n.startBeat} timeMs=${n.timeMs} → newBeat=${snapBeatValue(msToBeat(n.timeMs ?? NaN))}`));
+  function resyncAllToGrid(previousTimingRef = null) {
+    // Recalc regular notes only when rawTimings is absent (txt-loaded songs).
+    // When rawTimings is present, requantizeFromMs already handles notes.
+    if ((!rawTimings || rawTimings.length === 0) && previousTimingRef) {
+      const prevBpm = Math.max(1, Number(previousTimingRef.bpm) || bpm);
+      const prevGapMs = Number.isFinite(previousTimingRef.gapMs) ? previousTimingRef.gapMs : gapMs;
+      notes = notes.map(n => {
+        if (n.type === 'break') return n; // breaks handled below
+        const noteTimeMs = prevGapMs + n.startBeat * 15000 / prevBpm;
+        const noteEndTimeMs = prevGapMs + (n.startBeat + n.duration) * 15000 / prevBpm;
+        const newStart = msToBeat(noteTimeMs);
+        const newEnd = Math.max(newStart + 1, msToBeat(noteEndTimeMs));
+        return { ...n, startBeat: newStart, duration: newEnd - newStart };
+      });
+    }
     // Breaks
     notes = notes.map(n => {
-      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) {
-        if (n.type === 'break') console.warn(`  [resyncAllToGrid] break id=${n.id} has no timeMs — skipping`);
-        return n;
-      }
+      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) return n;
       const newBeat = snapBeatValue(msToBeat(n.timeMs));
       const newEndBeat = Number.isFinite(n.endTimeMs)
         ? Math.max(newBeat + 1, snapBeatValue(msToBeat(n.endTimeMs)))
@@ -2007,8 +2015,6 @@
   }
 
   function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
-    console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} bpmActuallyChanged=${bpmActuallyChanged} prevRef=`, previousTimingRef);
-    console.log(`[BPM/GAP] notes=${notes.length} breaks=${notes.filter(n=>n.type==='break').length} rawTimings=${rawTimings.length}`);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
     if (currentTimeSec > 0) {
@@ -2016,7 +2022,7 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs(bpmActuallyChanged, previousTimingRef);
-    resyncAllToGrid();
+    resyncAllToGrid(previousTimingRef);
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
