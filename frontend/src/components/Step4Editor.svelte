@@ -278,21 +278,16 @@
    * Call after any BPM or GAP change.
    */
   function resyncAllToGrid(previousTimingRef = null) {
-    // Recalc regular notes only when rawTimings is absent (txt-loaded songs).
-    // When rawTimings is present, requantizeFromMs already handles notes.
+    // Notes (only when rawTimings absent — otherwise requantizeFromMs handles them)
+    // timeMs is always stamped at load time, so no fallback needed.
     if (!rawTimings || rawTimings.length === 0) {
+      const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
       notes = notes.map(n => {
-        if (n.type === 'break') return n; // breaks handled below
-        // Use stored timeMs (stamped at load or after each recalc) for drift-free recalc
-        const srcTimeMs = Number.isFinite(n.timeMs) ? n.timeMs
-          : (previousTimingRef ? Math.max(0, (Number.isFinite(previousTimingRef.gapMs) ? previousTimingRef.gapMs : gapMs) + n.startBeat * 15000 / Math.max(1, Number(previousTimingRef?.bpm) || bpm)) : null);
-        if (!Number.isFinite(srcTimeMs)) return n;
-        // Preserve note duration in ms using the bpm before this change
-        const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
-        const srcEndTimeMs = srcTimeMs + n.duration * 15000 / srcBpm;
-        const newStart = msToBeat(srcTimeMs);
-        const newEnd = Math.max(newStart + 1, msToBeat(srcEndTimeMs));
-        // Keep timeMs in sync so the next BPM change also recalcs correctly
+        if (n.type === 'break') return n; // handled below
+        if (!Number.isFinite(n.timeMs)) return n;
+        const endTimeMs = n.timeMs + n.duration * 15000 / srcBpm;
+        const newStart = msToBeat(n.timeMs);
+        const newEnd = Math.max(newStart + 1, msToBeat(endTimeMs));
         return { ...n, startBeat: newStart, duration: newEnd - newStart };
       });
     }
@@ -309,6 +304,10 @@
     if (flags.length) {
       flags = flags.map(normalizeFlag);
       saveFlags();
+    }
+    // Downbeat anchor — derive beat from ms so dragged diamond stays at its audio position
+    if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
+      metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
     }
   }
 
