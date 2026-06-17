@@ -277,9 +277,21 @@
    * using the current bpm/gapMs. Same formula for all.
    * Call after any BPM or GAP change.
    */
+  // Single formula used everywhere: beat = (timeMs - gapMs) * bpm / 15000
+  // msToBeat(ms)  = Math.round((ms - gapMs) * bpm / 15000)  — rounded for discrete positions
+  // msToFracBeat  = (ms - gapMs) * bpm / 15000              — unrounded for continuous positions
+
   function resyncAllToGrid(previousTimingRef = null) {
-    // Notes (only when rawTimings absent — otherwise requantizeFromMs handles them)
-    // timeMs is always stamped at load time, so no fallback needed.
+    // GAP — snap to nearest beat boundary relative to downbeat
+    if (Number.isFinite(downbeatOffsetMs)) {
+      const beatDur = 15000 / bpm;
+      const beatsFromDownbeat = (gapMs - downbeatOffsetMs) / beatDur;
+      const lo = downbeatOffsetMs + Math.floor(beatsFromDownbeat) * beatDur;
+      const hi = downbeatOffsetMs + Math.ceil(beatsFromDownbeat)  * beatDur;
+      gapMs = Math.abs(gapMs - lo) <= Math.abs(gapMs - hi) ? Math.round(lo) : Math.round(hi);
+    }
+
+    // Notes (only when rawTimings absent — requantizeFromMs handles them otherwise)
     if (!rawTimings || rawTimings.length === 0) {
       const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
       notes = notes.map(n => {
@@ -291,6 +303,7 @@
         return { ...n, startBeat: newStart, duration: newEnd - newStart };
       });
     }
+
     // Breaks
     notes = notes.map(n => {
       if (n.type !== 'break' || !Number.isFinite(n.timeMs)) return n;
@@ -300,12 +313,14 @@
         : n.endBeat;
       return { ...n, startBeat: newBeat, endBeat: newEndBeat };
     });
+
     // Flags
     if (flags.length) {
       flags = flags.map(normalizeFlag);
       saveFlags();
     }
-    // Downbeat anchor — derive beat from ms so dragged diamond stays at its audio position
+
+    // Downbeat anchor (fractional beat — same formula, not rounded)
     if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
       metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
     }
@@ -2012,7 +2027,6 @@
       bpm: previousBpm > 0 ? previousBpm : (Number(rawTimings?.[0]?.syncedBpm) || bpm),
     };
     previousBpm = bpm;
-    snapGapToGrid();
     handleBpmGapChange(true, previousTimingRef);
     markUnsaved();
   }
