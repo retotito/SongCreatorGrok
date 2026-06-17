@@ -271,6 +271,21 @@
     saveFlags();
   }
 
+  function resyncBreaksToGrid() {
+    notes = notes.map(n => {
+      if (n.type !== 'break') return n;
+      // If break has a stored timeMs, re-derive beat from it using current BPM/GAP
+      if (Number.isFinite(n.timeMs)) {
+        const newBeat = snapBeatValue(Math.round(timeToBeat(n.timeMs / 1000)));
+        const newEndBeat = Number.isFinite(n.endTimeMs)
+          ? Math.max(newBeat + 1, snapBeatValue(Math.round(timeToBeat(n.endTimeMs / 1000))))
+          : n.endBeat;
+        return { ...n, startBeat: newBeat, endBeat: newEndBeat };
+      }
+      return n;
+    });
+  }
+
   // Vocal cleanup segments (waveform-only helper ranges)
   let cleanupSegments = []; // { id, startMs, endMs }
   let cleanupSegmentIdCounter = 1;
@@ -362,6 +377,7 @@
       return {
         ...n,
         startBeat: movedBeat,
+        timeMs: Math.max(0, beatToTime(movedBeat) * 1000),
       };
     });
     if (!moved) return;
@@ -1579,9 +1595,11 @@
         const nextStartBeat = Math.round(((startSec - gapSec) * bpm) / 15);
         const breakEnd = Math.max(breakStart + 1, nextStartBeat - 2);
         if (breakEnd > breakStart) {
-          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: breakEnd });
+          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: breakEnd,
+            timeMs: beatToTime(breakStart) * 1000, endTimeMs: beatToTime(breakEnd) * 1000 });
         } else {
-          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: null });
+          newNotes.push({ id: id++, type: 'break', startBeat: breakStart, endBeat: null,
+            timeMs: beatToTime(breakStart) * 1000, endTimeMs: null });
         }
       }
 
@@ -1633,7 +1651,9 @@
         if (b.endSec !== null) {
           endBeat = Math.max(startBeat + 1, snapBeatValue(Math.round(((b.endSec - gapSec) * bpm) / 15)));
         }
-        newNotes.push({ id: id++, type: 'break', startBeat, endBeat });
+        newNotes.push({ id: id++, type: 'break', startBeat, endBeat,
+          timeMs: b.startSec * 1000,
+          endTimeMs: b.endSec != null ? b.endSec * 1000 : null });
       }
     }
 
@@ -1983,6 +2003,7 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs(bpmActuallyChanged, previousTimingRef);
+    resyncBreaksToGrid();
     resyncFlagsToGrid();
   }
 
