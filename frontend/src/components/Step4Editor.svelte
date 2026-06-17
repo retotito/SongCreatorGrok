@@ -9457,10 +9457,26 @@
         {#if tapBpm !== null}
           <div class="tapper-apply-row">
             {#each [1,2,3,4,5,6,7,8] as mult}
-              <button class="tapper-apply-btn" class:primary={mult === 1}
-                on:click={() => { bpm = Math.round(tapBpm * mult * 10) / 10; handleBpmChange(); closeTapper(); }}>
+              {@const multBpm = Math.round(tapBpm * mult * 10) / 10}
+              {@const isLow = multBpm < 200}
+              {@const isDanger = multBpm < 100}
+              <button class="tapper-apply-btn" class:primary={mult === 1} class:warn={isLow && !isDanger} class:danger={isDanger}
+                disabled={isDanger}
+                on:click={async () => {
+                  if (isDanger) return;
+                  if (isLow) {
+                    const ok = await showConfirm(
+                      `BPM ${multBpm} is very low (musical tempo ≈ ${Math.round(multBpm / 4)} BPM).\n\nRemember: Ultrastar BPM is 4× the musical BPM.\nDo you want to continue with BPM ${multBpm}?`,
+                      { confirmLabel: 'Continue', cancelLabel: 'Cancel' }
+                    );
+                    if (!ok) return;
+                  }
+                  bpm = multBpm;
+                  handleBpmChange();
+                  closeTapper();
+                }}>
                 <span class="tapper-mult">{mult}×</span>
-                <span class="tapper-mult-bpm">{(tapBpm * mult).toFixed(1)}</span>
+                <span class="tapper-mult-bpm">{multBpm.toFixed(1)}</span>
               </button>
             {/each}
           </div>
@@ -10453,6 +10469,19 @@
     transition: background 0.1s;
   }
   .tapper-apply-btn:hover { background: #3a5a7a; }
+  .tapper-apply-btn.warn {
+    border-color: #d97706;
+    background: #3a2800;
+    color: #fbbf24;
+  }
+  .tapper-apply-btn.warn:hover { background: #4a3800; }
+  .tapper-apply-btn.danger {
+    border-color: #7f1d1d;
+    background: #2d0a0a;
+    color: #f87171;
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
   .tapper-apply-btn.primary {
     border-color: #7ec8e3;
     background: #2a4a6a;
