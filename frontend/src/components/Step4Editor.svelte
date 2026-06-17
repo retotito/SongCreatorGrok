@@ -2319,7 +2319,7 @@
 
     for (let i = firstSubIndex; i <= lastSubIndex; i++) {
       const b = downbeatBeat + i * gridStep;
-      const x = beatToX(b) + gridOffsetPx;
+      const x = beatToX(b);
       if (x < -1 || x > w + 1) continue;
       const rel = b - downbeatBeat;
       const isMeasure = nearMultiple(rel, beatsPerMeasure);
