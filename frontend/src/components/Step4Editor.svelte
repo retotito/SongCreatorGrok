@@ -249,41 +249,49 @@
   let flagIdCounter = 1;
   let selectedFlag = null;
 
+  /**
+   * Unified formula: ms → beat using current bpm/gapMs.
+   * This is the single source of truth for all positional recalculation.
+   *   beat = round((timeMs - gapMs) * bpm / 15000)
+   */
+  function msToBeat(timeMs) {
+    return Math.round((timeMs - gapMs) * bpm / 15000);
+  }
+
   function normalizeFlag(flag) {
     const beat = Math.round(Number(flag?.beat) || 0);
     const parsedTimeMs = Number(flag?.timeMs);
+    // timeMs is the source of truth — derive it from beat only as fallback
     const timeMs = Number.isFinite(parsedTimeMs)
       ? Math.max(0, parsedTimeMs)
-      : Math.max(0, beatToTime(beat) * 1000);
+      : Math.max(0, gapMs + beat * 15000 / bpm);
     return {
       id: Number(flag?.id),
-      beat: Math.round(timeToBeat(timeMs / 1000)),
+      beat: snapBeatValue(msToBeat(timeMs)),
       timeMs,
     };
   }
 
-  function resyncFlagsToGrid() {
-    if (!flags.length) return;
-    flags = flags.map(f => {
-      const norm = normalizeFlag(f);
-      return { ...norm, beat: snapBeatValue(norm.beat) };
-    });
-    saveFlags();
-  }
-
-  function resyncBreaksToGrid() {
+  /**
+   * Resync all beat-positioned items (breaks, flags) from their stored timeMs
+   * using the current bpm/gapMs. Same formula for all.
+   * Call after any BPM or GAP change.
+   */
+  function resyncAllToGrid() {
+    // Breaks
     notes = notes.map(n => {
-      if (n.type !== 'break') return n;
-      // If break has a stored timeMs, re-derive beat from it using current BPM/GAP
-      if (Number.isFinite(n.timeMs)) {
-        const newBeat = snapBeatValue(Math.round(timeToBeat(n.timeMs / 1000)));
-        const newEndBeat = Number.isFinite(n.endTimeMs)
-          ? Math.max(newBeat + 1, snapBeatValue(Math.round(timeToBeat(n.endTimeMs / 1000))))
-          : n.endBeat;
-        return { ...n, startBeat: newBeat, endBeat: newEndBeat };
-      }
-      return n;
+      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) return n;
+      const newBeat = snapBeatValue(msToBeat(n.timeMs));
+      const newEndBeat = Number.isFinite(n.endTimeMs)
+        ? Math.max(newBeat + 1, snapBeatValue(msToBeat(n.endTimeMs)))
+        : n.endBeat;
+      return { ...n, startBeat: newBeat, endBeat: newEndBeat };
     });
+    // Flags
+    if (flags.length) {
+      flags = flags.map(normalizeFlag);
+      saveFlags();
+    }
   }
 
   // Vocal cleanup segments (waveform-only helper ranges)
@@ -313,13 +321,10 @@
   }
 
   function addFlagAt(beat) {
-    const snappedBeat = Math.round(beat);
+    const snappedBeat = snapBeatValue(Math.round(beat));
+    const timeMs = Math.max(0, gapMs + snappedBeat * 15000 / bpm);
     const newFlagId = flagIdCounter++;
-    flags = [...flags, {
-      id: newFlagId,
-      beat: snappedBeat,
-      timeMs: Math.max(0, beatToTime(snappedBeat) * 1000),
-    }];
+    flags = [...flags, { id: newFlagId, beat: snappedBeat, timeMs }];
     selectedFlag = newFlagId;
     selectedNote = null;
     selectedNotes = new Set();
@@ -353,7 +358,7 @@
     flag.beat = clampBeatToSongBounds(
       snapBeatValue(flag.beat + (delta < 0 ? -step : step))
     );
-    flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
+    flag.timeMs = Math.max(0, gapMs + flag.beat * 15000 / bpm);
     flags = [...flags];
     ensureBeatVisible(flag.beat);
     selectedFlag = flag.id;
@@ -370,14 +375,15 @@
     pushUndo();
     notes = notes.map(n => {
       if (n.id !== noteId || n.type !== 'break') return n;
-      moved = true;
-      movedBeat = clampBeatToSongBounds(
+      const newBeat = clampBeatToSongBounds(
         snapBeatValue(n.startBeat + (delta < 0 ? -step : step))
       );
+      moved = true;
+      movedBeat = newBeat;
       return {
         ...n,
-        startBeat: movedBeat,
-        timeMs: Math.max(0, beatToTime(movedBeat) * 1000),
+        startBeat: newBeat,
+        timeMs: Math.max(0, gapMs + newBeat * 15000 / bpm),
       };
     });
     if (!moved) return;
@@ -2003,8 +2009,7 @@
       playbackBeat = ((currentTimeSec - gapSec) * bpm) / 15;
     }
     requantizeFromMs(bpmActuallyChanged, previousTimingRef);
-    resyncBreaksToGrid();
-    resyncFlagsToGrid();
+    resyncAllToGrid();
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
