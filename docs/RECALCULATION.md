@@ -30,40 +30,38 @@ We scale beats directly — no conversion to ms and back.
 - Source of truth: `startBeat` and `duration` (from `.txt`)
 - On BPM change:
   ```
-  newStart    = round(oldStart    * newBpm / oldBpm)
-  newDuration = round(oldDuration * newBpm / oldBpm)   (min 1)
+  newStart    = snapToGrid(round(oldStart    × newBpm / oldBpm))
+  newDuration = round(oldDuration × newBpm / oldBpm)   (min 1)
   ```
-- `timeMs` is NOT stored, NOT used for recalc.
 
 ### Breaks
 - Source of truth: `startBeat` and `endBeat` (from `.txt`)
-- On BPM change: same proportional formula as notes.
-- `timeMs` / `endTimeMs` are NOT used for recalc.
+- On BPM change: identical formula to notes — both use `snapToGrid(round(...))`.
 
 ### Flags
-- Source of truth: `timeMs` in localStorage  
-  (flags are waveform markers, not grid items — they have no beat in the `.txt`)
+- Source of truth: `timeMs` in localStorage
+  (flags are waveform markers — they have no beat in the `.txt`)
 - On BPM change:
   ```
-  newBeat = round((flag.timeMs - gapMs) * newBpm / 15000)
+  newBeat = round((flag.timeMs - gapMs) × newBpm / 15000)
   ```
-  (`normalizeFlag` already does this via `msToBeat`)
+  (`normalizeFlag` does this via `msToBeat`)
 
 ### GAP
-- Source of truth: `gapMs` (ms value — it is an audio position, not a beat)
-- On BPM change: snap `gapMs` to the nearest beat of the new grid:
+- Source of truth: `gapMs` (ms value — audio position, not a beat)
+- On BPM change: snap `gapMs` to nearest beat of the new grid:
   ```
   beatDur = 15000 / newBpm
-  gapMs   = round_to_nearest_multiple_of(beatDur, relative_to_downbeatOffsetMs)
+  gapMs   = nearest_multiple_of(beatDur, relative_to_downbeatOffsetMs)
   ```
 
 ### Metronome anchor (`#METRONOMEANCHOR`)
 - Source of truth: beat (stored in `.txt` as beat)
-- On BPM change: same proportional formula as notes:
+- On BPM change:
   ```
   newBeat = oldBeat × newBpm / oldBpm
   ```
-  (no rounding — fractional beat position is fine for the metronome)
+  (no rounding — fractional beat is fine for the metronome)
 
 ---
 
@@ -77,16 +75,17 @@ We scale beats directly — no conversion to ms and back.
 
 ## Implementation: `resyncAllToGrid(previousTimingRef)`
 
-Called after every BPM or GAP change.  
+Called after every BPM or GAP change.
 `previousTimingRef = { bpm: oldBpm, gapMs: oldGapMs }`
 
 ```
-1. Snap GAP       → gapMs snapped to nearest beat of new BPM
-2. Scale notes    → newBeat = round(oldBeat * newBpm / oldBpm)
-3. Scale breaks   → same formula
-4. Recalc flags   → msToBeat(flag.timeMs)  via normalizeFlag()
-5. Recalc downbeat→ (downbeatOffsetMs - gapMs) * newBpm / 15000
+1. Snap GAP            → gapMs snapped to nearest beat of new BPM
+2. Scale notes         → snapToGrid(round(oldBeat × newBpm / oldBpm))
+3. Scale breaks        → same formula as notes
+4. Recalc flags        → msToBeat(flag.timeMs) via normalizeFlag()
+5. Recalc downbeat     → (downbeatOffsetMs - gapMs) × newBpm / 15000
+6. Scale metro anchor  → oldBeat × newBpm / oldBpm
 ```
 
-Steps 2 and 3 only run when `rawTimings` is absent (txt-loaded songs).  
+Steps 2 and 3 only run when `rawTimings` is absent (txt-loaded songs).
 When `rawTimings` is present, `requantizeFromMs` handles notes/breaks instead.

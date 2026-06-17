@@ -305,7 +305,7 @@
             : null;
           return { ...n, startBeat: newBeat, endBeat: newEndBeat };
         }
-        const newStart    = Math.round(n.startBeat * bpm / oldBpm);
+        const newStart    = snapBeatValue(Math.round(n.startBeat * bpm / oldBpm));
         const newDuration = Math.max(1, Math.round(n.duration  * bpm / oldBpm));
         return { ...n, startBeat: newStart, duration: newDuration };
       }).sort((a, b) => a.startBeat - b.startBeat);
