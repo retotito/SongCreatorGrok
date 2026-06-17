@@ -30,10 +30,13 @@
     }
   }
 
+  let emptyGenerating = false;
+
   async function handleGenerateEmpty() {
     if (!$sessionId) { errorMessage.set('No session. Please upload audio first.'); return; }
     if (!artist.trim() || !title.trim()) { errorMessage.set('Please enter Artist and Title before generating.'); return; }
     isProcessing.set(true);
+    emptyGenerating = true;
     processingStatus.set('Creating empty Ultrastar file…');
     try {
       const result = await generateEmptyUltrastar($sessionId);
@@ -43,6 +46,7 @@
       errorMessage.set(err.message);
     } finally {
       isProcessing.set(false);
+      emptyGenerating = false;
     }
   }
 
@@ -518,6 +522,15 @@
           {isTranscribing ? '✕ Cancel' : '← Close'}
         </button>
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if emptyGenerating}
+  <div class="empty-gen-overlay">
+    <div class="empty-gen-card">
+      <div class="empty-gen-spinner"></div>
+      <p>Creating empty Ultrastar file…</p>
     </div>
   </div>
 {/if}
@@ -1038,4 +1051,34 @@
     justify-content: flex-start;
     margin-top: 0.5rem;
   }
+
+  .empty-gen-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .empty-gen-card {
+    background: #1e2230;
+    border: 1px solid #3a3f5c;
+    border-radius: 12px;
+    padding: 2rem 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+    color: #e0e0e0;
+  }
+  .empty-gen-spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid #3a3f5c;
+    border-top-color: #7c6af7;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
