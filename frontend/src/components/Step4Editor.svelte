@@ -1350,7 +1350,7 @@
   let segRecLyricsError = '';
   let segRecLyricsLines = [];
   let segRecLyricsHyphenated = false;
-  $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording' || segRecPhase === 'armed';
+  $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording';
 
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
