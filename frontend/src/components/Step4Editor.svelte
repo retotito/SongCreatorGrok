@@ -9460,7 +9460,7 @@
               {@const multBpm = Math.round(tapBpm * mult * 10) / 10}
               {@const isLow = multBpm < 200}
               {@const isDanger = multBpm < 100}
-              <button class="tapper-apply-btn" class:primary={mult === 1} class:warn={isLow && !isDanger} class:danger={isDanger}
+              <button class="tapper-apply-btn" class:primary={mult === 1 && !isLow && !isDanger} class:warn={isLow && !isDanger} class:danger={isDanger}
                 disabled={isDanger}
                 on:click={async () => {
                   if (isDanger) return;
