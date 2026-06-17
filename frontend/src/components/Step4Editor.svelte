@@ -278,9 +278,15 @@
    * Call after any BPM or GAP change.
    */
   function resyncAllToGrid() {
+    const breaks = notes.filter(n => n.type === 'break');
+    console.log(`[resyncAllToGrid] bpm=${bpm} gapMs=${gapMs} | breaks=${breaks.length} flags=${flags.length}`);
+    breaks.forEach(n => console.log(`  break id=${n.id} startBeat=${n.startBeat} timeMs=${n.timeMs} → newBeat=${snapBeatValue(msToBeat(n.timeMs ?? NaN))}`));
     // Breaks
     notes = notes.map(n => {
-      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) return n;
+      if (n.type !== 'break' || !Number.isFinite(n.timeMs)) {
+        if (n.type === 'break') console.warn(`  [resyncAllToGrid] break id=${n.id} has no timeMs — skipping`);
+        return n;
+      }
       const newBeat = snapBeatValue(msToBeat(n.timeMs));
       const newEndBeat = Number.isFinite(n.endTimeMs)
         ? Math.max(newBeat + 1, snapBeatValue(msToBeat(n.endTimeMs)))
@@ -1549,7 +1555,7 @@
   // preserving pitches from the original Ultrastar parse.
   function requantizeFromMs(bpmActuallyChanged = false, previousTimingRef = null) {
     if (!rawTimings || rawTimings.length === 0) {
-      console.log('[Requantize] No rawTimings, skipping');
+      console.log('[Requantize] No rawTimings, skipping — breaks keep existing timeMs');
       return;
     }
     console.log(`[Requantize] bpm=${bpm} gap=${gapMs}ms, ${rawTimings.length} timings`);
@@ -2001,7 +2007,8 @@
   }
 
   function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
-    console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} (initial: bpm=${initialBpm} gap=${initialGap})`);
+    console.log(`[BPM/GAP] bpm=${bpm} gap=${gapMs} bpmActuallyChanged=${bpmActuallyChanged} prevRef=`, previousTimingRef);
+    console.log(`[BPM/GAP] notes=${notes.length} breaks=${notes.filter(n=>n.type==='break').length} rawTimings=${rawTimings.length}`);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
     if (currentTimeSec > 0) {
@@ -5651,7 +5658,13 @@
   }
 
   function applyTextEditorContent() {
-    const newNotes = parseUltrastar(textEditorContent);
+    const rawParsed = parseUltrastar(textEditorContent);
+    const newNotes = rawParsed.map(n => {
+      if (n.type !== 'break') return n;
+      const startMs = Math.max(0, gapMs + n.startBeat * 15000 / bpm);
+      const endMs = n.endBeat != null ? Math.max(0, gapMs + n.endBeat * 15000 / bpm) : null;
+      return { ...n, timeMs: startMs, endTimeMs: endMs };
+    });
     if (newNotes.length === 0) {
       showAlert('No valid notes found in the text. Check the format.');
       return;
@@ -8658,6 +8671,13 @@
       console.log('[Step4] Editor data:', { bpm: data.bpm, gap: data.gap_ms, duration: data.audio_duration, contentLen: data.ultrastar_content?.length });
       
       notes = parseUltrastar(data.ultrastar_content);
+      // Stamp timeMs on breaks using loaded BPM/GAP so resyncAllToGrid can recalc them later
+      notes = notes.map(n => {
+        if (n.type !== 'break') return n;
+        const startMs = Math.max(0, data.gap_ms + n.startBeat * 15000 / data.bpm);
+        const endMs = n.endBeat != null ? Math.max(0, data.gap_ms + n.endBeat * 15000 / data.bpm) : null;
+        return { ...n, timeMs: startMs, endTimeMs: endMs };
+      });
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
       // Parse extra headers from ultrastar content
