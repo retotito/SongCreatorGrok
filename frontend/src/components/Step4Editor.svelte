@@ -284,6 +284,7 @@
   // See docs/RECALCULATION.md for the design rules.
   function resyncAllToGrid(previousTimingRef = null) {
     const oldBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
+    console.log(`[resync] oldBpm=${oldBpm} newBpm=${bpm} gapMs=${gapMs} | notes=${notes.filter(n=>n.type!=='break').length} breaks=${notes.filter(n=>n.type==='break').length} flags=${flags.length}`);
 
     // 1. GAP stays fixed — it is beat 0, the grid origin. No snapping needed.
 
@@ -296,19 +297,20 @@
           const newEndBeat = n.endBeat != null
             ? Math.max(newBeat + 1, snapBeatValue(Math.round(n.endBeat * bpm / oldBpm)))
             : null;
+          console.log(`  break ${n.startBeat}→${newBeat}`);
           return { ...n, startBeat: newBeat, endBeat: newEndBeat };
         }
         const newStart    = snapBeatValue(Math.round(n.startBeat * bpm / oldBpm));
         const newDuration = Math.max(1, Math.round(n.duration  * bpm / oldBpm));
+        console.log(`  note "${n.syllable}" ${n.startBeat}→${newStart} dur ${n.duration}→${newDuration}`);
         return { ...n, startBeat: newStart, duration: newDuration };
       }).sort((a, b) => a.startBeat - b.startBeat);
+    } else {
+      console.log(`  notes/breaks skipped (rawTimings present)`);
     }
 
-    // 4. Flags — source of truth is flag.timeMs (audio position); recalc beat from ms
-    if (flags.length) {
-      flags = flags.map(normalizeFlag);
-      saveFlags();
-    }
+    // 4. Flags
+    flags.forEach(f => console.log(`  flag beat ${f.beat} timeMs=${f.timeMs} → newBeat=${Math.round((f.timeMs - gapMs) * bpm / 15000)}`));
 
     // 5. Downbeat anchor — source of truth is downbeatOffsetMs (audio position)
     if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
@@ -320,6 +322,9 @@
       metronomeDownbeat1Beat = metronomeDownbeat1Beat * bpm / oldBpmForMetro;
       recalcMetronomeFromControls('bpm-change');
     }
+
+    if (flags.length) { flags = flags.map(normalizeFlag); saveFlags(); }
+    console.log(`[resync] done. gapMs=${gapMs}`);
   }
 
   // Vocal cleanup segments (waveform-only helper ranges)
@@ -2007,6 +2012,7 @@
   }
 
   function handleBpmGapChange(bpmActuallyChanged = false, previousTimingRef = null) {
+    showToast(`BPM ${bpmActuallyChanged ? 'changed to ' + bpm : 'grid updated'} — recalculating…`, 1200);
     bpmChanged = (bpm !== initialBpm || gapMs !== initialGap);
     // Recalculate playback cursor position with new BPM/GAP
     if (currentTimeSec > 0) {

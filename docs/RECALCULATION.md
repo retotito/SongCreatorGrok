@@ -68,7 +68,7 @@ We scale beats directly — no conversion to ms and back.
 
 - `downbeatOffsetMs` (`#DOWNBEATOFFSET`) — stays in ms (absolute audio position of beat 1).
 - `flag.timeMs` — stays in ms (source of truth for flags).
-- `gapMs` (`#GAP`) — snapped to new grid but remains an ms value.
+- `gapMs` (`#GAP`) — stays fixed (it is the grid origin, beat 0).
 
 ---
 
@@ -88,3 +88,23 @@ Called after every BPM or GAP change.
 
 Steps 2 and 3 only run when `rawTimings` is absent (txt-loaded songs).
 When `rawTimings` is present, `requantizeFromMs` handles notes/breaks instead.
+
+---
+
+## Grid Offset Change (diamond drag)
+
+When the user drags the diamond to set `downbeatOffsetMs`, the beat grid phase shifts.
+After the drag commits:
+
+```
+1. Snap GAP  → newGapMs = downbeatOffsetMs + round((gapMs - downbeatOffsetMs) / beatDur) × beatDur
+               (max shift = ½ beat — keeps GAP on the new grid)
+2. Notes     → unchanged (beat values stay; distance to GAP preserved)
+3. Breaks    → unchanged
+4. Flags     → recalc beat from timeMs via normalizeFlag() (< ½ beat drift, acceptable)
+5. Downbeat  → (downbeatOffsetMs - newGapMs) × bpm / 15000
+6. Metro     → unchanged
+```
+
+The slight audio misalignment of notes is intentional — offset calibration is done
+before fine-tuning note positions.
