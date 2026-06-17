@@ -9881,14 +9881,18 @@
         </button>
       </div>
 
-      <div class="metronome-signature-row">
-        <select class="mic-select" bind:value={metronomeSigNumerator} on:change={(e) => { metronomeSigNumerator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature numerator">
+      {#if metronomeDownbeat1Beat === null}
+        <div class="metronome-no-downbeat-hint">Set a downbeat first to configure signature and speed.</div>
+      {/if}
+
+      <div class="metronome-signature-row" class:metronome-disabled={metronomeDownbeat1Beat === null}>
+        <select class="mic-select" bind:value={metronomeSigNumerator} disabled={metronomeDownbeat1Beat === null} on:change={(e) => { metronomeSigNumerator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature numerator">
           {#each METRONOME_SIGNATURE_NUM_OPTIONS as num}
             <option value={num}>{num}</option>
           {/each}
         </select>
         <span class="metronome-signature-slash">/</span>
-        <select class="mic-select" bind:value={metronomeSigDenominator} on:change={(e) => { metronomeSigDenominator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature denominator">
+        <select class="mic-select" bind:value={metronomeSigDenominator} disabled={metronomeDownbeat1Beat === null} on:change={(e) => { metronomeSigDenominator = Number(e.target.value); recalcMetronomeFromControls('signature-change'); markUnsaved(); }} title="Time signature denominator">
           {#each METRONOME_SIGNATURE_DEN_OPTIONS as den}
             <option value={den}>{den}</option>
           {/each}
@@ -9909,10 +9913,10 @@
         Downbeat: {metronomeDownbeat1Beat === null ? 'not set' : metronomeDownbeat1Beat.toFixed(3)}
       </div>
 
-      <div class="metronome-speed-row">
-        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('slower')} title="Half speed">−</button>
+      <div class="metronome-speed-row" class:metronome-disabled={metronomeDownbeat1Beat === null}>
+        <button class="tool-btn sm" disabled={metronomeDownbeat1Beat === null} on:click={() => nudgeMetronomeSpeed('slower')} title="Half speed">−</button>
         <span class="metronome-speed-value">Speed x{metronomeSpeedFactor}</span>
-        <button class="tool-btn sm" on:click={() => nudgeMetronomeSpeed('faster')} title="Double speed">+</button>
+        <button class="tool-btn sm" disabled={metronomeDownbeat1Beat === null} on:click={() => nudgeMetronomeSpeed('faster')} title="Double speed">+</button>
       </div>
 
       <div class="metronome-tool-row">
@@ -12134,6 +12138,19 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
+  }
+
+  .metronome-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  .metronome-no-downbeat-hint {
+    font-size: 0.72rem;
+    color: #f0a040;
+    text-align: center;
+    margin: 2px 0 4px;
+    line-height: 1.3;
   }
 
   .metronome-speed-value {
