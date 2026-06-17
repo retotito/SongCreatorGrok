@@ -285,14 +285,7 @@
   function resyncAllToGrid(previousTimingRef = null) {
     const oldBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
 
-    // 1. GAP — snap to nearest beat boundary relative to downbeat
-    if (Number.isFinite(downbeatOffsetMs)) {
-      const beatDur = 15000 / bpm;
-      const beatsFromDownbeat = (gapMs - downbeatOffsetMs) / beatDur;
-      const lo = downbeatOffsetMs + Math.floor(beatsFromDownbeat) * beatDur;
-      const hi = downbeatOffsetMs + Math.ceil(beatsFromDownbeat)  * beatDur;
-      gapMs = Math.abs(gapMs - lo) <= Math.abs(gapMs - hi) ? Math.round(lo) : Math.round(hi);
-    }
+    // 1. GAP stays fixed — it is beat 0, the grid origin. No snapping needed.
 
     // 2 & 3. Notes and Breaks — proportional beat scaling: newBeat = round(oldBeat * newBpm / oldBpm)
     // Only when rawTimings absent; otherwise requantizeFromMs handles notes/breaks.
@@ -1987,27 +1980,7 @@
     return Math.round(beat / snapResolution) * snapResolution;
   }
 
-  // Handle BPM or GAP adjustment — re-quantize visually
-  /**
-   * Snap the current GAP to the nearest beat of the current BPM grid.
-   * Uses downbeatOffsetMs as the phase reference, same as confirmGridAlign.
-   */
-  function snapGapToGrid() {
-    const beatDuration = 15000 / bpm; // ms per 1/8-note beat
-    const gapRelToDownbeat = gapMs - downbeatOffsetMs;
-    const beatsFromDownbeat = gapRelToDownbeat / beatDuration;
-    const beatBefore = Math.floor(beatsFromDownbeat);
-    const beatAfter  = Math.ceil(beatsFromDownbeat);
-    const msBefore = downbeatOffsetMs + beatBefore * beatDuration;
-    const msAfter  = downbeatOffsetMs + beatAfter  * beatDuration;
-    const snapped = Math.round(
-      Math.abs(gapMs - msBefore) <= Math.abs(gapMs - msAfter) ? msBefore : msAfter
-    );
-    console.log(`[BpmChange] snapGapToGrid: gap ${gapMs}ms → ${snapped}ms (beatDur=${beatDuration.toFixed(2)}ms)`);
-    gapMs = snapped;
-  }
-
-  /** Called when only BPM changes — snaps GAP to nearest beat first, then requantizes. */
+  /** Called when only BPM changes — requantizes all beat-positioned items. */
   function handleBpmChange() {
     // Clear undo/redo history — old snapshots reference beat positions at the previous BPM
     // and would produce corrupted notes if restored after a BPM change.

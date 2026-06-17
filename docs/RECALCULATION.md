@@ -48,12 +48,11 @@ We scale beats directly — no conversion to ms and back.
   (`normalizeFlag` does this via `msToBeat`)
 
 ### GAP
-- Source of truth: `gapMs` (ms value — audio position, not a beat)
-- On BPM change: snap `gapMs` to nearest beat of the new grid:
-  ```
-  beatDur = 15000 / newBpm
-  gapMs   = nearest_multiple_of(beatDur, relative_to_downbeatOffsetMs)
-  ```
+- Source of truth: `gapMs` (ms value — audio position, beat 0 origin)
+- On BPM change: **unchanged** — GAP stays at its audio position.
+  The grid snaps to GAP, not the other way around.
+
+  GAP only changes when the user explicitly edits the GAP field.
 
 ### Metronome anchor (`#METRONOMEANCHOR`)
 - Source of truth: beat (stored in `.txt` as beat)
@@ -79,7 +78,7 @@ Called after every BPM or GAP change.
 `previousTimingRef = { bpm: oldBpm, gapMs: oldGapMs }`
 
 ```
-1. Snap GAP            → gapMs snapped to nearest beat of new BPM
+1. GAP                 → unchanged (it is beat 0, the grid origin)
 2. Scale notes         → snapToGrid(round(oldBeat × newBpm / oldBpm))
 3. Scale breaks        → same formula as notes
 4. Recalc flags        → msToBeat(flag.timeMs) via normalizeFlag()
