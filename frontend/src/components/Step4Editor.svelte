@@ -265,7 +265,7 @@
     if (!flags.length) return;
     flags = flags.map(f => {
       const norm = normalizeFlag(f);
-      return { ...norm, beat: snapToMetronomeGrid(norm.beat) };
+      return { ...norm, beat: snapBeatValue(norm.beat) };
     });
     saveFlags();
   }
@@ -297,7 +297,7 @@
   }
 
   function addFlagAt(beat) {
-    const snappedBeat = snapToMetronomeGrid(beat);
+    const snappedBeat = Math.round(beat);
     const newFlagId = flagIdCounter++;
     flags = [...flags, {
       id: newFlagId,
@@ -335,7 +335,7 @@
     if (!flag) return;
     const step = getGridNudgeStep();
     flag.beat = clampBeatToSongBounds(
-      snapToMetronomeGrid(flag.beat + (delta < 0 ? -step : step))
+      snapBeatValue(flag.beat + (delta < 0 ? -step : step))
     );
     flag.timeMs = Math.max(0, beatToTime(flag.beat) * 1000);
     flags = [...flags];
@@ -356,7 +356,7 @@
       if (n.id !== noteId || n.type !== 'break') return n;
       moved = true;
       movedBeat = clampBeatToSongBounds(
-        snapToMetronomeGrid(n.startBeat + (delta < 0 ? -step : step))
+        snapBeatValue(n.startBeat + (delta < 0 ? -step : step))
       );
       return {
         ...n,
@@ -1924,25 +1924,6 @@
   function snapBeatValue(beat) {
     const snapResolution = zoom >= 4 ? 1 : BEATS_PER_QUARTER / 2;
     return Math.round(beat / snapResolution) * snapResolution;
-  }
-
-  /**
-   * Snap a beat to the nearest metronome beat-unit grid line when the metronome
-   * is active and calibrated, otherwise fall back to snapBeatValue.
-   * Used for flags and phrase-break positioning so they align with the grid visually.
-   */
-  function snapToMetronomeGrid(beat) {
-    if (
-      metronomeEnabled &&
-      metronomeManualDownbeatAnchorBeat !== null &&
-      metronomeManualBeatUnitInterval > 0
-    ) {
-      const anchor = metronomeManualDownbeatAnchorBeat;
-      const iv = metronomeManualBeatUnitInterval;
-      const i = Math.round((beat - anchor) / iv);
-      return anchor + i * iv;
-    }
-    return snapBeatValue(beat);
   }
 
   // Handle BPM or GAP adjustment — re-quantize visually
