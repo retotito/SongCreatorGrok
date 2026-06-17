@@ -258,6 +258,9 @@
   onDestroy(() => {
     if ($sessionId && lyricsText.trim()) {
       submitLyrics($sessionId, lyricsText, artist, title, language).catch(() => {});
+    } else if ($sessionId && artist.trim() && title.trim()) {
+      // No lyrics yet but names entered — persist them
+      updateMetadata($sessionId, artist.trim(), title.trim()).catch(() => {});
     }
   });
 
