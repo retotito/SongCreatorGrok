@@ -57,21 +57,21 @@ We scale beats directly — no conversion to ms and back.
   gapMs   = round_to_nearest_multiple_of(beatDur, relative_to_downbeatOffsetMs)
   ```
 
-### Downbeat anchor
-- Source of truth: `downbeatOffsetMs` (ms — audio position of beat 1)
-- On BPM change:
+### Metronome anchor (`#METRONOMEANCHOR`)
+- Source of truth: beat (stored in `.txt` as beat)
+- On BPM change: same proportional formula as notes:
   ```
-  metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * newBpm / 15000
+  newBeat = oldBeat × newBpm / oldBpm
   ```
+  (no rounding — fractional beat position is fine for the metronome)
 
 ---
 
 ## What does NOT change on BPM change
 
-- `timeMs` fields on notes/breaks — they should not exist.
-- `downbeatOffsetMs` — stays in ms (it is an audio position).
+- `downbeatOffsetMs` (`#DOWNBEATOFFSET`) — stays in ms (absolute audio position of beat 1).
 - `flag.timeMs` — stays in ms (source of truth for flags).
-- `gapMs` — snapped to new grid but remains an ms value.
+- `gapMs` (`#GAP`) — snapped to new grid but remains an ms value.
 
 ---
 

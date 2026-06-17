@@ -321,6 +321,12 @@
     if (Number.isFinite(downbeatOffsetMs) && downbeatOffsetMs > 0) {
       metronomeManualDownbeatAnchorBeat = (downbeatOffsetMs - gapMs) * bpm / 15000;
     }
+    // Metronome anchor beat — scales proportionally with BPM (beat is source of truth)
+    if (metronomeDownbeat1Beat !== null && previousTimingRef) {
+      const oldBpmForMetro = Math.max(1, Number(previousTimingRef.bpm) || bpm);
+      metronomeDownbeat1Beat = metronomeDownbeat1Beat * bpm / oldBpmForMetro;
+      recalcMetronomeFromControls('bpm-change');
+    }
   }
 
   // Vocal cleanup segments (waveform-only helper ranges)
@@ -1815,11 +1821,10 @@
         headersToSave.push({ key: 'DOWNBEATOFFSET', value: String(Math.round(downbeatOffsetMs)) });
       }
       if (metronomeManualDownbeatAnchorBeat !== null) {
-        const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
-        headersToSave.push({ key: 'METRONOMEANCHOR', value: String(Math.round(anchorMs)) });
+        headersToSave.push({ key: 'METRONOMEANCHOR', value: String(Math.round(metronomeManualDownbeatAnchorBeat)) });
         headersToSave.push({ key: 'METRONOMEIG', value: `${metronomeSigNumerator}/${metronomeSigDenominator}` });
         headersToSave.push({ key: 'METRONOMESPEED', value: String(metronomeSpeedFactor) });
-        console.log(`%c[MetronomeTool] Saving headers: ANCHOR=${Math.round(anchorMs)} IG=${metronomeSigNumerator}/${metronomeSigDenominator} SPEED=${metronomeSpeedFactor} anchor_beat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)}`, 'color:#7dd3fc');
+        console.log(`%c[MetronomeTool] Saving headers: ANCHOR_BEAT=${Math.round(metronomeManualDownbeatAnchorBeat)} IG=${metronomeSigNumerator}/${metronomeSigDenominator} SPEED=${metronomeSpeedFactor}`, 'color:#7dd3fc');
       } else {
         console.log('[MetronomeTool] No metronome anchor set — not saving METRONOME* headers');
       }
@@ -5646,8 +5651,7 @@
     }
     // Metronome tool state
     if (metronomeManualDownbeatAnchorBeat !== null) {
-      const anchorMs = gapMs + (metronomeManualDownbeatAnchorBeat * 15000 / bpm);
-      lines.push(`#METRONOMEANCHOR:${Math.round(anchorMs)}`);
+      lines.push(`#METRONOMEANCHOR:${Math.round(metronomeManualDownbeatAnchorBeat)}`);
       lines.push(`#METRONOMEIG:${metronomeSigNumerator}/${metronomeSigDenominator}`);
       lines.push(`#METRONOMESPEED:${metronomeSpeedFactor}`);
     }
@@ -8691,7 +8695,7 @@
       const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
       extraHeaders = [];
       let foundDownbeatOffset = false;
-      let loadedMetronomeAnchorMs = null;
+      let loadedMetronomeAnchorBeat = null;
       let loadedMetronomeIg = null;
       let loadedMetronomeSpeed = null;
       for (const line of (data.ultrastar_content || '').split('\n')) {
@@ -8702,7 +8706,7 @@
             downbeatOffsetMs = parseFloat(m[2]) || 0;
             foundDownbeatOffset = true;
           } else if (key === 'METRONOMEANCHOR') {
-            loadedMetronomeAnchorMs = parseFloat(m[2]) || null;
+            loadedMetronomeAnchorBeat = parseFloat(m[2]) || null;
           } else if (key === 'METRONOMEIG') {
             loadedMetronomeIg = m[2].trim();
           } else if (key === 'METRONOMESPEED') {
@@ -8725,8 +8729,8 @@
       gapMs = data.gap_ms;
 
       // Restore metronome tool state from headers (needs bpm + gapMs resolved first)
-      console.log(`%c[MetronomeTool] Load — raw header values: ANCHOR=${loadedMetronomeAnchorMs} IG=${loadedMetronomeIg} SPEED=${loadedMetronomeSpeed}`, 'color:#7dd3fc');
-      if (loadedMetronomeAnchorMs !== null) {
+      console.log(`%c[MetronomeTool] Load — raw header values: ANCHOR_BEAT=${loadedMetronomeAnchorBeat} IG=${loadedMetronomeIg} SPEED=${loadedMetronomeSpeed}`, 'color:#7dd3fc');
+      if (loadedMetronomeAnchorBeat !== null) {
         if (loadedMetronomeIg) {
           const parts = loadedMetronomeIg.split('/');
           if (parts.length === 2) {
@@ -8735,9 +8739,9 @@
           }
         }
         metronomeSpeedFactor = loadedMetronomeSpeed !== null ? loadedMetronomeSpeed : 1;
-        metronomeDownbeat1Beat = (loadedMetronomeAnchorMs - data.gap_ms) * data.bpm / 15000;
+        metronomeDownbeat1Beat = loadedMetronomeAnchorBeat;
         metronomeDownbeat2Beat = null;
-        console.log(`%c[MetronomeTool] Restoring: anchorMs=${loadedMetronomeAnchorMs} → beat=${metronomeDownbeat1Beat?.toFixed(3)} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor} bpm=${data.bpm} gap=${data.gap_ms}`, 'color:#7dd3fc;font-weight:bold');
+        console.log(`%c[MetronomeTool] Restoring: anchorBeat=${loadedMetronomeAnchorBeat} sig=${metronomeSigNumerator}/${metronomeSigDenominator} speed=${metronomeSpeedFactor}`, 'color:#7dd3fc;font-weight:bold');
         recalcMetronomeFromControls('load');
         console.log(`%c[MetronomeTool] After recalc: anchorBeat=${metronomeManualDownbeatAnchorBeat?.toFixed(3)} interval=${metronomeManualDownbeatInterval?.toFixed(3)} beatUnit=${metronomeManualBeatUnitInterval?.toFixed(3)}`, 'color:#7dd3fc');
       } else {
