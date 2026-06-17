@@ -295,13 +295,13 @@
     if (!rawTimings || rawTimings.length === 0) {
       const srcBpm = previousTimingRef ? Math.max(1, Number(previousTimingRef.bpm) || bpm) : bpm;
       notes = notes.map(n => {
-        if (n.type === 'break') return n; // handled below
+        if (n.type === 'break') return n;
         if (!Number.isFinite(n.timeMs)) return n;
         const endTimeMs = n.timeMs + n.duration * 15000 / srcBpm;
         const newStart = msToBeat(n.timeMs);
         const newEnd = Math.max(newStart + 1, msToBeat(endTimeMs));
         return { ...n, startBeat: newStart, duration: newEnd - newStart };
-      });
+      }).sort((a, b) => a.startBeat - b.startBeat);
     }
 
     // Breaks
