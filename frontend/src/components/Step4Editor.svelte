@@ -8384,6 +8384,9 @@
     if (vocalTraceEnabled) {
       // Mutual exclusion: disable mic if active
       if (micEnabled) { micEnabled = false; stopMic(); }
+      // If on edited audio, switch to full mix — the vocal trace draws pitch from the
+      // vocal file, so listening to the edited track would be confusing.
+      if (audioSource === 'edited') switchAudioSource('original');
       vocalTraceVisible = true; // always show when activating
       draw();
       await startVocalTrace();
