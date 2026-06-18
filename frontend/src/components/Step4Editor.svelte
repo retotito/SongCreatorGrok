@@ -12074,7 +12074,7 @@
   .loading-modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
