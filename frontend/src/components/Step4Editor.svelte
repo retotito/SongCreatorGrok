@@ -4344,6 +4344,8 @@
     }
 
     if (showWaveform && my < waveTop()) {
+      // No vocals — disable all waveform context menu actions (can't add/edit sections without audio)
+      if (!hasVocalsAudio) return;
       const beat = xToBeat(mx);
       const clickMs = xToAudioMs(mx);
       const hit = hitTestCleanupSegment(mx, my);
