@@ -4603,6 +4603,8 @@
       analysisSourceSetting: segRegenAudioSource,
     });
     segRegenModalOpen = true;
+    if (micEnabled) { micEnabled = false; stopMic(); }
+    if (vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
     closeContextMenu();
   }
 
@@ -4701,6 +4703,8 @@
       ? 'edited'
       : 'vocals';
     vibratoModalOpen = true;
+    if (micEnabled) { micEnabled = false; stopMic(); }
+    if (vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
     closeContextMenu();
   }
 
@@ -7995,6 +7999,8 @@
     seekToTime(Math.max(0, startSec - segRecPrerollSec));
 
     segRecPhase = 'armed';
+    if (micEnabled) { micEnabled = false; stopMic(); }
+    if (vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
     closeContextMenu();
     draw();
   }
