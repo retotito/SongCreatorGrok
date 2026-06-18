@@ -1117,6 +1117,25 @@ async def resume_specific_session(session_id: str):
     }))
 
 
+def _ensure_mp3_for_download(path: str) -> tuple[str, bool]:
+    """Return (path_to_serve, is_tmp) — converts non-MP3 to a temp MP3 on the fly.
+    Caller is responsible for deleting the tmp file when is_tmp=True."""
+    if path.lower().endswith(".mp3"):
+        return path, False
+    import tempfile as _tf
+    tmp = _tf.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", path, "-ar", "44100", "-ac", "2",
+         "-codec:a", "libmp3lame", "-q:a", "2", tmp.name],
+        capture_output=True, text=True, timeout=120
+    )
+    if result.returncode == 0 and os.path.getsize(tmp.name) > 0:
+        return tmp.name, True
+    os.unlink(tmp.name)
+    return path, False  # fallback: serve original if conversion failed
+
+
 def _normalize_audio_to_mp3(file_path: str, orig_filename: str) -> tuple[str, str]:
     """Ensure audio file is a 44100 Hz MP3. Converts in-place if needed.
     Returns (final_file_path, final_filename)."""
@@ -1730,9 +1749,21 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
     else:
         base = "Untitled Song"
     suffix = " [Vocals]" if audio_type == "vocals" else ""
-    download_name = base + suffix + os.path.splitext(path)[1]
-    
-    return FileResponse(path, filename=download_name, headers={'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store'})
+    # Convert to MP3 on the fly if needed (vocals from Demucs may be WAV)
+    serve_path, is_tmp = _ensure_mp3_for_download(path)
+    dl_ext = ".mp3" if serve_path != path or path.lower().endswith(".mp3") else os.path.splitext(path)[1]
+    download_name = base + suffix + dl_ext
+
+    response = FileResponse(serve_path, filename=download_name, headers={'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store'})
+    if is_tmp:
+        # Schedule temp file cleanup after response is sent
+        import asyncio as _asyncio
+        async def _cleanup():
+            await _asyncio.sleep(30)
+            try: os.unlink(serve_path)
+            except Exception: pass
+        _asyncio.create_task(_cleanup())
+    return response
 
 
 @app.post("/api/segment-preview/{session_id}")
@@ -4856,8 +4887,9 @@ async def download_zip(
         # Vocals audio
         vocal_path = session.get("vocal_audio")
         if vocal_path and os.path.exists(vocal_path) and include_vocals == "1":
-            ext = os.path.splitext(vocal_path)[1]
-            zf.write(vocal_path, f"{base} [Vocals]{ext}")
+            serve_vocal, vocal_tmp = _ensure_mp3_for_download(vocal_path)
+            zf.write(serve_vocal, f"{base} [Vocals].mp3")
+            if vocal_tmp: _safe_unlink(serve_vocal)
 
         # Edited vocals audio — prefer new edited_vocal (incremental design), fall back to legacy cleaned_vocal
         edited_vocal_path = session.get("edited_vocal")
@@ -4870,8 +4902,9 @@ async def download_zip(
                     if os.path.exists(candidate):
                         edited_vocal_path = candidate
         if edited_vocal_path and os.path.exists(edited_vocal_path) and include_edited_vocals == "1":
-            ext = os.path.splitext(edited_vocal_path)[1]
-            zf.write(edited_vocal_path, f"{base} [Edited Vocals]{ext}")
+            serve_edited, edited_tmp = _ensure_mp3_for_download(edited_vocal_path)
+            zf.write(serve_edited, f"{base} [Edited Vocals].mp3")
+            if edited_tmp: _safe_unlink(serve_edited)
 
         # Instrumental audio (no_vocals from Demucs)
         instrumental_path = session.get("instrumental_audio")
