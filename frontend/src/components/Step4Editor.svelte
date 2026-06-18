@@ -10346,7 +10346,7 @@
     position: fixed;
     inset: 0;
     z-index: 9800;
-    background: rgba(0, 0, 0, 0.35);
+    background: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
