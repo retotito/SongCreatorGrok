@@ -9518,7 +9518,7 @@
           <span>Metronome</span><span style="padding-left: 4px">{metronomeEnabled ? ' 🔈' : ' 🔇'}</span>
         </button>
         {#if metronomeEnabled}
-          <button class="tool-btn sm" class:active={metronomeToolOpen} on:click={() => { metronomeToolOpen = !metronomeToolOpen; if (!metronomeToolOpen) clearMetronomePickTarget(); }} title="Open metronome downbeat tool">
+          <button class="tool-btn sm" class:active={metronomeToolOpen} on:click={() => { metronomeToolOpen = !metronomeToolOpen; if (metronomeToolOpen) { if (micEnabled) { micEnabled = false; stopMic(); } if (vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } } else { clearMetronomePickTarget(); } }} title="Open metronome downbeat tool">
             ⚙️
           </button>
         {/if}
