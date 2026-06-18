@@ -6248,6 +6248,24 @@
       if (!setGapMode) togglePlayback();
     }
 
+    // V: toggle vocal trace
+    if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) {
+      e.preventDefault();
+      vocalTraceEnabled = !vocalTraceEnabled;
+      if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+      toggleVocalTrace();
+      return;
+    }
+
+    // M: toggle mic
+    if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      micEnabled = !micEnabled;
+      if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
+      toggleMic();
+      return;
+    }
+
     // Arrow keys: move selected notes, or seek if nothing selected
     const hasSelection = selectedNotes.size > 0 || selectedNote !== null;
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
