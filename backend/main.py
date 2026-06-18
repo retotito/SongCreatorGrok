@@ -3803,7 +3803,7 @@ async def save_editor_state(session_id: str, request: Request):
 # ────────────────────────────────────────────────────────────
 # Step 4: Splice a mic recording into the vocal track
 # ────────────────────────────────────────────────────────────
-@app.post("/api/splice-recording/{session_id}")
+@app.post("/api/splice-recording/{session_id}")  # DEPRECATED: use /api/edit-vocal/{id} op=splice
 async def splice_recording(
     session_id: str,
     recording: UploadFile = File(...),
@@ -3921,9 +3921,9 @@ async def splice_recording(
 # ────────────────────────────────────────────────────────────
 # Step 4: Restore a segment from original vocal
 # ────────────────────────────────────────────────────────────
-@app.post("/api/restore-segment/{session_id}")
+@app.post("/api/restore-segment/{session_id}")  # DEPRECATED: use /api/edit-vocal/{id} op=restore
 async def restore_segment(session_id: str, request: Request):
-    """Restore a time range in the current vocal from the original demucs vocal.
+    """[DEPRECATED] Restore a time range in the current vocal from the original demucs vocal.
 
     Accepts JSON body:
         start_ms: float
@@ -4125,9 +4125,9 @@ async def edit_vocal(
 
 
 
-@app.post("/api/generate-cleaned-audio/{session_id}")
+@app.post("/api/generate-cleaned-audio/{session_id}")  # DEPRECATED: use /api/edit-vocal/{id} op=mute
 async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
-    """Generate cleaned audio by muting specified beat ranges.
+    """[DEPRECATED] Generate cleaned audio by muting specified beat ranges.
     
     Accepts JSON body with:
         cleanup_segments: list of {start_beat, end_beat}
@@ -4859,17 +4859,19 @@ async def download_zip(
             ext = os.path.splitext(vocal_path)[1]
             zf.write(vocal_path, f"{base} [Vocals]{ext}")
 
-        # Edited vocals audio (cleanup output from editor)
-        cleaned_path = result.get("cleaned_vocal_path")
-        if (not cleaned_path or not os.path.exists(cleaned_path)):
-            cleaned_file = result.get("cleaned_vocal_file")
-            if cleaned_file:
-                candidate = os.path.join(DOWNLOADS_DIR, cleaned_file)
-                if os.path.exists(candidate):
-                    cleaned_path = candidate
-        if cleaned_path and os.path.exists(cleaned_path) and include_edited_vocals == "1":
-            ext = os.path.splitext(cleaned_path)[1]
-            zf.write(cleaned_path, f"{base} [Edited Vocals]{ext}")
+        # Edited vocals audio — prefer new edited_vocal (incremental design), fall back to legacy cleaned_vocal
+        edited_vocal_path = session.get("edited_vocal")
+        if not edited_vocal_path or not os.path.exists(edited_vocal_path):
+            edited_vocal_path = result.get("cleaned_vocal_path")
+            if not edited_vocal_path or not os.path.exists(edited_vocal_path):
+                cleaned_file = result.get("cleaned_vocal_file")
+                if cleaned_file:
+                    candidate = os.path.join(DOWNLOADS_DIR, cleaned_file)
+                    if os.path.exists(candidate):
+                        edited_vocal_path = candidate
+        if edited_vocal_path and os.path.exists(edited_vocal_path) and include_edited_vocals == "1":
+            ext = os.path.splitext(edited_vocal_path)[1]
+            zf.write(edited_vocal_path, f"{base} [Edited Vocals]{ext}")
 
         # Instrumental audio (no_vocals from Demucs)
         instrumental_path = session.get("instrumental_audio")
