@@ -378,18 +378,18 @@
       </div>
     {/if}
 
-    {#if cleanupSegments.length > 0 && cleanedAudioAvailable && $sessionId}
+    {#if (hasEditedVocal || (cleanupSegments.length > 0 && cleanedAudioAvailable)) && $sessionId}
       <div class="cleanup-banner">
         <div class="cleanup-banner-content">
           <span class="cleanup-banner-icon">🧹</span>
           <div class="cleanup-banner-text">
-            <strong>{cleanupSegments.length} cleanup {cleanupSegments.length === 1 ? 'section' : 'sections'} applied</strong>
-            <p class="cleanup-banner-hint">The cleaned vocal preview reflects your current cleanup sections from Step 4.</p>
+            <strong>{cleanupSegments.length > 0 ? `${cleanupSegments.length} cleanup ${cleanupSegments.length === 1 ? 'section' : 'sections'} applied` : 'Edited vocals available'}</strong>
+            <p class="cleanup-banner-hint">The edited vocal preview reflects your current cleanup sections from Step 4.</p>
           </div>
         </div>
         <div class="cleanup-audio-compare">
-          <div class="audio-label">✨ Cleaned Vocals</div>
-          <audio controls src={getAudioUrl($sessionId, 'cleaned')}>
+          <div class="audio-label">✨ Edited Vocals</div>
+          <audio controls src={getAudioUrl($sessionId, hasEditedVocal ? 'edited' : 'cleaned')}>
             Your browser does not support the audio element.
           </audio>
           <div class="cleanup-transcribe-row">
