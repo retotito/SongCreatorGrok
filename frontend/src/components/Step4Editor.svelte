@@ -335,6 +335,8 @@
   let selectedCleanupSegment = null;
   let cleanupDrag = null; // { id, mode, startMs, endMs, mouseStartMs }
   let cleanupKeyboardSaveTimer = null;
+  let cleanupKeyboardAudioTimer = null;
+  let cleanupKeyboardAudioOldRange = null; // { startMs, endMs } — captured before first keypress in a sequence
   const cleanupJoinMaxGapMs = 150;
   let cleanupSegmentsHavePatchedMetadata = false;
 
@@ -441,6 +443,26 @@
     }
   }
 
+  function scheduleCleanupKeyboardAudio(oldRange, segId) {
+    // If no timer running yet, capture the old range (before any keypress in this sequence)
+    if (!cleanupKeyboardAudioTimer) {
+      cleanupKeyboardAudioOldRange = oldRange;
+    }
+    clearTimeout(cleanupKeyboardAudioTimer);
+    cleanupKeyboardAudioTimer = setTimeout(() => {
+      cleanupKeyboardAudioTimer = null;
+      const captured = cleanupKeyboardAudioOldRange;
+      cleanupKeyboardAudioOldRange = null;
+      if (!hasEditedVocal || !captured) return;
+      const seg = cleanupSegments.find(s => s.id === segId);
+      if (!seg) return;
+      callEditVocal({ op: 'restore', start_ms: captured.startMs, end_ms: captured.endMs })
+        .then(() => callEditVocal({ op: 'mute', start_ms: seg.startMs, end_ms: seg.endMs }))
+        .then(() => bustEditedVocalUrl())
+        .catch(err => console.warn('[SegKeyboard] edit-vocal failed:', err));
+    }, 500);
+  }
+
   function scheduleCleanupKeyboardSave() {
     clearCleanupKeyboardSaveTimer();
     cleanupKeyboardSaveTimer = setTimeout(() => {
@@ -523,6 +545,10 @@
     cleanedAudioDirty = true;
     markUnsaved();
     scheduleCleanupKeyboardSave();
+    // Schedule debounced edit-vocal update (500ms after last keypress)
+    if (hasEditedVocal) {
+      scheduleCleanupKeyboardAudio({ startMs: seg.startMs, endMs: seg.endMs }, seg.id);
+    }
     draw();
     return true;
   }
