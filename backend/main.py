@@ -2475,10 +2475,13 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
 
     async def event_generator():
         if use_cleaned:
-            result = session.get("result") or {}
-            audio_path = result.get("cleaned_vocal_path")
+            # Prefer new edited_vocal, fall back to legacy cleaned_vocal_path
+            audio_path = session.get("edited_vocal")
             if not audio_path or not os.path.exists(audio_path):
-                yield _send("error", "No cleaned audio found. Generate a cleaned preview first.")
+                result = session.get("result") or {}
+                audio_path = result.get("cleaned_vocal_path")
+            if not audio_path or not os.path.exists(audio_path):
+                yield _send("error", "No edited/cleaned audio found. Add cleanup sections first.")
                 return
         else:
             audio_path = session.get("vocal_audio") or session.get("original_audio")
@@ -3467,10 +3470,13 @@ async def generate_start(session_id: str, use_cleaned: bool = False):
     if session.get("status") == "generating":
         return {"status": "already_running"}
     if use_cleaned:
-        result = session.get("result") or {}
-        cleaned_path = result.get("cleaned_vocal_path")
+        # Prefer new edited_vocal, fall back to legacy cleaned_vocal_path
+        cleaned_path = session.get("edited_vocal")
         if not cleaned_path or not os.path.exists(cleaned_path):
-            raise HTTPException(status_code=400, detail="No cleaned audio found. Generate a cleaned preview first.")
+            result = session.get("result") or {}
+            cleaned_path = result.get("cleaned_vocal_path")
+        if not cleaned_path or not os.path.exists(cleaned_path):
+            raise HTTPException(status_code=400, detail="No edited/cleaned audio found. Add cleanup sections first.")
     def run_generation():
         original_vocal = session.get("vocal_audio")
         try:
