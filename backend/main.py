@@ -203,10 +203,11 @@ def _prune_patched_vocal_files(session_id: str, keep_last: int = 1):
 
     vocal_audio = session.get("vocal_audio")
     original_demucs_vocal = session.get("original_demucs_vocal")
+    edited_vocal = session.get("edited_vocal")
     patched_files = [p for p in session.get("patched_vocal_files", []) if p]
 
     keep_paths = set()
-    for path in (vocal_audio, original_demucs_vocal):
+    for path in (vocal_audio, original_demucs_vocal, edited_vocal):
         if path:
             keep_paths.add(os.path.abspath(path))
 
@@ -788,6 +789,7 @@ async def delete_session_endpoint(session_id: str):
     audio_candidates = [
         session.get("vocal_audio"),
         session.get("original_demucs_vocal"),
+        session.get("edited_vocal"),
     ]
     for fpath in session.get("patched_vocal_files", []):
         audio_candidates.append(fpath)
@@ -892,7 +894,7 @@ async def get_storage_info():
         upload_size = _dir_size(upload_dir) if os.path.isdir(upload_dir) else 0
 
         # Audio files
-        for key in ("original_audio", "vocal_audio", "original_demucs_vocal"):
+        for key in ("original_audio", "vocal_audio", "original_demucs_vocal", "edited_vocal"):
             p = s.get(key)
             if p and os.path.exists(p):
                 files.append({"label": key, "path": p, "size": _file_size(p)})
@@ -1636,14 +1638,17 @@ async def preview_audio(session_id: str, audio_type: str, request: Request):
         path = session.get("original_audio")
     elif audio_type == "vocals":
         path = session.get("vocal_audio")
+    elif audio_type == "edited":
+        # Edited vocal — has all cleanup section mutes and recordings applied
+        path = session.get("edited_vocal")
     elif audio_type == "instrumental":
         path = session.get("instrumental_audio")
     elif audio_type == "cleaned":
-        # Cleaned audio from cleanup segments
+        # Legacy: cleaned audio from cleanup segments
         result = session.get("result")
         path = result.get("cleaned_vocal_path") if result else None
     elif audio_type == "demucs":
-        # Original demucs vocal before any splice edits
+        # Legacy: original demucs vocal before any splice edits
         path = session.get("original_demucs_vocal") or session.get("vocal_audio")
     else:
         raise HTTPException(status_code=400, detail="Invalid audio type")
@@ -3645,6 +3650,7 @@ async def get_editor_data(session_id: str):
             vocal is not None and "vocal_patched_" in os.path.basename(vocal)
         ),
         "has_original_demucs": bool(session.get("original_demucs_vocal")),
+        "has_edited_vocal": bool(session.get("edited_vocal")) and os.path.isfile(session.get("edited_vocal", "")),
     }
 
 
@@ -3982,8 +3988,143 @@ async def restore_segment(session_id: str, request: Request):
 
 
 # ────────────────────────────────────────────────────────────
-# Step 4: Generate cleaned audio preview
+# Step 4: Edit vocal — incremental operations on edited_vocal
 # ────────────────────────────────────────────────────────────
+@app.post("/api/edit-vocal/{session_id}")
+async def edit_vocal(
+    session_id: str,
+    recording: UploadFile = File(None),
+    op: str = Form(...),
+    start_ms: float = Form(0),
+    end_ms: float = Form(0),
+    playback_rate: float = Form(1.0),
+):
+    """Incrementally modify edited_vocal in-place.
+
+    Operations (op):
+      create   — create edited_vocal as a full copy of vocal_audio (first section)
+      delete   — delete edited_vocal entirely (all sections removed)
+      mute     — zero out [start_ms, end_ms] in edited_vocal
+      restore  — copy [start_ms, end_ms] from vocal_audio (original) into edited_vocal
+      splice   — splice uploaded recording into edited_vocal at [start_ms, end_ms]
+    """
+    import shutil, tempfile
+    import numpy as np
+    import librosa
+    import soundfile as sf
+
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    original_path = session.get("vocal_audio")
+    if not original_path or not os.path.isfile(original_path):
+        raise ServiceError("No vocal audio found", "Upload audio first")
+
+    edited_path = session.get("edited_vocal")
+
+    # ── create ──────────────────────────────────────────────
+    if op == "create":
+        timestamp = int(time.time())
+        new_path = os.path.join(SESSIONS_DIR, f"edited_vocal_{session_id}_{timestamp}.wav")
+        audio, sr = librosa.load(original_path, sr=None, mono=False)
+        if audio.ndim == 1:
+            audio = np.expand_dims(audio, axis=0)
+        sf.write(new_path, audio.T, sr, subtype="PCM_16")
+        if edited_path and edited_path != new_path and os.path.isfile(edited_path):
+            _safe_unlink(edited_path)
+        session["edited_vocal"] = new_path
+        save_session(session_id)
+        log_step("EDIT_VOCAL", f"Session {session_id}: created edited_vocal → {os.path.basename(new_path)}")
+        return {"status": "ok", "op": "create"}
+
+    # ── delete ──────────────────────────────────────────────
+    if op == "delete":
+        if edited_path and os.path.isfile(edited_path):
+            _safe_unlink(edited_path)
+        session["edited_vocal"] = None
+        save_session(session_id)
+        log_step("EDIT_VOCAL", f"Session {session_id}: deleted edited_vocal")
+        return {"status": "ok", "op": "delete"}
+
+    # All other ops require edited_vocal to exist
+    if not edited_path or not os.path.isfile(edited_path):
+        raise ServiceError("edited_vocal does not exist", "Call op=create first")
+
+    audio, sr = librosa.load(edited_path, sr=None, mono=False)
+    if audio.ndim == 1:
+        audio = np.expand_dims(audio, axis=0)
+
+    start_sample = max(0, int(start_ms / 1000.0 * sr))
+    end_sample = min(audio.shape[1], int(end_ms / 1000.0 * sr))
+    if start_sample >= end_sample:
+        raise ServiceError("Invalid range", "start_ms must be before end_ms")
+
+    # ── mute ────────────────────────────────────────────────
+    if op == "mute":
+        audio[:, start_sample:end_sample] = 0.0
+        sf.write(edited_path, audio.T, sr, subtype="PCM_16")
+        log_step("EDIT_VOCAL", f"Session {session_id}: muted {start_ms:.0f}–{end_ms:.0f}ms")
+        return {"status": "ok", "op": "mute"}
+
+    # ── restore ─────────────────────────────────────────────
+    if op == "restore":
+        orig, _ = librosa.load(original_path, sr=sr, mono=False)
+        if orig.ndim == 1:
+            orig = np.expand_dims(orig, axis=0)
+        orig_end = min(orig.shape[1], end_sample)
+        audio[:, start_sample:orig_end] = orig[:, start_sample:orig_end]
+        sf.write(edited_path, audio.T, sr, subtype="PCM_16")
+        log_step("EDIT_VOCAL", f"Session {session_id}: restored {start_ms:.0f}–{end_ms:.0f}ms from original")
+        return {"status": "ok", "op": "restore"}
+
+    # ── splice ──────────────────────────────────────────────
+    if op == "splice":
+        if not recording:
+            raise ServiceError("No recording uploaded", "splice op requires a recording file")
+        suffix = os.path.splitext(recording.filename or "rec.webm")[1] or ".webm"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            shutil.copyfileobj(recording.file, tmp)
+            tmp_path = tmp.name
+        try:
+            clip, _ = librosa.load(tmp_path, sr=sr, mono=False)
+            if clip.ndim == 1:
+                clip = np.expand_dims(clip, axis=0)
+            if clip.shape[0] < audio.shape[0]:
+                clip = np.repeat(clip, audio.shape[0], axis=0)
+            elif clip.shape[0] > audio.shape[0]:
+                clip = clip[:audio.shape[0]]
+
+            region_len = end_sample - start_sample
+            if not math.isfinite(playback_rate) or playback_rate <= 0:
+                playback_rate = 1.0
+            if abs(playback_rate - 1.0) > 1e-3 and clip.shape[1] > 0:
+                stretch_rate = 1.0 / playback_rate
+                stretched_channels = []
+                for ch in range(clip.shape[0]):
+                    stretched_channels.append(librosa.effects.time_stretch(clip[ch].astype(np.float32), rate=stretch_rate))
+                max_len = max(c.shape[0] for c in stretched_channels)
+                stretched = np.zeros((clip.shape[0], max_len), dtype=np.float32)
+                for idx, c in enumerate(stretched_channels):
+                    stretched[idx, :c.shape[0]] = c
+                clip = stretched
+            if clip.shape[1] >= region_len:
+                clip_fit = clip[:, :region_len]
+            else:
+                pad = np.zeros((audio.shape[0], region_len - clip.shape[1]), dtype=np.float32)
+                clip_fit = np.concatenate([clip, pad], axis=1)
+
+            audio[:, start_sample:end_sample] = clip_fit
+            sf.write(edited_path, audio.T, sr, subtype="PCM_16")
+            log_step("EDIT_VOCAL", f"Session {session_id}: spliced recording into {start_ms:.0f}–{end_ms:.0f}ms (rate={playback_rate:.3f})")
+            return {"status": "ok", "op": "splice"}
+        finally:
+            os.unlink(tmp_path)
+
+    raise ServiceError(f"Unknown op: {op}", "Valid ops: create, delete, mute, restore, splice")
+
+
+
 @app.post("/api/generate-cleaned-audio/{session_id}")
 async def generate_cleaned_audio_endpoint(session_id: str, request: Request):
     """Generate cleaned audio by muting specified beat ranges.

@@ -20,7 +20,8 @@
   let bpm = 272;
   let gapMs = 0;
   let audioDuration = 0;
-  let vocalUrl = '';
+  let vocalUrl = '';  // legacy — keep for backward compat with old sessions
+  let editedVocalUrl = ''; // /edited endpoint — cache-busted after any edit
   let currentAudioUrl = ''; // drives the <audio> src — updated by switchAudioSource
 
   // Raw ms timings for BPM re-quantization
@@ -598,7 +599,7 @@
     cleanupDrag = null;
   }
 
-  function addCleanupSegmentAtMs(startMs) {
+  async function addCleanupSegmentAtMs(startMs) {
     pushUndo();
     let segStartMs = startMs;
     let segEndMs = startMs + Math.max(500, (15000 / bpm));
@@ -623,6 +624,18 @@
     console.log(`[CleanupSeg] Add segment id=${seg.id} startMs=${seg.startMs.toFixed(0)} endMs=${seg.endMs.toFixed(0)} | total=${cleanupSegments.length + 1}`);
     cleanupSegments = [...cleanupSegments, seg].sort((a, b) => a.startMs - b.startMs);
     selectedCleanupSegment = seg.id;
+    // Ensure edited_vocal exists, then mute the new range immediately
+    try {
+      if (!hasEditedVocal) {
+        await callEditVocal({ op: 'create' });
+        hasEditedVocal = true;
+        editedVocalUrl = getAudioUrl($sessionId, 'edited');
+      }
+      await callEditVocal({ op: 'mute', start_ms: seg.startMs, end_ms: seg.endMs });
+      bustEditedVocalUrl();
+    } catch (e) {
+      console.warn('[CleanupSeg] edit-vocal mute failed:', e);
+    }
     cleanedAudioDirty = true;
     markUnsaved();
     closeContextMenu();
@@ -630,7 +643,37 @@
     handleSave();
   }
 
+  async function callEditVocal(params, recordingBlob = null) {
+    const formData = new FormData();
+    formData.append('op', params.op);
+    if (params.start_ms != null) formData.append('start_ms', String(params.start_ms));
+    if (params.end_ms != null) formData.append('end_ms', String(params.end_ms));
+    if (params.playback_rate != null) formData.append('playback_rate', String(params.playback_rate));
+    if (recordingBlob) {
+      const ext = recordingBlob.type.includes('mp4') ? 'mp4' : recordingBlob.type.includes('ogg') ? 'ogg' : 'webm';
+      formData.append('recording', recordingBlob, `recording.${ext}`);
+    }
+    const resp = await fetch(`${API_BASE}/edit-vocal/${$sessionId}`, { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data?.detail || data?.message || `edit-vocal ${params.op} failed`);
+    }
+    return resp.json();
+  }
+
+  function bustEditedVocalUrl() {
+    editedVocalUrl = getAudioUrl($sessionId, 'edited') + `?v=${Date.now()}`;
+    if (audioSource === 'edited') switchAudioSource('edited');
+  }
+
   async function restoreSegmentRangeFromSource(startMs, endMs) {
+    if (hasEditedVocal) {
+      // New design: restore from original_vocal via edit-vocal endpoint
+      await callEditVocal({ op: 'restore', start_ms: startMs, end_ms: endMs });
+      bustEditedVocalUrl();
+      return { status: 'ok' };
+    }
+    // Legacy fallback: old restore-segment endpoint
     const resp = await fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -673,17 +716,20 @@
     }
 
     cleanupSegments = cleanupSegments.filter(s => s.id !== id);
-    if (serializeCleanupSegmentsForCleaning().length === 0) {
-      cleanedAudioAvailable = false;
-      cleanedAudioCacheBust = '';
-    }
     if (selectedCleanupSegment === id) selectedCleanupSegment = null;
     if (cleanupSegments.length === 0) {
+      // Last section deleted — delete the edited_vocal file entirely
+      if (hasEditedVocal) {
+        try {
+          await callEditVocal({ op: 'delete' });
+          hasEditedVocal = false;
+          editedVocalUrl = '';
+        } catch (e) { console.warn('[CleanupSeg] edit-vocal delete failed:', e); }
+      }
       cleanedAudioAvailable = false;
-      // Auto-switch back to vocals (uses updated vocalUrl after restore above)
+      cleanedAudioCacheBust = '';
       if (audioSource === 'edited') switchAudioSource('vocals');
     } else if (audioSource === 'edited') {
-      // Refresh edited source using canonical resolver (cleaned preferred).
       switchAudioSource('edited');
     }
     cleanedAudioDirty = true;
@@ -699,11 +745,10 @@
     if (!seg || !segRecPatched.has(id)) return;
     pushUndo();
     try {
-      const data = await restoreSegmentRangeFromSource(seg.startMs, seg.endMs);
-      console.log(`[CleanupSeg] Emptied recorded segment id=${id}:`, data);
+      await callEditVocal({ op: 'mute', start_ms: seg.startMs, end_ms: seg.endMs });
+      bustEditedVocalUrl();
+      console.log(`[CleanupSeg] Emptied recorded segment id=${id}: muted range`);
       segRecPatched = new Set([...segRecPatched].filter(x => x !== id));
-      cleanedAudioAvailable = false;
-      cleanedAudioCacheBust = '';
       cleanedAudioDirty = true;
       markUnsaved();
       closeContextMenu();
@@ -820,12 +865,11 @@
   }
 
   function getEditedAudioUrl() {
-    // Prefer cleaned audio whenever it exists (it includes latest cleanup muting,
-    // and on backend it is generated from the current vocal source, including splices).
+    // New design: use /edited endpoint when edited_vocal exists
+    if (hasEditedVocal) return editedVocalUrl || getAudioUrl($sessionId, 'edited');
+    // Legacy fallback: cleaned > spliced vocals > original
     if (cleanedAudioAvailable) return getAudioUrl($sessionId, 'cleaned') + cleanedAudioCacheBust;
-    // Fallback to patched vocal when no cleaned file exists yet.
     if (segRecPatched.size > 0) return vocalUrl;
-    // Last fallback should still be a real vocals source, never /cleaned.
     return originalVocalUrl || vocalUrl;
   }
 
@@ -989,7 +1033,7 @@
   }
 
   function resolvePreferredAudioSource(preferred) {
-    const editedAvailable = hasVocalsAudio && (cleanedAudioAvailable || segRecPatched.size > 0);
+    const editedAvailable = hasVocalsAudio && (hasEditedVocal || cleanedAudioAvailable || segRecPatched.size > 0);
     if (preferred === 'edited' && editedAvailable) return 'edited';
     if (preferred === 'vocals' && hasVocalsAudio) return 'vocals';
     if (preferred === 'original' && hasOriginalAudio) return 'original';
@@ -1282,9 +1326,10 @@
   // Audio source toggle (vocals vs full mix)
   let audioSource = 'vocals'; // 'vocals' | 'edited' | 'original'
   let originalUrl = '';
-  let originalVocalUrl = ''; // frozen at load — never changed by splices
-  let cleanedAudioAvailable = false; // true when cleaned_vocal_path exists on backend
-  let cleanedAudioCacheBust = ''; // appended to /cleaned URL to force browser reload
+  let originalVocalUrl = ''; // always /vocals — set once at load, never changes
+  let hasEditedVocal = false; // true when edited_vocal file exists on backend
+  let cleanedAudioAvailable = false; // legacy — keep for old sessions
+  let cleanedAudioCacheBust = ''; // legacy
   let hasVocalsAudio = true;
   let hasOriginalAudio = true;
 
@@ -1344,7 +1389,7 @@
   let segRecCountdownTimer = null;
   let segRecStopTimer = null;       // auto-stop at end of segment
   let segRecUploading = false;
-  let segRecPatched = new Set();    // segment ids that have been successfully spliced
+  let segRecPatched = new Set();    // legacy — segment ids spliced in current session (used for visual state)
   let segRecApplied = false;        // true after successful splice for current modal segment
   let segRecLyricsLoading = false;
   let segRecLyricsError = '';
@@ -3849,28 +3894,27 @@
         }
         if (freedStart !== null) {
           console.log(`[SegResize] Spliced segment shrunk — restoring freed region ${freedStart.toFixed(0)}–${freedEnd.toFixed(0)}ms`);
-          fetch(`${API_BASE}/restore-segment/${$sessionId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ start_ms: freedStart, end_ms: freedEnd }),
-          }).then(r => r.json()).then(result => {
-            console.log('[SegResize] Restore OK:', result);
-            const cacheBust = `?v=${Date.now()}`;
-            vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
-            if (audioSource === 'edited') {
-              currentAudioUrl = vocalUrl;
-              if (audioEl) { audioEl.src = currentAudioUrl; audioEl.load(); }
-              loadWaveform(currentAudioUrl);
-            }
-            handleSave();
-          }).catch(err => {
-            console.error('[SegResize] Restore failed:', err);
-            handleSave();
-          });
+          callEditVocal({ op: 'restore', start_ms: freedStart, end_ms: freedEnd })
+            .then(() => { bustEditedVocalUrl(); handleSave(); })
+            .catch(err => { console.error('[SegResize] Restore failed:', err); handleSave(); });
           return;
         }
       }
       draw();
+      // New design: on move/resize of a section, update edited_vocal incrementally
+      if (hasEditedVocal && seg && (
+        Math.abs(seg.startMs - drag.startMs) > 10 ||
+        Math.abs(seg.endMs - drag.endMs) > 10
+      )) {
+        const oldStart = drag.startMs, oldEnd = drag.endMs;
+        const newStart = seg.startMs, newEnd = seg.endMs;
+        // Restore the old range, mute the new range
+        callEditVocal({ op: 'restore', start_ms: oldStart, end_ms: oldEnd })
+          .then(() => callEditVocal({ op: 'mute', start_ms: newStart, end_ms: newEnd }))
+          .then(() => { bustEditedVocalUrl(); if (cleanedAudioDirty) handleSave(); })
+          .catch(err => { console.warn('[SegMove] edit-vocal failed:', err); if (cleanedAudioDirty) handleSave(); });
+        return;
+      }
       if (cleanedAudioDirty) handleSave();
       return;
     }
@@ -4504,7 +4548,7 @@
       ? $lyricsData.language
       : 'auto';
     segRegenCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
-    segRegenAudioSource = (segRegenCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+    segRegenAudioSource = (segRegenCurrentEditorSource === 'edited' && (hasEditedVocal || cleanedAudioAvailable || segRecPatched.size > 0))
       ? 'edited'
       : 'vocals';
 
@@ -4625,7 +4669,7 @@
     vibratoError = '';
     vibratoSegments = [];
     vibratoCurrentEditorSource = audioSource === 'edited' ? 'edited' : 'vocals';
-    vibratoAudioSource = (vibratoCurrentEditorSource === 'edited' && (cleanedAudioAvailable || segRecPatched.size > 0))
+    vibratoAudioSource = (vibratoCurrentEditorSource === 'edited' && (hasEditedVocal || cleanedAudioAvailable || segRecPatched.size > 0))
       ? 'edited'
       : 'vocals';
     vibratoModalOpen = true;
@@ -8021,25 +8065,23 @@
 
     segRecUploading = true;
     try {
-      const formData = new FormData();
-      const ext = segRecBlob.type.includes('mp4') ? 'mp4' : segRecBlob.type.includes('ogg') ? 'ogg' : 'webm';
-      formData.append('recording', segRecBlob, `segment_recording.${ext}`);
-      formData.append('start_ms', String(seg.startMs));
-      formData.append('end_ms', String(seg.endMs));
-      formData.append('playback_rate', String(Math.max(0.1, playbackRate || 1.0)));
+      // Ensure edited_vocal exists before splicing
+      if (!hasEditedVocal) {
+        await callEditVocal({ op: 'create' });
+        hasEditedVocal = true;
+      }
 
-      const resp = await fetch(`${API_BASE}/splice-recording/${$sessionId}`, { method: 'POST', body: formData });
-      if (!resp.ok) throw new Error(`Splice failed: ${resp.statusText}`);
+      // Splice the recording into edited_vocal
+      await callEditVocal(
+        { op: 'splice', start_ms: seg.startMs, end_ms: seg.endMs, playback_rate: Math.max(0.1, playbackRate || 1.0) },
+        segRecBlob
+      );
 
-      const spliceResult = await resp.json();
-      console.log(`[SegRec] Splice OK:`, spliceResult);
       const appliedSegId = segRecSegmentId;
       segRecPatched = new Set([...segRecPatched, segRecSegmentId]);
-      // Bust vocal URL cache so the editor plays the new spliced audio
-      const cacheBust = `?v=${Date.now()}`;
-      vocalUrl = (hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '') + cacheBust;
-      if (!originalVocalUrl) originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
-      console.log(`[SegRec] Updated vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | audioSource: ${audioSource} → edited`);
+      bustEditedVocalUrl();
+      console.log(`[SegRec] Splice OK via edit-vocal | editedVocalUrl=${editedVocalUrl}`);
+
       const wasPlaying = isPlaying;
       const resumeTime = currentTimeSec || audioEl?.currentTime || 0;
       if (wasPlaying) {
@@ -8048,14 +8090,10 @@
         cancelAnimationFrame(animFrame);
       }
 
-      // Force edited source immediately and wait one microtask so the bound <audio src>
-      // is updated before calling load()/seek/play.
-      audioSource = 'edited';
-      currentAudioUrl = vocalUrl;
+      // Switch to edited source — bustEditedVocalUrl already called switchAudioSource
+      // but we need to ensure the audio element loads the new URL
       await tick();
-
       if (audioEl) {
-        // Defensive: set src directly as well (in case DOM binding is delayed).
         editedAudioLoading = true;
         if (audioEl.src !== currentAudioUrl) audioEl.src = currentAudioUrl;
         audioEl.load();
@@ -8066,22 +8104,19 @@
         };
       }
 
-      // Keep waveform in sync with the patched vocal immediately.
       loadWaveform(currentAudioUrl);
       cleanedAudioDirty = true;
       segRecApplied = true;
       micEnabled = false;
-      // Refresh green pitch line for the newly patched segment
       if (pitchLineVisible) computeRecordedPitchLine();
       stopMic();
-      handleSave(); // triggers auto-regenerate
+      handleSave();
       if (closeAfterApply) {
         segRecPhase = 'idle';
         segRecSegmentId = null;
       } else {
         segRecPhase = 'review';
       }
-      // Keep modal open; if preview was generated pre-splice, users already saw it.
       if (!closeAfterApply && segRecSegmentId === appliedSegId && segRecLyricsLines.length === 0 && !segRecLyricsError) {
         await generateLyricsForRecordedSegment(true);
       }
@@ -8834,20 +8869,22 @@
       hasUnsavedChanges = false;
       hasVocalsAudio = data.has_vocals !== false;
       hasOriginalAudio = data.has_original !== false;
-      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_vocal_splice=${data.has_vocal_splice} has_original_demucs=${data.has_original_demucs}`);
-      vocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
-      // If splices exist, original demucs vocal is served at /demucs; else same as vocals
-      originalVocalUrl = (hasVocalsAudio && data.has_original_demucs)
-        ? getAudioUrl($sessionId, 'demucs')
-        : vocalUrl;
+      hasEditedVocal = !!data.has_edited_vocal;
+      console.log(`[Step4] loadData: has_vocals=${data.has_vocals} has_original=${data.has_original} has_edited_vocal=${data.has_edited_vocal}`);
+      // originalVocalUrl always points to /vocals (the original, never edited)
+      originalVocalUrl = hasVocalsAudio ? getAudioUrl($sessionId, 'vocals') : '';
+      vocalUrl = originalVocalUrl; // legacy compat
+      editedVocalUrl = hasEditedVocal ? getAudioUrl($sessionId, 'edited') : '';
+      // Legacy compat: handle old sessions with original_demucs_vocal
+      if (hasVocalsAudio && data.has_original_demucs && !hasEditedVocal) {
+        originalVocalUrl = getAudioUrl($sessionId, 'demucs');
+      }
       if (data.has_vocal_splice && cleanupSegments.length > 0 && segRecPatched.size === 0 && !cleanupSegmentsHavePatchedMetadata) {
-        // Legacy sessions may not contain per-segment patched flags.
-        // Favor preserving recorded audio by treating existing segments as patched.
         segRecPatched = new Set(cleanupSegments.map(s => s.id));
       }
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
-      console.log(`[Step4] URLs: vocalUrl=${vocalUrl} | originalVocalUrl=${originalVocalUrl} | originalUrl=${originalUrl}`);
-      const defaultSource = hasVocalsAudio ? (data.has_vocal_splice ? 'edited' : 'vocals') : (hasOriginalAudio ? 'original' : 'original');
+      console.log(`[Step4] URLs: originalVocalUrl=${originalVocalUrl} | editedVocalUrl=${editedVocalUrl} | originalUrl=${originalUrl}`);
+      const defaultSource = hasVocalsAudio ? ((hasEditedVocal || data.has_vocal_splice) ? 'edited' : 'vocals') : (hasOriginalAudio ? 'original' : 'original');
       console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | default audioSource=${defaultSource}`);
       const uiPrefs = restoreEditorUiPrefs();
       if (uiPrefs) {

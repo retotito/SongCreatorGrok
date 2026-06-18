@@ -137,7 +137,8 @@
   let isGeneratingCleaned = false;
   let cleanedAudioAvailable = false;
   let cleanedAudioFilename = '';
-  let hasOriginalDemucs = false; // true when original unedited demucs vocal exists (splice happened)
+  let hasOriginalDemucs = false; // legacy compat
+  let hasEditedVocal = false; // true when edited_vocal exists (new design)
 
   function startTranscribeTicker() {
     transcribeElapsed = 0;
@@ -157,7 +158,8 @@
       // Restore cleaned audio state from backend (only reset if segments changed)
       cleanedAudioAvailable = editorData.cleaned_audio_available || false;
       if (!cleanedAudioAvailable) cleanedAudioFilename = '';
-      hasOriginalDemucs = editorData.has_original_demucs || false;
+      hasOriginalDemucs = editorData.has_original_demucs || false; // legacy
+      hasEditedVocal = editorData.has_edited_vocal || false;
     } catch (e) {
       console.error('[Step2] Failed to load cleanup segments:', e);
       cleanupSegments = [];
@@ -245,10 +247,10 @@
 
   // Audio
   $: hasVocals = $uploadData.hasVocals;
-  // Use demucs (original pre-splice vocal) when available so the top preview
-  // always plays the unedited vocals, not the spliced version.
+  // Always use /vocals (original unedited vocal) for the Step 2 preview.
+  // With new design: /vocals is always the original. Legacy: use /demucs when has_original_demucs.
   $: audioSrc = $sessionId && hasVocals
-    ? getAudioUrl($sessionId, hasOriginalDemucs ? 'demucs' : 'vocals')
+    ? getAudioUrl($sessionId, hasOriginalDemucs && !hasEditedVocal ? 'demucs' : 'vocals')
     : '';
 
   // Sync from store ONCE on mount (e.g. when navigating back to Step 2)
