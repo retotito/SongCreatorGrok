@@ -6183,8 +6183,8 @@
       if (e.code === 'ArrowLeft') { e.preventDefault(); seekPlayback(e.shiftKey ? -1 : -5); return; }
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
-      if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); return; }
-      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); return; }
+      if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (!uiModalGuardActive) { micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); } return; }
+      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); if (!uiModalGuardActive) { vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); } return; }
       if (e.code === 'Escape') {
         e.preventDefault();
         if (loopStartBeat !== null) clearLoop();
@@ -6251,18 +6251,22 @@
     // V: toggle vocal trace
     if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) {
       e.preventDefault();
-      vocalTraceEnabled = !vocalTraceEnabled;
-      if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
-      toggleVocalTrace();
+      if (!uiModalGuardActive) {
+        vocalTraceEnabled = !vocalTraceEnabled;
+        if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); }
+        toggleVocalTrace();
+      }
       return;
     }
 
     // M: toggle mic
     if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
-      micEnabled = !micEnabled;
-      if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
-      toggleMic();
+      if (!uiModalGuardActive) {
+        micEnabled = !micEnabled;
+        if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
+        toggleMic();
+      }
       return;
     }
 
