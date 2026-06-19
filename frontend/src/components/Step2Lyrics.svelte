@@ -253,15 +253,6 @@
     ? getAudioUrl($sessionId, hasOriginalDemucs && !hasEditedVocal ? 'demucs' : 'vocals')
     : '';
 
-  // Sync from store ONCE on mount (e.g. when navigating back to Step 2)
-  let initializedFromStore = false;
-  $: if ($lyricsData.text && !initializedFromStore) {
-    initializedFromStore = true;
-    lyricsText = $lyricsData.text;
-    artist = $lyricsData.artist || artist;
-    // Removed invalid async/await/try/catch from reactive statement
-  }
-
   $: if ($currentStep === 2 && $sessionId) {
     checkTestSession();
     loadCleanupSegments();
