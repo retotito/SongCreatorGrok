@@ -255,7 +255,42 @@
     saveComparisonLyrics();
   }
 
-  function toggleLineUnderline(cm, lineNo) {
+  function getDividerStorageKey(editorName) {
+    return $sessionId ? `line_dividers_${editorName}_${$sessionId}` : null;
+  }
+
+  function saveDividers(cm, editorName) {
+    const key = getDividerStorageKey(editorName);
+    if (!key) return;
+    const dividerLines = [];
+    cm.eachLine((handle) => {
+      if (handle.__lineDividerActive) {
+        dividerLines.push(cm.getLineNumber(handle));
+      }
+    });
+    try { localStorage.setItem(key, JSON.stringify(dividerLines)); } catch {}
+  }
+
+  function loadDividers(cm, editorName) {
+    const key = getDividerStorageKey(editorName);
+    if (!key) return;
+    try {
+      const stored = localStorage.getItem(key);
+      if (!stored) return;
+      const lines = JSON.parse(stored);
+      if (!Array.isArray(lines)) return;
+      cm.operation(() => {
+        lines.forEach(lineNo => {
+          const handle = cm.getLineHandle(lineNo);
+          if (!handle) return;
+          cm.addLineClass(handle, 'wrap', 'cm-line-divider');
+          handle.__lineDividerActive = true;
+        });
+      });
+    } catch {}
+  }
+
+  function toggleLineUnderline(cm, lineNo, editorName) {
     const handle = cm.getLineHandle(lineNo);
     if (!handle) return;
     const cls = 'cm-line-divider';
@@ -266,6 +301,7 @@
       cm.addLineClass(handle, 'wrap', cls);
       handle.__lineDividerActive = true;
     }
+    saveDividers(cm, editorName);
   }
 
   // Load comparison lyrics once per session id.
@@ -368,8 +404,9 @@
         if (value !== lyricsText) lyricsText = value;
       });
       generatedEditor.on('gutterClick', (cm, lineNo) => {
-        toggleLineUnderline(cm, lineNo);
+        toggleLineUnderline(cm, lineNo, 'generated');
       });
+      loadDividers(generatedEditor, 'generated');
     }
 
     if (comparisonLyricsTextarea && !comparisonEditor) {
@@ -384,9 +421,10 @@
         saveComparisonLyrics();
       });
       comparisonEditor.on('gutterClick', (cm, lineNo) => {
-        toggleLineUnderline(cm, lineNo);
+        toggleLineUnderline(cm, lineNo, 'comparison');
       });
       if (comparisonState) applyComparisonState(comparisonState);
+      loadDividers(comparisonEditor, 'comparison');
     }
   });
 
