@@ -1415,12 +1415,13 @@
   $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || vibratoModalOpen || metronomeToolOpen;
   $: recordingActive.set(uiModalGuardActive);
   let segRecSegmentId = null;       // cleanup segment being recorded
-  const SEG_REC_PREROLL_SEC = 2;    // fixed lead-in before segment recording starts
+  const SEG_REC_PREROLL_SEC = 4;    // fixed lead-in before segment recording starts
   let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
   let segRecChunks = [];
   let segRecBlob = null;            // recorded blob ready for review/upload
   let segRecObjectUrl = null;       // object URL for review playback
   let segRecCountdown = 0;          // countdown display during preroll
+  let segRecCountdownProgress = 0;  // 0..1 circular progress during preroll
   let segRecCountdownTimer = null;
   let segRecStopTimer = null;       // auto-stop at end of segment
   let segRecUploading = false;
@@ -6721,7 +6722,13 @@
     // Scroll logic
     const canvasWidth = canvasEl?.width || 800;
     const minScrollX = getMinBeat() * zoom;
-    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+    const playheadInsideLoop = loopEnabled
+      && loopStartBeat !== null
+      && loopEndBeat !== null
+      && playbackBeat >= Math.min(loopStartBeat, loopEndBeat)
+      && playbackBeat <= Math.max(loopStartBeat, loopEndBeat);
+
+    if (playheadInsideLoop) {
       // Keep normal page/follow behavior during loops too, but clamp scroll so
       // the active viewport stays anchored to the loop region.
       const loopMinScroll = Math.max(minScrollX, loopStartBeat * zoom);
@@ -8071,10 +8078,6 @@
     loopEndBeat = timeToBeat(endSec);
     loopEnabled = true;
 
-    // Convert audio-time waits to wall-clock waits using the active playback rate
-    // so recording aligns with the segment start even at non-1x speed.
-    const effectivePlaybackRate = Math.max(0.1, playbackRate || 1.0);
-
     // Seek to pre-roll start.
     seekToTime(Math.max(0, startSec - prerollSec));
 
@@ -8082,6 +8085,30 @@
     // the clipped lead duration (c - s), then start playback.
     const clippedLeadSec = Math.max(0, prerollSec - startSec);
     const runningPrerollSec = Math.max(0, prerollSec - clippedLeadSec);
+    const effectivePlaybackRate = Math.max(0.1, playbackRate || 1.0);
+    const runningPrerollWallSec = runningPrerollSec / effectivePlaybackRate;
+
+    // Countdown uses wall-clock time and starts immediately so the ring animates
+    // for the full preroll, including any clipped lead time at the start of the song.
+    if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
+    segRecCountdownProgress = 0;
+    segRecCountdown = Math.max(1, Math.ceil(prerollSec));
+    const countdownStartMs = Date.now();
+    const countdownDurationMs = prerollSec * 1000;
+    const countdownEndMs = countdownStartMs + countdownDurationMs;
+    segRecCountdownTimer = setInterval(() => {
+      const remainingMs = Math.max(0, countdownEndMs - Date.now());
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+      segRecCountdownProgress = Math.min(1, 1 - (remainingMs / countdownDurationMs));
+      if (remainingMs > 0) {
+        segRecCountdown = remainingSeconds;
+      } else {
+        segRecCountdown = 1;
+        clearInterval(segRecCountdownTimer);
+        segRecCountdownTimer = null;
+      }
+    }, 50);
+
     if (clippedLeadSec > 0) {
       await new Promise(resolve => setTimeout(resolve, clippedLeadSec * 1000));
       if (segRecPhase !== 'preroll') return; // was cancelled
@@ -8089,17 +8116,7 @@
 
     if (!isPlaying) togglePlayback();
 
-    // Countdown
-    segRecCountdownTimer = setInterval(() => {
-      segRecCountdown--;
-      if (segRecCountdown <= 0) {
-        clearInterval(segRecCountdownTimer);
-        segRecCountdownTimer = null;
-      }
-    }, 1000);
-
-    // Start MediaRecorder when playback reaches segment start.
-    await new Promise(resolve => setTimeout(resolve, (runningPrerollSec / effectivePlaybackRate) * 1000));
+    await new Promise(resolve => setTimeout(resolve, runningPrerollSec * 1000));
 
     if (segRecPhase !== 'preroll') return; // was cancelled
 
@@ -8138,6 +8155,8 @@
     console.log(`[SegRec] Stop recording (phase=${segRecPhase} recorderState=${segRecRecorder?.state})`);
     if (segRecStopTimer) { clearTimeout(segRecStopTimer); segRecStopTimer = null; }
     if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
+    segRecCountdown = 0;
+    segRecCountdownProgress = 0;
     if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
     if (isPlaying) togglePlayback();
   }
@@ -9239,7 +9258,11 @@
         </div>
       {/if}
       {#if segRecPhase === 'preroll'}
-        <div class="seg-rec-countdown-overlay">{segRecCountdown}</div>
+        <div class="seg-rec-countdown-overlay">
+          <div class="seg-rec-countdown-ring" style={`--seg-rec-progress:${segRecCountdownProgress};`}>
+            <div class="seg-rec-countdown-number">{segRecCountdown}</div>
+          </div>
+        </div>
       {/if}
       {#if segRecPhase === 'review' && segRecObjectUrl}
         <audio controls src={segRecObjectUrl} style="width:100%;margin:6px 0;"></audio>
@@ -11051,12 +11074,38 @@
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 9100;
-    font-size: 8rem;
-    font-weight: 900;
-    color: #f0c040;
-    text-shadow: 0 0 40px rgba(240,192,64,0.8), 0 2px 8px rgba(0,0,0,0.9);
     pointer-events: none;
+  }
+
+  .seg-rec-countdown-ring {
+    --seg-rec-progress: 0;
+    width: 172px;
+    height: 172px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(10, 14, 20, 0.95) 58%, transparent 60%),
+      conic-gradient(
+        #f0c040 calc(var(--seg-rec-progress) * 1turn),
+        rgba(240, 192, 64, 0.2) 0
+      );
+    border: 2px solid rgba(240, 192, 64, 0.45);
+    box-shadow:
+      0 0 0 1px rgba(255, 230, 140, 0.2) inset,
+      0 10px 30px rgba(0, 0, 0, 0.55),
+      0 0 40px rgba(240, 192, 64, 0.35);
+  }
+
+  .seg-rec-countdown-number {
+    font-size: 4.1rem;
+    font-weight: 900;
+    color: #ffe28a;
+    text-shadow: 0 0 20px rgba(240, 192, 64, 0.6), 0 2px 8px rgba(0, 0, 0, 0.9);
     line-height: 1;
+    min-width: 1ch;
+    text-align: center;
   }
 
   .seg-rec-hint {
