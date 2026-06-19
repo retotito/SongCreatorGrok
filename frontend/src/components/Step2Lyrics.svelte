@@ -255,6 +255,19 @@
     saveComparisonLyrics();
   }
 
+  function toggleLineUnderline(cm, lineNo) {
+    const handle = cm.getLineHandle(lineNo);
+    if (!handle) return;
+    const cls = 'cm-line-divider';
+    if (handle.__lineDividerActive) {
+      cm.removeLineClass(handle, 'wrap', cls);
+      handle.__lineDividerActive = false;
+    } else {
+      cm.addLineClass(handle, 'wrap', cls);
+      handle.__lineDividerActive = true;
+    }
+  }
+
   // Load comparison lyrics once per session id.
   $: if ($sessionId && comparisonLyricsLoadedForSession !== $sessionId) {
     comparisonLyricsLoadedForSession = $sessionId;
@@ -330,6 +343,15 @@
         .lyrics-column .CodeMirror-code > div:nth-child(even) .CodeMirror-gutter-wrapper {
           background: rgba(255, 255, 255, 0.08);
         }
+        .lyrics-column .CodeMirror-code > div.cm-line-divider .CodeMirror-line {
+          border-bottom: 2px solid rgba(255, 255, 255, 0.55);
+          box-sizing: border-box;
+        }
+        .lyrics-column .CodeMirror-code > div.cm-line-divider .CodeMirror-gutter-wrapper,
+        .lyrics-column .CodeMirror-code > div.cm-line-divider .CodeMirror-gutter-elt {
+          border-bottom: 2px solid rgba(255, 255, 255, 0.55);
+          box-sizing: border-box;
+        }
       `;
       document.head.appendChild(zebraStyleEl);
     }
@@ -345,6 +367,9 @@
         const value = cm.getValue();
         if (value !== lyricsText) lyricsText = value;
       });
+      generatedEditor.on('gutterClick', (cm, lineNo) => {
+        toggleLineUnderline(cm, lineNo);
+      });
     }
 
     if (comparisonLyricsTextarea && !comparisonEditor) {
@@ -357,6 +382,9 @@
       comparisonEditor.on('change', (cm) => {
         comparisonLyrics = cm.getValue();
         saveComparisonLyrics();
+      });
+      comparisonEditor.on('gutterClick', (cm, lineNo) => {
+        toggleLineUnderline(cm, lineNo);
       });
       if (comparisonState) applyComparisonState(comparisonState);
     }
