@@ -10108,6 +10108,14 @@
           ></div>
         {/each}
       </div>
+      <!-- loop region -->
+      {#if loopEnabled && loopStartBeat !== null && loopEndBeat !== null}
+        {@const lStart = Math.min(loopStartBeat, loopEndBeat)}
+        {@const lEnd   = Math.max(loopStartBeat, loopEndBeat)}
+        {@const lLeft  = ((lStart - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}
+        {@const lWidth = Math.max(0.2, (lEnd - lStart) / scrollBeatRange * 100).toFixed(3)}
+        <div class="scrollbar-loop-region" style="left: {lLeft}%; width: {lWidth}%;"></div>
+      {/if}
       <!-- playhead tick -->
       {#if !isPlaying}
         <div class="scrollbar-playhead" style="left: {playheadPct}%"></div>
@@ -11400,6 +11408,17 @@
       #1a1a2e      13px,
       transparent  13px
     );
+  }
+
+  .scrollbar-loop-region {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(79, 140, 255, 0.22);
+    border-left: 1px solid rgba(79, 140, 255, 0.55);
+    border-right: 1px solid rgba(79, 140, 255, 0.55);
+    pointer-events: none;
+    z-index: 2;
   }
 
   .scrollbar-cleanup-lane {
