@@ -3141,6 +3141,10 @@
 
     // Waveform cleanup segment drag
     if (showWaveform && my < waveTop()) {
+      // Skip cleanup hit test if we're in the downbeat handle strip — let it handle the drag
+      if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H) {
+        // fall through to downbeat handle handler below
+      } else {
       const hit = hitTestCleanupSegment(mx, my);
       if (hit) {
         const seg = cleanupSegments.find(s => s.id === hit.id);
@@ -3166,6 +3170,7 @@
         }
       }
       selectedCleanupSegment = null;
+      }
     }
 
     // ── Beat Marker mode: left-click on waveform places a marker ──
@@ -3655,7 +3660,9 @@
       let cursor = '';
 
       if (showWaveform && my < waveTop()) {
-        const cleanupHit = hitTestCleanupSegment(mx, my);
+        // Don't check cleanup segments when the downbeat handle strip has priority
+        const inDownbeatStrip = metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H;
+        const cleanupHit = !inDownbeatStrip && hitTestCleanupSegment(mx, my);
         if (cleanupHit && !segRecPatched.has(cleanupHit.id)) {
           if (cleanupHit.mode === 'start' || cleanupHit.mode === 'end') {
             cursor = 'col-resize';
