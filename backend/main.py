@@ -263,8 +263,12 @@ def _resolve_segment_audio_source(session: dict, audio_source: str) -> tuple[str
     src = (audio_source or "vocals").lower()
 
     if src == "edited":
-        # Prefer cleaned vocals when present, otherwise use patched vocal timeline.
-        path = result.get("cleaned_vocal_path") or session.get("vocal_audio")
+        # Prefer new edited_vocal, fall back to legacy cleaned_vocal_path, then vocal_audio.
+        path = session.get("edited_vocal")
+        if not path or not os.path.exists(path):
+            path = result.get("cleaned_vocal_path")
+        if not path or not os.path.exists(path):
+            path = session.get("vocal_audio")
         return path, "edited"
 
     if src == "original":
