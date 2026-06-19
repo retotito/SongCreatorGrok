@@ -701,6 +701,7 @@
 
     .lyrics-comparison-container {
       display: flex;
+      align-items: flex-start;
       gap: 1rem;
       width: 100%;
     }
@@ -708,6 +709,12 @@
     .lyrics-column {
       flex: 1;
       min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .lyrics-column label {
+      min-height: 2.5rem;
     }
 
     .lyrics-column :global(.CodeMirror) {

@@ -129,7 +129,7 @@
   <SetupScreen {setupStatus} on:done={onSetupDone} />
 {/if}
 
-<div class="app" class:full-width={$currentStep === 4}>
+<div class="app" class:wide-width={$currentStep === 2} class:full-width={$currentStep === 4}>
   {#if $currentStep === 0}
     <ProjectLauncher />
   {:else}
@@ -187,6 +187,10 @@
     max-width: 900px;
     margin: 0 auto;
     padding: 1rem;
+  }
+
+  .app.wide-width {
+    max-width: 1280px;
   }
 
   .app.full-width {
