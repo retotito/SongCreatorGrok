@@ -1427,6 +1427,7 @@
   let segRecUploading = false;
   let segRecPatched = new Set();    // legacy — segment ids spliced in current session (used for visual state)
   let segRecApplied = false;        // true after successful splice for current modal segment
+  let segRecAborted = false;         // true when recording was cancelled; suppresses onstop → review
   let segRecLyricsLoading = false;
   let segRecLyricsError = '';
   let segRecLyricsLines = [];
@@ -6224,6 +6225,25 @@
       return;
     }
 
+    // ── Segment recording keyboard shortcuts ──
+    if (segRecPhase === 'preroll') {
+      if (e.code === 'Space' || e.code === 'Escape') {
+        e.preventDefault();
+        rearmSegmentRecording();
+      }
+      return;
+    }
+    if (segRecPhase === 'recording') {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        stopSegmentRecording(false);
+      } else if (e.code === 'Escape') {
+        e.preventDefault();
+        rearmSegmentRecording();
+      }
+      return;
+    }
+
     // ── No editing shortcuts during playback ──
     // Allow: Space (play/pause), arrows (seek), L (loop), M (mic), Escape, speed
     // Block: undo/redo, clipboard, note editing
@@ -6714,7 +6734,7 @@
         currentTimeSec = segEndSec;
         playbackBeat = timeToBeat(segEndSec);
         draw();
-        stopSegmentRecording();
+        stopSegmentRecording(true); // natural end at segment boundary → park
         return;
       }
     }
@@ -8070,6 +8090,7 @@
     const prerollSec = getSegRecPrerollSec();
     console.log(`[SegRec] Start recording: preroll=${prerollSec.toFixed(3)}s region=${startSec.toFixed(2)}–${endSec.toFixed(2)}s dur=${durationSec.toFixed(2)}s`);
 
+    segRecAborted = false;
     segRecPhase = 'preroll';
     segRecCountdown = Math.ceil(prerollSec);
 
@@ -8127,6 +8148,13 @@
     segRecRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : {});
     segRecRecorder.ondataavailable = e => { if (e.data.size > 0) segRecChunks.push(e.data); };
     segRecRecorder.onstop = () => {
+      if (segRecAborted) {
+        // Cancelled mid-recording — discard data, stay in armed state.
+        segRecChunks = [];
+        segRecAborted = false;
+        draw();
+        return;
+      }
       segRecBlob = new Blob(segRecChunks, { type: segRecRecorder.mimeType });
       segRecObjectUrl = URL.createObjectURL(segRecBlob);
       console.log(`[SegRec] Recording done: mimeType=${segRecRecorder.mimeType} size=${segRecBlob.size} bytes objectUrl=${segRecObjectUrl}`);
@@ -8147,28 +8175,44 @@
     // Add a small buffer to avoid early stop if recorder start is slightly ahead
     // of the audible playback clock.
     segRecStopTimer = setTimeout(() => {
-      if (segRecPhase === 'recording') stopSegmentRecording();
+      if (segRecPhase === 'recording') stopSegmentRecording(true); // natural end → park
     }, ((durationSec / effectivePlaybackRate) * 1000) + 250);
   }
 
-  function stopSegmentRecording() {
-    console.log(`[SegRec] Stop recording (phase=${segRecPhase} recorderState=${segRecRecorder?.state})`);
+  function stopSegmentRecording(parkPlayhead = true) {
+    console.log(`[SegRec] Stop recording (phase=${segRecPhase} recorderState=${segRecRecorder?.state} park=${parkPlayhead})`);
     if (segRecStopTimer) { clearTimeout(segRecStopTimer); segRecStopTimer = null; }
     if (segRecCountdownTimer) { clearInterval(segRecCountdownTimer); segRecCountdownTimer = null; }
     segRecCountdown = 0;
     segRecCountdownProgress = 0;
     if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
     if (isPlaying) togglePlayback();
-    // Park playhead just before loop end (10ms) so pressing Space after recording
-    // satisfies the wrap guard (playStartBeat < loopEndBeat) and loops correctly.
-    if (loopEnabled && loopEndBeat !== null) {
+    // Only park playhead for natural/auto stop so the user can see where playback
+    // actually ended. Manual stop/cancel leaves the cursor where it is.
+    if (parkPlayhead && loopEnabled && loopEndBeat !== null) {
       seekToTime(Math.max(0, beatToTime(loopEndBeat) - 0.01));
     }
   }
 
+  // Go back to armed state from preroll/recording/review — keeps mic active,
+  // clears temp audio data, does NOT seek. Only closes modal when called from armed.
+  function rearmSegmentRecording() {
+    if (segRecPhase === 'preroll' || segRecPhase === 'recording') {
+      segRecAborted = true;          // prevent onstop from switching to review
+      stopSegmentRecording(false);   // stop recorder/playback, no seek
+    }
+    if (segRecObjectUrl) { URL.revokeObjectURL(segRecObjectUrl); segRecObjectUrl = null; }
+    segRecBlob = null;
+    segRecChunks = [];
+    segRecApplied = false;
+    resetSegRecLyricsPreview();
+    segRecPhase = 'armed';
+    draw();
+  }
+
   function cancelSegmentRecording() {
     const seg = cleanupSegments.find(s => s.id === segRecSegmentId);
-    stopSegmentRecording();
+    stopSegmentRecording(false); // don't park — leave playhead where it is
     // Keep loop context anchored to this segment even when closing review.
     if (seg) {
       loopStartBeat = timeToBeat(seg.startMs / 1000);
@@ -9263,6 +9307,9 @@
         </div>
       {/if}
       {#if segRecPhase === 'preroll'}
+        <div class="seg-rec-preroll-cancel">
+          <button class="tool-btn sm" on:click={rearmSegmentRecording}>✕ Cancel</button>
+        </div>
         <div class="seg-rec-countdown-overlay">
           <div class="seg-rec-countdown-ring" style={`--seg-rec-progress:${segRecCountdownProgress};`}>
             <div class="seg-rec-countdown-number">{segRecCountdown}</div>
@@ -9299,7 +9346,8 @@
           <button class="tool-btn sm seg-rec-primary-action" on:click={startSegmentRecording}>▶ Start</button>
           <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Cancel</button>
         {:else if segRecPhase === 'recording'}
-          <button class="tool-btn sm" on:click={stopSegmentRecording}>⏹ Stop</button>
+          <button class="tool-btn sm" on:click={() => stopSegmentRecording(false)}>⏹ Stop</button>
+          <button class="tool-btn sm" on:click={rearmSegmentRecording}>✕ Cancel</button>
         {:else if segRecPhase === 'review'}
           <button class="tool-btn sm seg-rec-primary-action" on:click={applySegmentRecording} disabled={segRecUploading || !segRecBlob}>
             {segRecUploading ? '⏳ Splicing…' : '✓ Use this'}
@@ -9308,7 +9356,7 @@
             🤖 Generate AI
           </button>
           <button class="tool-btn sm" on:click={() => armSegmentRecording(segRecSegmentId)} disabled={segRecUploading}>↺ Retry</button>
-          <button class="tool-btn sm" on:click={cancelSegmentRecording}>✕ Discard</button>
+          <button class="tool-btn sm" on:click={rearmSegmentRecording}>✕ Discard</button>
         {/if}
       </div>
       {#if segRecPhase === 'armed'}
@@ -11071,6 +11119,12 @@
     border: 1px solid rgba(255, 120, 120, 0.35);
     border-radius: 5px;
     padding: 4px 6px;
+  }
+
+  .seg-rec-preroll-cancel {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 6px;
   }
 
   .seg-rec-countdown-overlay {
