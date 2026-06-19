@@ -3281,20 +3281,6 @@
     // Click on time axis (bottom strip)
     const pianoH = viewHeight - timeAxisHeight;
 
-    // Check playhead handle hit (when paused, 10px zone near playhead line)
-    if (!isPlaying && currentTimeSec > 0) {
-      const cx = beatToX(playbackBeat);
-      if (Math.abs(mx - cx) <= 10) {
-        playheadDrag = true;
-        console.log('[Playhead] Start drag');
-        // Start grain scrub
-        if (scrubAudio && scrubAudioBuffer) {
-          startScrubGrain(currentTimeSec);
-        }
-        return;
-      }
-    }
-
     // Check loop handle hit zones first (8px hit zone near boundary lines, full height)
     if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase === 'idle') {
       const lsX = beatToX(loopStartBeat);
@@ -3309,6 +3295,22 @@
         loopHandleDrag = 'end';
         console.log('[Loop] Dragging end handle');
         draw();
+        return;
+      }
+    }
+
+    // Check playhead handle hit (when paused, 10px zone near playhead line)
+    // Keep this after loop handles so loop edges remain draggable even when
+    // the playhead is near a loop boundary.
+    if (!isPlaying && currentTimeSec > 0) {
+      const cx = beatToX(playbackBeat);
+      if (Math.abs(mx - cx) <= 10) {
+        playheadDrag = true;
+        console.log('[Playhead] Start drag');
+        // Start grain scrub
+        if (scrubAudio && scrubAudioBuffer) {
+          startScrubGrain(currentTimeSec);
+        }
         return;
       }
     }
@@ -3618,7 +3620,7 @@
     if (loopHandleDrag) {
       autoScrollAtCanvasEdge(mx);
       const beat = Math.round(xToBeat(clampDragXToCanvas(mx)));
-      const minLoopBeats = 2;
+      const minLoopBeats = 10;
       if (loopHandleDrag === 'start') {
         loopStartBeat = Math.min(beat, loopEndBeat - minLoopBeats);
       } else {
@@ -4067,12 +4069,12 @@
       if (loopStartBeat !== null && loopEndBeat !== null) {
         const a = Math.min(loopStartBeat, loopEndBeat);
         const b = Math.max(loopStartBeat, loopEndBeat);
-        if (b - a < 2) {
-          // Too small → clear loop
-          loopStartBeat = null;
-          loopEndBeat = null;
-          loopEnabled = false;
-          console.log('[Loop] Cleared (too small)');
+        if (b - a < 10) {
+          // Very short loops are hard to grab; expand them to a usable default.
+          loopStartBeat = a;
+          loopEndBeat = a + 10;
+          loopEnabled = true;
+          console.log(`[Loop] Expanded short loop to default size: beat ${a} → ${a + 10}`);
         } else {
           loopStartBeat = a;
           loopEndBeat = b;
