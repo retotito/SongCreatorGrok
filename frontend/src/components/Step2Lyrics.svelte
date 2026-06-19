@@ -129,6 +129,7 @@
   let comparisonLyricsTextarea = null;
   let generatedEditor = null;
   let comparisonEditor = null;
+  let zebraStyleEl = null;
   let hyphenationResult = null;
   let isTranscribing = false;
   let transcribeInfo = null;
@@ -285,6 +286,54 @@
   }
 
   onMount(() => {
+    if (!zebraStyleEl) {
+      zebraStyleEl = document.createElement('style');
+      zebraStyleEl.setAttribute('data-step2-cm-zebra', 'true');
+      zebraStyleEl.textContent = `
+        .lyrics-column .CodeMirror {
+          border: 1px solid #444;
+          border-radius: 6px;
+          height: 360px;
+          font-family: 'Courier New', monospace;
+          font-size: 0.95rem;
+          line-height: 1.5;
+          background: #0d0d0d;
+          color: #e0e0e0;
+        }
+        .lyrics-column .CodeMirror-focused {
+          border-color: #4a90e2;
+          box-shadow: 0 0 8px rgba(74, 144, 226, 0.3);
+        }
+        .lyrics-column .CodeMirror-gutters {
+          background: #161616;
+          border-right: 1px solid #333;
+        }
+        .lyrics-column .CodeMirror-linenumber {
+          color: #777;
+        }
+        .lyrics-column .CodeMirror-cursor {
+          border-left: 1px solid #ddd;
+        }
+        .lyrics-column .CodeMirror-selected {
+          background: rgba(79, 140, 255, 0.35);
+        }
+        .lyrics-column .CodeMirror-focused .CodeMirror-selected {
+          background: rgba(79, 140, 255, 0.45);
+        }
+        .lyrics-column .CodeMirror-focused .CodeMirror-selectedtext,
+        .lyrics-column .CodeMirror-selectedtext {
+          color: #ffffff;
+        }
+        .lyrics-column .CodeMirror-code > div:nth-child(even) .CodeMirror-line {
+          background: rgba(255, 255, 255, 0.08);
+        }
+        .lyrics-column .CodeMirror-code > div:nth-child(even) .CodeMirror-gutter-wrapper {
+          background: rgba(255, 255, 255, 0.08);
+        }
+      `;
+      document.head.appendChild(zebraStyleEl);
+    }
+
     if (generatedLyricsTextarea && !generatedEditor) {
       generatedEditor = CodeMirror.fromTextArea(generatedLyricsTextarea, {
         lineNumbers: true,
@@ -425,6 +474,10 @@
 
   onDestroy(() => {
     saveComparisonOnDestroy();
+    if (zebraStyleEl && zebraStyleEl.parentNode) {
+      zebraStyleEl.parentNode.removeChild(zebraStyleEl);
+      zebraStyleEl = null;
+    }
     if (generatedEditor) {
       generatedEditor.toTextArea();
       generatedEditor = null;
@@ -684,14 +737,6 @@
 
     .lyrics-column :global(.CodeMirror-cursor) {
       border-left: 1px solid #ddd;
-    }
-
-    .lyrics-column :global(.CodeMirror-code > div:nth-child(even) .CodeMirror-line) {
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .lyrics-column :global(.CodeMirror-code > div:nth-child(even) .CodeMirror-gutter-wrapper) {
-      background: rgba(255, 255, 255, 0.04);
     }
 
     .color-controls {
