@@ -3206,10 +3206,17 @@
 
     // ── Downbeat handle strip: start drag ──
     if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H) {
-      downbeatHandleDragging = true;
-      downbeatHandleDragStartX = mx;
-      downbeatHandleDragStartAnchorBeat = metronomeManualDownbeatAnchorBeat;
-      return;
+      // Only start drag when clicking near an actual diamond (within 8px)
+      const _interval = getMetronomeDownbeatInterval();
+      const _anchor = metronomeManualDownbeatAnchorBeat;
+      const _idx = Math.round((xToBeat(mx) - _anchor) / _interval);
+      const _nearestX = beatToX(_anchor + _idx * _interval);
+      if (Math.abs(mx - _nearestX) <= 8) {
+        downbeatHandleDragging = true;
+        downbeatHandleDragStartX = mx;
+        downbeatHandleDragStartAnchorBeat = metronomeManualDownbeatAnchorBeat;
+        return;
+      }
     }
 
     // ── Metronome downbeat pick mode ──
@@ -3626,11 +3633,19 @@
 
     // ── Downbeat handle hover detection ──
     if (metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H) {
-      downbeatHandleHovered = true;
-      canvasEl.style.cursor = 'ew-resize';
-      draw();
-      return;
-    } else if (downbeatHandleHovered) {
+      // Only show hover cursor when near an actual diamond (within 8px)
+      const _interval = getMetronomeDownbeatInterval();
+      const _anchor = metronomeManualDownbeatAnchorBeat;
+      const _idx = Math.round((xToBeat(mx) - _anchor) / _interval);
+      const _nearestX = beatToX(_anchor + _idx * _interval);
+      if (Math.abs(mx - _nearestX) <= 8) {
+        downbeatHandleHovered = true;
+        canvasEl.style.cursor = 'ew-resize';
+        draw();
+        return;
+      }
+    }
+    if (downbeatHandleHovered) {
       downbeatHandleHovered = false;
       draw();
     }
