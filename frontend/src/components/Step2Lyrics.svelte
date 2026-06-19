@@ -120,6 +120,8 @@
   let artist = $lyricsData.artist || '';
   let title = $lyricsData.title || '';
   let language = $lyricsData.language || '';
+  let comparisonLyrics = '';  // Original/reference lyrics for comparison
+  let comparisonLyricsRef = null;  // Reference to contenteditable div
   let hyphenationResult = null;
   let isTranscribing = false;
   let transcribeInfo = null;
@@ -146,6 +148,74 @@
   }
   function stopTranscribeTicker() {
     if (transcribeTicker) { clearInterval(transcribeTicker); transcribeTicker = null; }
+  }
+
+  function loadComparisonLyrics() {
+    if (!$sessionId) return;
+    try {
+      const stored = localStorage.getItem(`comparison_lyrics_${$sessionId}`);
+      if (stored) {
+        comparisonLyrics = stored;
+        if (comparisonLyricsRef) {
+          comparisonLyricsRef.innerHTML = stored;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load comparison lyrics:', e);
+    }
+  }
+
+  function saveComparisonLyrics() {
+    if (!$sessionId) return;
+    try {
+      const html = comparisonLyricsRef?.innerHTML || comparisonLyrics;
+      localStorage.setItem(`comparison_lyrics_${$sessionId}`, html);
+      comparisonLyrics = html;
+    } catch (e) {
+      console.warn('Failed to save comparison lyrics:', e);
+    }
+  }
+
+  function applyColorToSelection(color) {
+    const selection = window.getSelection();
+    if (!selection.toString()) {
+      console.warn('No text selected');
+      return;
+    }
+    if (!comparisonLyricsRef?.contains(selection.anchorNode)) {
+      console.warn('Selection not in comparison field');
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const span = document.createElement('span');
+    span.style.backgroundColor = color;
+    range.surroundContents(span);
+    saveComparisonLyrics();
+    selection.removeAllRanges();
+  }
+
+  function clearAllColors() {
+    if (!comparisonLyricsRef) return;
+    const spans = comparisonLyricsRef.querySelectorAll('span[style*="background-color"]');
+    spans.forEach(span => {
+      while (span.firstChild) {
+        span.parentNode.insertBefore(span.firstChild, span);
+      }
+      span.parentNode.removeChild(span);
+    });
+    saveComparisonLyrics();
+  }
+
+  // Load comparison lyrics on mount
+  $: if ($sessionId && !comparisonLyrics) {
+    loadComparisonLyrics();
+  }
+
+  // Save comparison lyrics when exiting Step 2
+  function saveComparisonOnDestroy() {
+    if ($sessionId && comparisonLyricsRef) {
+      saveComparisonLyrics();
+    }
   }
 
   // Load cleanup segments from editor when entering Step 2
@@ -259,6 +329,7 @@
   }
 
   onDestroy(() => {
+    saveComparisonOnDestroy();
     if ($sessionId && lyricsText.trim()) {
       submitLyrics($sessionId, lyricsText, artist, title, language).catch(() => {});
     } else if ($sessionId && artist.trim() && title.trim()) {
@@ -408,17 +479,43 @@
       </div>
     </div>
 
-    <div class="form-group">
-      <label for="lyrics">
-        Lyrics
-        <span class="hint">(one line per phrase, use - for syllable splits: beau-ti-ful)</span>
-      </label>
-      <textarea
-        id="lyrics"
-        bind:value={lyricsText}
-        rows="15"
-        placeholder="The heart is a bloom&#10;Shoots up through the sto-ny ground&#10;There's no room&#10;..."
-      ></textarea>
+    <div class="lyrics-comparison-container">
+      <div class="form-group lyrics-column">
+        <label for="lyrics">
+          Generated Lyrics
+          <span class="hint">(one line per phrase, use - for syllable splits: beau-ti-ful)</span>
+        </label>
+        <textarea
+          id="lyrics"
+          bind:value={lyricsText}
+          rows="15"
+          placeholder="The heart is a bloom&#10;Shoots up through the sto-ny ground&#10;There's no room&#10;..."
+        ></textarea>
+      </div>
+
+      <div class="form-group lyrics-column">
+        <label for="comparison">Original Lyrics (for comparison)</label>
+        <div
+          id="comparison"
+          bind:this={comparisonLyricsRef}
+          class="comparison-lyrics"
+          contenteditable="true"
+          on:blur={saveComparisonLyrics}
+          on:paste={(e) => {
+            e.preventDefault();
+            const text = e.clipboardData?.getData('text/plain') || '';
+            document.execCommand('insertText', false, text);
+          }}
+        ></div>
+      </div>
+    </div>
+
+    <div class="color-controls">
+      <button class="color-btn yellow" on:click={() => applyColorToSelection('#ffff0080')} title="Highlight in yellow">🟨</button>
+      <button class="color-btn red" on:click={() => applyColorToSelection('#ff000080')} title="Highlight in red">🟥</button>
+      <button class="color-btn green" on:click={() => applyColorToSelection('#00ff0080')} title="Highlight in green">🟩</button>
+      <button class="color-btn blue" on:click={() => applyColorToSelection('#0000ff80')} title="Highlight in blue">🟦</button>
+      <button class="color-btn clear" on:click={clearAllColors} title="Clear all colors">⚪ Clear</button>
     </div>
 
     <div class="action-row">
@@ -451,6 +548,79 @@
       color: #b00;
       font-weight: bold;
       margin-top: 0.5rem;
+    }
+
+    .lyrics-comparison-container {
+      display: flex;
+      gap: 1rem;
+      width: 100%;
+    }
+
+    .lyrics-column {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .comparison-lyrics {
+      width: 100%;
+      min-height: 240px;
+      padding: 0.75rem;
+      background: #0d0d0d;
+      color: #e0e0e0;
+      border: 1px solid #444;
+      border-radius: 6px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-y: auto;
+      outline: none;
+    }
+
+    .comparison-lyrics:focus {
+      background: #1a1a1a;
+      border-color: #4a90e2;
+      box-shadow: 0 0 8px rgba(74, 144, 226, 0.3);
+    }
+
+    .color-controls {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .color-btn {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid #444;
+      border-radius: 4px;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+
+    .color-btn:hover {
+      border-color: #666;
+      background: #252525;
+    }
+
+    .color-btn:active {
+      transform: scale(0.95);
+    }
+
+    .color-btn.clear {
+      margin-left: auto;
+      background: #2a2a2a;
+      border-color: #555;
+    }
+
+    .color-btn.clear:hover {
+      background: #333;
+      border-color: #777;
     }
   </style>
 
