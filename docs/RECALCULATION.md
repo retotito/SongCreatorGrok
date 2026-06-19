@@ -14,7 +14,7 @@
 - [x] **BPM change** — downbeat anchor recalcs from `downbeatOffsetMs` (diamond-drag source only; pick/tapper uses metroAnchor path)
 - [x] **BPM change** — metronome anchor scales proportionally — verified with ms-based formula (`-28 × 600/480 = -35`, equivalent to `(anchorMs - gap) × newBpm/15000`)
 - [x] **GAP change** — downbeat and metronome anchor recalc correctly with new GAP (metroAnchor audio position preserved: `anchorMs = oldGap + oldBeat×15000/oldBpm`, verified)
-- [x] **GAP/BPM change without rawTimings** — unreachable in normal use (import always generates syllable_timings); code path verified by inspection
+- [x] **GAP/BPM change without rawTimings** — now handled correctly: note audio positions are preserved via ms conversion (`startMs = oldGap + oldBeat×15000/oldBpm`, `newBeat = (startMs - newGap)×newBpm/15000`). Previously the old proportional-only formula was a no-op for GAP-only changes (bpm unchanged → newBeat = oldBeat). Fixed in `resyncAllToGrid`.
 - [x] **Diamond drag** — GAP snaps to nearest grid beat (≤ ½ beat), flags recalc from timeMs, downbeat anchor recalcs with new gapMs, metronome grid uses corrected anchor (`gap-snap` db1 ≠ drag db1)
 - [x] **Diamond drag GAP snap** — implemented and verified: GAP snaps ≤ ½ beat, flags/anchor recalc with new gapMs
 

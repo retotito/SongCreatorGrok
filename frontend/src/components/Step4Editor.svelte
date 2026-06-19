@@ -291,16 +291,24 @@
     // 2 & 3. Notes and Breaks — proportional beat scaling: newBeat = round(oldBeat * newBpm / oldBpm)
     // Only when rawTimings absent; otherwise requantizeFromMs handles notes/breaks.
     if (!rawTimings || rawTimings.length === 0) {
+      const oldGapMs = Number.isFinite(previousTimingRef?.gapMs) ? Number(previousTimingRef.gapMs) : gapMs;
       notes = notes.map(n => {
         if (n.type === 'break') {
-          const newBeat    = snapBeatValue(Math.round(n.startBeat * bpm / oldBpm));
+          // Preserve audio position: convert to ms using old grid, then back to beats with new grid
+          const startMs = oldGapMs + n.startBeat * 15000 / oldBpm;
+          const newBeat    = snapBeatValue(Math.round((startMs - gapMs) * bpm / 15000));
           const newEndBeat = n.endBeat != null
-            ? Math.max(newBeat + 1, snapBeatValue(Math.round(n.endBeat * bpm / oldBpm)))
+            ? (() => {
+                const endMs = oldGapMs + n.endBeat * 15000 / oldBpm;
+                return Math.max(newBeat + 1, snapBeatValue(Math.round((endMs - gapMs) * bpm / 15000)));
+              })()
             : null;
           return { ...n, startBeat: newBeat, endBeat: newEndBeat };
         }
-        const newStart    = snapBeatValue(Math.round(n.startBeat * bpm / oldBpm));
-        const newDuration = Math.max(1, Math.round(n.duration  * bpm / oldBpm));
+        const startMs    = oldGapMs + n.startBeat * 15000 / oldBpm;
+        const newStart    = snapBeatValue(Math.round((startMs - gapMs) * bpm / 15000));
+        // Duration: scale by BPM ratio (GAP doesn't affect duration in beats)
+        const newDuration = Math.max(1, Math.round(n.duration * bpm / oldBpm));
         return { ...n, startBeat: newStart, duration: newDuration };
       }).sort((a, b) => a.startBeat - b.startBeat);
     }
@@ -1992,6 +2000,8 @@
   function enterSetGapMode() {
     if (isPlaying) return;
     clearMetronomePickTarget();
+    clearMarkerSelection();
+    selectedCleanupSegment = null;
     setGapMode = true;
     setGapHoverBeat = null;
     if (canvasEl) canvasEl.style.cursor = 'crosshair';
@@ -2123,6 +2133,9 @@
     // }
 
     resyncAllToGrid(previousTimingRef);
+    // When rawTimings is empty, requantizeFromMs returns early without calling draw().
+    // Call draw() here to ensure the canvas reflects the updated note/break positions.
+    if (!rawTimings || rawTimings.length === 0) draw();
   }
 
   // ──── Beat Marker / BPM Calibration ────────────────────────────────
