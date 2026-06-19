@@ -97,7 +97,9 @@
       }
     }
   }
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import CodeMirror from 'codemirror';
+  import 'codemirror/lib/codemirror.css';
   import { sessionId, lyricsData, uploadData, currentStep, isProcessing, processingStatus, errorMessage, generationModalOpen, generationUseCleaned, generationResult } from '../stores/appStore.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { submitLyrics, getTestLyrics, loadTestSession, hyphenateLyrics, transcribeAudio, cancelTranscribe, getAudioUrl, updateMetadata, getEditorData, generateCleanedAudio, generateEmptyUltrastar } from '../services/api.js';
@@ -121,7 +123,12 @@
   let title = $lyricsData.title || '';
   let language = $lyricsData.language || '';
   let comparisonLyrics = '';  // Original/reference lyrics for comparison
-  let comparisonLyricsRef = null;  // Reference to contenteditable div
+  let comparisonState = null; // { text, marks: [{ from, to, color }] }
+  let comparisonLyricsLoadedForSession = null;
+  let generatedLyricsTextarea = null;
+  let comparisonLyricsTextarea = null;
+  let generatedEditor = null;
+  let comparisonEditor = null;
   let hyphenationResult = null;
   let isTranscribing = false;
   let transcribeInfo = null;
@@ -150,15 +157,31 @@
     if (transcribeTicker) { clearInterval(transcribeTicker); transcribeTicker = null; }
   }
 
+  function getComparisonStorageKey() {
+    return $sessionId ? `comparison_lyrics_${$sessionId}` : null;
+  }
+
   function loadComparisonLyrics() {
-    if (!$sessionId) return;
+    const key = getComparisonStorageKey();
+    if (!key) return;
     try {
-      const stored = localStorage.getItem(`comparison_lyrics_${$sessionId}`);
+      const stored = localStorage.getItem(key);
       if (stored) {
-        comparisonLyrics = stored;
-        if (comparisonLyricsRef) {
-          comparisonLyricsRef.innerHTML = stored;
+        try {
+          const parsed = JSON.parse(stored);
+          if (parsed && typeof parsed.text === 'string') {
+            comparisonState = parsed;
+            comparisonLyrics = parsed.text;
+            return;
+          }
+        } catch {
+          comparisonLyrics = String(stored).replace(/<[^>]*>/g, '');
+          comparisonState = { text: comparisonLyrics, marks: [] };
+          return;
         }
+      } else {
+        comparisonLyrics = '';
+        comparisonState = { text: '', marks: [] };
       }
     } catch (e) {
       console.warn('Failed to load comparison lyrics:', e);
@@ -166,57 +189,129 @@
   }
 
   function saveComparisonLyrics() {
-    if (!$sessionId) return;
+    const key = getComparisonStorageKey();
+    if (!key || !comparisonEditor) return;
     try {
-      const html = comparisonLyricsRef?.innerHTML || comparisonLyrics;
-      localStorage.setItem(`comparison_lyrics_${$sessionId}`, html);
-      comparisonLyrics = html;
+      const marks = comparisonEditor.getAllMarks()
+        .map(mark => {
+          const pos = mark.find();
+          if (!pos) return null;
+          return {
+            from: pos.from,
+            to: pos.to,
+            color: mark.__highlightColor || '#ffff0080',
+          };
+        })
+        .filter(Boolean);
+      const payload = {
+        text: comparisonEditor.getValue(),
+        marks,
+      };
+      comparisonLyrics = payload.text;
+      comparisonState = payload;
+      localStorage.setItem(key, JSON.stringify(payload));
     } catch (e) {
       console.warn('Failed to save comparison lyrics:', e);
     }
   }
 
+  function applyComparisonState(state) {
+    if (!comparisonEditor || !state) return;
+    const doc = comparisonEditor.getDoc();
+    comparisonEditor.operation(() => {
+      comparisonEditor.getAllMarks().forEach(mark => mark.clear());
+      if (Array.isArray(state.marks)) {
+        state.marks.forEach(mark => {
+          if (!mark?.from || !mark?.to || !mark?.color) return;
+          try {
+            const cmMark = doc.markText(mark.from, mark.to, { css: `background-color: ${mark.color};` });
+            cmMark.__highlightColor = mark.color;
+          } catch {
+            // Ignore invalid saved ranges
+          }
+        });
+      }
+    });
+  }
+
   function applyColorToSelection(color) {
-    const selection = window.getSelection();
-    if (!selection.toString()) {
+    if (!comparisonEditor) return;
+    const doc = comparisonEditor.getDoc();
+    if (!doc.somethingSelected()) {
       console.warn('No text selected');
       return;
     }
-    if (!comparisonLyricsRef?.contains(selection.anchorNode)) {
-      console.warn('Selection not in comparison field');
-      return;
-    }
-    const range = selection.getRangeAt(0);
-    const span = document.createElement('span');
-    span.style.backgroundColor = color;
-    range.surroundContents(span);
+    const from = doc.getCursor('from');
+    const to = doc.getCursor('to');
+    const mark = doc.markText(from, to, { css: `background-color: ${color};` });
+    mark.__highlightColor = color;
     saveComparisonLyrics();
-    selection.removeAllRanges();
   }
 
   function clearAllColors() {
-    if (!comparisonLyricsRef) return;
-    const spans = comparisonLyricsRef.querySelectorAll('span[style*="background-color"]');
-    spans.forEach(span => {
-      while (span.firstChild) {
-        span.parentNode.insertBefore(span.firstChild, span);
-      }
-      span.parentNode.removeChild(span);
-    });
+    if (!comparisonEditor) return;
+    comparisonEditor.getAllMarks().forEach(mark => mark.clear());
     saveComparisonLyrics();
   }
 
-  // Load comparison lyrics on mount
-  $: if ($sessionId && !comparisonLyrics) {
+  // Load comparison lyrics once per session id.
+  $: if ($sessionId && comparisonLyricsLoadedForSession !== $sessionId) {
+    comparisonLyricsLoadedForSession = $sessionId;
+    comparisonLyrics = '';
+    comparisonState = null;
     loadComparisonLyrics();
+    if (comparisonEditor) {
+      comparisonEditor.setValue(comparisonLyrics || '');
+      applyComparisonState(comparisonState);
+    }
+  }
+
+  $: if (generatedEditor && generatedEditor.getValue() !== (lyricsText || '')) {
+    const cursor = generatedEditor.getCursor();
+    generatedEditor.setValue(lyricsText || '');
+    try { generatedEditor.setCursor(cursor); } catch {}
+  }
+
+  $: if (comparisonEditor && comparisonEditor.getValue() !== (comparisonLyrics || '')) {
+    comparisonEditor.setValue(comparisonLyrics || '');
+    applyComparisonState(comparisonState);
   }
 
   // Save comparison lyrics when exiting Step 2
   function saveComparisonOnDestroy() {
-    if ($sessionId && comparisonLyricsRef) {
+    if ($sessionId && comparisonEditor) {
       saveComparisonLyrics();
     }
   }
+
+  onMount(() => {
+    if (generatedLyricsTextarea && !generatedEditor) {
+      generatedEditor = CodeMirror.fromTextArea(generatedLyricsTextarea, {
+        lineNumbers: true,
+        lineWrapping: true,
+        mode: null,
+      });
+      generatedEditor.setValue(lyricsText || '');
+      generatedEditor.on('change', (cm) => {
+        const value = cm.getValue();
+        if (value !== lyricsText) lyricsText = value;
+      });
+    }
+
+    if (comparisonLyricsTextarea && !comparisonEditor) {
+      comparisonEditor = CodeMirror.fromTextArea(comparisonLyricsTextarea, {
+        lineNumbers: true,
+        lineWrapping: true,
+        mode: null,
+      });
+      comparisonEditor.setValue(comparisonLyrics || '');
+      comparisonEditor.on('change', (cm) => {
+        comparisonLyrics = cm.getValue();
+        saveComparisonLyrics();
+      });
+      if (comparisonState) applyComparisonState(comparisonState);
+    }
+  });
 
   // Load cleanup segments from editor when entering Step 2
   async function loadCleanupSegments() {
@@ -330,6 +425,14 @@
 
   onDestroy(() => {
     saveComparisonOnDestroy();
+    if (generatedEditor) {
+      generatedEditor.toTextArea();
+      generatedEditor = null;
+    }
+    if (comparisonEditor) {
+      comparisonEditor.toTextArea();
+      comparisonEditor = null;
+    }
     if ($sessionId && lyricsText.trim()) {
       submitLyrics($sessionId, lyricsText, artist, title, language).catch(() => {});
     } else if ($sessionId && artist.trim() && title.trim()) {
@@ -487,35 +590,28 @@
         </label>
         <textarea
           id="lyrics"
-          bind:value={lyricsText}
+          bind:this={generatedLyricsTextarea}
           rows="15"
           placeholder="The heart is a bloom&#10;Shoots up through the sto-ny ground&#10;There's no room&#10;..."
-        ></textarea>
+        >{lyricsText}</textarea>
       </div>
 
       <div class="form-group lyrics-column">
         <label for="comparison">Original Lyrics (for comparison)</label>
-        <div
+        <textarea
           id="comparison"
-          bind:this={comparisonLyricsRef}
-          class="comparison-lyrics"
-          contenteditable="true"
-          on:blur={saveComparisonLyrics}
-          on:paste={(e) => {
-            e.preventDefault();
-            const text = e.clipboardData?.getData('text/plain') || '';
-            document.execCommand('insertText', false, text);
-          }}
-        ></div>
-      </div>
-    </div>
+          bind:this={comparisonLyricsTextarea}
+          rows="15"
+        >{comparisonLyrics}</textarea>
 
-    <div class="color-controls">
-      <button class="color-btn yellow" on:click={() => applyColorToSelection('#ffff0080')} title="Highlight in yellow">🟨</button>
-      <button class="color-btn red" on:click={() => applyColorToSelection('#ff000080')} title="Highlight in red">🟥</button>
-      <button class="color-btn green" on:click={() => applyColorToSelection('#00ff0080')} title="Highlight in green">🟩</button>
-      <button class="color-btn blue" on:click={() => applyColorToSelection('#0000ff80')} title="Highlight in blue">🟦</button>
-      <button class="color-btn clear" on:click={clearAllColors} title="Clear all colors">⚪ Clear</button>
+        <div class="color-controls">
+          <button class="color-btn yellow" on:click={() => applyColorToSelection('#ffff0080')} title="Highlight in yellow">🟨</button>
+          <button class="color-btn red" on:click={() => applyColorToSelection('#ff000080')} title="Highlight in red">🟥</button>
+          <button class="color-btn green" on:click={() => applyColorToSelection('#00ff0080')} title="Highlight in green">🟩</button>
+          <button class="color-btn blue" on:click={() => applyColorToSelection('#0000ff80')} title="Highlight in blue">🟦</button>
+          <button class="color-btn clear" on:click={clearAllColors} title="Clear all colors">⚪ Clear</button>
+        </div>
+      </div>
     </div>
 
     <div class="action-row">
@@ -561,27 +657,41 @@
       min-width: 0;
     }
 
-    .comparison-lyrics {
-      width: 100%;
-      min-height: 240px;
-      padding: 0.75rem;
-      background: #0d0d0d;
-      color: #e0e0e0;
+    .lyrics-column :global(.CodeMirror) {
       border: 1px solid #444;
       border-radius: 6px;
+      height: 360px;
       font-family: 'Courier New', monospace;
       font-size: 0.95rem;
       line-height: 1.5;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      overflow-y: auto;
-      outline: none;
+      background: #0d0d0d;
+      color: #e0e0e0;
     }
 
-    .comparison-lyrics:focus {
-      background: #1a1a1a;
+    .lyrics-column :global(.CodeMirror-focused) {
       border-color: #4a90e2;
       box-shadow: 0 0 8px rgba(74, 144, 226, 0.3);
+    }
+
+    .lyrics-column :global(.CodeMirror-gutters) {
+      background: #161616;
+      border-right: 1px solid #333;
+    }
+
+    .lyrics-column :global(.CodeMirror-linenumber) {
+      color: #777;
+    }
+
+    .lyrics-column :global(.CodeMirror-cursor) {
+      border-left: 1px solid #ddd;
+    }
+
+    .lyrics-column :global(.CodeMirror-code > div:nth-child(even) .CodeMirror-line) {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .lyrics-column :global(.CodeMirror-code > div:nth-child(even) .CodeMirror-gutter-wrapper) {
+      background: rgba(255, 255, 255, 0.04);
     }
 
     .color-controls {
