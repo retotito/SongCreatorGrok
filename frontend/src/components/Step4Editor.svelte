@@ -8583,15 +8583,15 @@
   }
 
   async function computeRecordedPitchLine() {
-    // Green line: spliced vocal track filtered to patched segments.
-    // Always use vocalUrl (the patched vocal) — NOT the cleaned audio, which may be
-    // stale/missing after a new splice and before cleaned audio is regenerated.
-    if (segRecPatched.size === 0) {
+    // Green line: edited vocal track filtered to patched (green) segments.
+    // Use editedVocalUrl (new design) or vocalUrl (legacy patched vocal).
+    const hasPatched = segRecPatched.size > 0 || hasEditedVocal;
+    if (!hasPatched) {
       recordedPitchFrames = [];
       draw();
       return;
     }
-    const sourceUrl = vocalUrl || originalVocalUrl;
+    const sourceUrl = (hasEditedVocal ? editedVocalUrl : null) || vocalUrl || originalVocalUrl;
     if (!sourceUrl) return;
     recordedPitchLoading = true;
     recordedPitchFrames = [];
@@ -8620,7 +8620,7 @@
       if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== baseUrl) {
         await computePitchLine();
       }
-      if (segRecPatched.size > 0 && recordedPitchFrames.length === 0) {
+      if ((segRecPatched.size > 0 || hasEditedVocal) && recordedPitchFrames.length === 0) {
         computeRecordedPitchLine(); // fire-and-forget, draws when done
       } else {
         draw();
