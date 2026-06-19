@@ -1019,6 +1019,7 @@
   let audioEl;
   let isPlaying = false;
   let playbackBeat = 0;
+  let playStartBeat = 0; // beat position when play was last started
   let animFrame;
   let currentTimeSec = 0;  // Reactive time display
 
@@ -1414,7 +1415,7 @@
   $: uiModalGuardActive = segRecPhase !== 'idle' || segRegenModalOpen || vibratoModalOpen || metronomeToolOpen;
   $: recordingActive.set(uiModalGuardActive);
   let segRecSegmentId = null;       // cleanup segment being recorded
-  let segRecPrerollSec = 1.5;       // seconds of pre-roll before recording starts
+  const SEG_REC_PREROLL_SEC = 2;    // fixed lead-in before segment recording starts
   let segRecRecorder = null;        // dedicated MediaRecorder for segment capture
   let segRecChunks = [];
   let segRecBlob = null;            // recorded blob ready for review/upload
@@ -1430,6 +1431,10 @@
   let segRecLyricsLines = [];
   let segRecLyricsHyphenated = false;
   $: segRecAudioSwitchLocked = segRecUploading || segRecPhase === 'preroll' || segRecPhase === 'recording';
+
+  function getSegRecPrerollSec() {
+    return SEG_REC_PREROLL_SEC;
+  }
 
   // Auto-regenerate cleaned audio after cleanup changes
   let cleanedAudioDirty = false;    // true when segments or vocal changed since last generation
@@ -5993,18 +5998,21 @@
       stopAllMidiNotes();
       draw(); // Redraw to show paused cursor
     } else {
-      // If loop is active and playhead is outside loop, jump to loop start.
-      // During active segment capture (preroll/recording) we keep loop visual
-      // boundaries but avoid forcing loop jumps.
-      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
+      // Loop start position: play always starts from the current playhead position.
+      // The loop wrap (at loopEndBeat) activates naturally when the playhead enters
+      // the loop region — matching standard DAW behaviour (Cubase/Logic/Ableton).
+      // During active segment recording only, force loop-start if outside bounds.
+      // Do not force-jump during preroll, because lead-in should start before loop.
+      if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase === 'recording') {
         if (playbackBeat < loopStartBeat || playbackBeat >= loopEndBeat) {
           const loopStartTime = beatToTime(loopStartBeat);
           currentTimeSec = loopStartTime;
           playbackBeat = loopStartBeat;
-          console.log(`[Play] Jumped to loop start beat ${loopStartBeat}`);
+          console.log(`[Play] Jumped to loop start beat ${loopStartBeat} (segment recording)`);
         }
       }
       // Resume from our tracked position
+      playStartBeat = playbackBeat;
       audioEl.currentTime = currentTimeSec;
       audioEl.playbackRate = playbackRate;
       audioEl.preservesPitch = true;
@@ -6657,13 +6665,15 @@
     // ── Loop wrap ──
     // Segment recording keeps loop visuals, but wrapping is disabled while
     // recording/preroll is active.
+    // Standard DAW behaviour: only wrap when play started at or before loopEndBeat.
+    // If the playhead was already past the loop when play started, never wrap.
     if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null && segRecPhase !== 'preroll' && segRecPhase !== 'recording') {
-      if (playbackBeat >= loopEndBeat) {
+      if (playbackBeat >= loopEndBeat && playStartBeat < loopEndBeat) {
         const loopStartTime = beatToTime(loopStartBeat);
         audioEl.currentTime = loopStartTime;
         currentTimeSec = loopStartTime;
         playbackBeat = loopStartBeat;
-        // Stop all midi notes so they retrigger cleanly
+        playStartBeat = loopStartBeat; // reset so next wrap also fires
         if (midiPlayback) stopAllMidiNotes();
         // Clear sung blocks for notes in the loop region so each pass starts fresh
         if (micEnabled && micNoteHits.size > 0) {
@@ -8030,8 +8040,9 @@
     loopEndBeat = timeToBeat(endSec);
     loopEnabled = true;
 
-    // Seek to pre-roll start
-    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+    // Keep the modal cursor parked on the loop start; the 2-beat preroll jump
+    // happens when the user actually starts recording.
+    seekToTime(startSec);
 
     segRecPhase = 'armed';
     if (micEnabled) { micEnabled = false; stopMic(); }
@@ -8047,10 +8058,11 @@
     const startSec = seg.startMs / 1000;
     const endSec = seg.endMs / 1000;
     const durationSec = endSec - startSec;
-    console.log(`[SegRec] Start recording: preroll=${segRecPrerollSec}s region=${startSec.toFixed(2)}–${endSec.toFixed(2)}s dur=${durationSec.toFixed(2)}s`);
+    const prerollSec = getSegRecPrerollSec();
+    console.log(`[SegRec] Start recording: preroll=${prerollSec.toFixed(3)}s region=${startSec.toFixed(2)}–${endSec.toFixed(2)}s dur=${durationSec.toFixed(2)}s`);
 
     segRecPhase = 'preroll';
-    segRecCountdown = Math.ceil(segRecPrerollSec);
+    segRecCountdown = Math.ceil(prerollSec);
 
     // Keep segment loop visible while recording for clear visual boundaries.
     loopStartBeat = timeToBeat(startSec);
@@ -8062,12 +8074,12 @@
     const effectivePlaybackRate = Math.max(0.1, playbackRate || 1.0);
 
     // Seek to pre-roll start.
-    seekToTime(Math.max(0, startSec - segRecPrerollSec));
+    seekToTime(Math.max(0, startSec - prerollSec));
 
     // If preroll would start before time 0, keep the playhead parked at 0 for
     // the clipped lead duration (c - s), then start playback.
-    const clippedLeadSec = Math.max(0, segRecPrerollSec - startSec);
-    const runningPrerollSec = Math.max(0, segRecPrerollSec - clippedLeadSec);
+    const clippedLeadSec = Math.max(0, prerollSec - startSec);
+    const runningPrerollSec = Math.max(0, prerollSec - clippedLeadSec);
     if (clippedLeadSec > 0) {
       await new Promise(resolve => setTimeout(resolve, clippedLeadSec * 1000));
       if (segRecPhase !== 'preroll') return; // was cancelled
