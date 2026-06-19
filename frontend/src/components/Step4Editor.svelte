@@ -8159,6 +8159,11 @@
     segRecCountdownProgress = 0;
     if (segRecRecorder && segRecRecorder.state !== 'inactive') segRecRecorder.stop();
     if (isPlaying) togglePlayback();
+    // Park playhead just before loop end (10ms) so pressing Space after recording
+    // satisfies the wrap guard (playStartBeat < loopEndBeat) and loops correctly.
+    if (loopEnabled && loopEndBeat !== null) {
+      seekToTime(Math.max(0, beatToTime(loopEndBeat) - 0.01));
+    }
   }
 
   function cancelSegmentRecording() {
