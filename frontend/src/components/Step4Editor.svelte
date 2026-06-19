@@ -3258,10 +3258,8 @@
 
     // Check playhead handle hit (when paused, 10px zone near playhead line)
     if (!isPlaying && currentTimeSec > 0) {
-      // Don't steal the click when the downbeat handle strip is active at this y position
-      const inDownbeatStrip = metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H;
       const cx = beatToX(playbackBeat);
-      if (!inDownbeatStrip && Math.abs(mx - cx) <= 10) {
+      if (Math.abs(mx - cx) <= 10) {
         playheadDrag = true;
         console.log('[Playhead] Start drag');
         // Start grain scrub
@@ -3676,9 +3674,8 @@
 
       // Check playhead handle (when paused)
       if (!cursor && !isPlaying && currentTimeSec > 0) {
-        const inDownbeatStrip = metronomeEnabled && metronomeManualDownbeatAnchorBeat !== null && my < DOWNBEAT_HANDLE_H;
         const cx = beatToX(playbackBeat);
-        if (!inDownbeatStrip && Math.abs(mx - cx) <= 10) {
+        if (Math.abs(mx - cx) <= 10) {
           cursor = 'col-resize';
         }
       }
