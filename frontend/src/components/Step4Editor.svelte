@@ -6723,7 +6723,9 @@
     // Escape: cancel setGap mode, paste mode, clear loop, or deselect
     if (e.code === 'Escape') {
       e.preventDefault();
-      if (beatMarkerMode) {
+      if (contextMenu.visible) {
+        closeContextMenu();
+      } else if (beatMarkerMode) {
         exitBeatMarkerMode();
         draw();
       } else if (setGapMode) {
