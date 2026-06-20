@@ -3,6 +3,10 @@
  */
 import { writable, derived } from 'svelte/store';
 
+// Waveform peaks cache — module-level, persists across Step4Editor mounts for the entire session.
+// Key: audio URL string. Value: { peaks: Float32Array, duration: number, buffer: AudioBuffer }
+export const waveformPeaksCache = new Map();
+
 // Current step (0 = launcher, 1-5 = wizard; step 3 is now a modal, not a persisted step).
 // Always start at 0 (home/launcher) on every app launch — the user chooses to resume.
 export const currentStep = writable(0);

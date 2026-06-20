@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
+  import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
 
@@ -8959,48 +8960,74 @@
   }
 
   // Load waveform peaks from audio URL via Web Audio API
+  async function decodeWaveformPeaks(url) {
+    const resp = await fetch(url);
+    const arrayBuffer = await resp.arrayBuffer();
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+    audioCtx.close();
+    const rawData = decoded.getChannelData(0);
+    const peaksPerSec = 750;
+    const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
+    const totalSamples = rawData.length;
+    const peaks = new Float32Array(totalPeaks);
+    for (let i = 0; i < totalPeaks; i++) {
+      let max = 0;
+      const start = Math.floor(i * totalSamples / totalPeaks);
+      const end = Math.min(Math.floor((i + 1) * totalSamples / totalPeaks), totalSamples);
+      for (let j = start; j < end; j++) {
+        const abs = Math.abs(rawData[j]);
+        if (abs > max) max = abs;
+      }
+      peaks[i] = max;
+    }
+    return { peaks, duration: decoded.duration, buffer: decoded };
+  }
+
   async function loadWaveform(url) {
     console.log('[Waveform] Loading from', url);
     const token = ++waveformLoadToken;
     waveformLoading = true;
     try {
-      const resp = await fetch(url);
-      const arrayBuffer = await resp.arrayBuffer();
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const decoded = await audioCtx.decodeAudioData(arrayBuffer);
-      audioCtx.close();
-
-      // Store decoded buffer for grain scrubbing
-      scrubAudioBuffer = decoded;
-
-      // Downsample to 750 peaks per second for smooth waveform at all zoom levels.
-      // Use floating-point sample boundaries to avoid accumulated rounding drift.
-      const rawData = decoded.getChannelData(0);
-      const peaksPerSec = 750;
-      const totalPeaks = Math.ceil(decoded.duration * peaksPerSec);
-      const totalSamples = rawData.length;
-      const peaks = new Float32Array(totalPeaks);
-
-      for (let i = 0; i < totalPeaks; i++) {
-        let max = 0;
-        const start = Math.floor(i * totalSamples / totalPeaks);
-        const end = Math.min(Math.floor((i + 1) * totalSamples / totalPeaks), totalSamples);
-        for (let j = start; j < end; j++) {
-          const abs = Math.abs(rawData[j]);
-          if (abs > max) max = abs;
-        }
-        peaks[i] = max;
+      let entry = waveformPeaksCache.get(url);
+      if (!entry) {
+        entry = await decodeWaveformPeaks(url);
+        waveformPeaksCache.set(url, entry);
+        console.log(`[Waveform] Decoded & cached ${entry.peaks.length} peaks for ${entry.duration.toFixed(1)}s`);
+      } else {
+        console.log(`[Waveform] Cache hit for ${url}`);
       }
-
-      waveformPeaks = peaks;
-      waveformDuration = decoded.duration;
-      console.log(`[Waveform] Loaded ${totalPeaks} peaks for ${decoded.duration.toFixed(1)}s audio`);
+      if (token !== waveformLoadToken) return; // superseded
+      scrubAudioBuffer = entry.buffer;
+      waveformPeaks = entry.peaks;
+      waveformDuration = entry.duration;
       draw();
     } catch (err) {
       console.warn('[Waveform] Failed to load:', err);
       waveformPeaks = [];
     } finally {
       if (token === waveformLoadToken) waveformLoading = false;
+    }
+  }
+
+  // Pre-warm waveform cache for all available audio sources in the background.
+  // Called once after the editor finishes loading its primary source.
+  async function prewarmWaveformCache() {
+    const urls = [];
+    if (hasVocalsAudio && vocalUrl) urls.push(vocalUrl);
+    const fullmixUrl = getAudioUrl($sessionId, 'fullmix');
+    if (fullmixUrl) urls.push(fullmixUrl);
+    if (hasEditedVocal && editedVocalUrl) urls.push(editedVocalUrl);
+    for (const url of urls) {
+      if (waveformPeaksCache.has(url)) continue;
+      try {
+        console.log('[Waveform] Pre-warming cache for', url);
+        const entry = await decodeWaveformPeaks(url);
+        waveformPeaksCache.set(url, entry);
+        console.log(`[Waveform] Pre-warm done: ${url}`);
+      } catch (e) {
+        console.warn('[Waveform] Pre-warm failed for', url, e);
+      }
     }
   }
 
@@ -9202,9 +9229,11 @@
       loadSessionNotes();
       loadFlags();
 
-      // Load waveform for the active audio source
+      // Load waveform for the active audio source, then pre-warm others in background
       if (currentAudioUrl) {
-        loadWaveform(currentAudioUrl);
+        loadWaveform(currentAudioUrl).then(() => {
+          prewarmWaveformCache();
+        });
       }
 
       updatePitchRange();
