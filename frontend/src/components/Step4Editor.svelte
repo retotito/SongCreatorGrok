@@ -6654,6 +6654,7 @@
           const targetId = realNotes[targetIdx].id;
           selectedNote = targetId;
           selectedNotes = new Set([targetId]);
+          playNotePitch(targetId);
           draw();
         }
       }
