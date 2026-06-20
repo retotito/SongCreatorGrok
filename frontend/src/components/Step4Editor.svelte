@@ -8538,31 +8538,37 @@
 
   async function startVocalTrace() {
     vocalTraceLoading = true;
-    vocalTraceAbortController = new AbortController();
-    const controller = vocalTraceAbortController;
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
     try {
-      const response = await fetch(vocalUrl, { signal: controller.signal });
-      const arrayBuffer = await response.arrayBuffer();
-      const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
-      vocalTraceDecodedBuffer = await tmpCtx.decodeAudioData(arrayBuffer);
-      tmpCtx.close();
+      // Re-use the decoded buffer from the waveform cache if available (avoids re-fetch+decode)
+      let buffer = waveformPeaksCache.get(vocalUrl)?.buffer ?? null;
+      if (!buffer) {
+        vocalTraceAbortController = new AbortController();
+        const controller = vocalTraceAbortController;
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+        try {
+          const response = await fetch(vocalUrl, { signal: controller.signal });
+          const arrayBuffer = await response.arrayBuffer();
+          const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+          buffer = await tmpCtx.decodeAudioData(arrayBuffer);
+          tmpCtx.close();
+        } finally {
+          clearTimeout(timeoutId);
+          vocalTraceAbortController = null;
+        }
+      }
+      vocalTraceDecodedBuffer = buffer;
       vocalTraceSampleBuf = new Float32Array(2048);
       vocalTraceDetector = PitchDetector.forFloat32Array(2048);
-      // Only reset frames on first load — keep existing data when re-enabling
       if (vocalTraceFrames.length === 0) {
         vocalTraceLastPitch = -1;
         vocalTracePitchConfidence = 0;
         vocalTraceRecentPitches = [];
       }
-      // console.log('[VocalTrace] Loaded, duration:', vocalTraceDecodedBuffer.duration);
     } catch (err) {
       console.error('[VocalTrace] Failed to load:', err);
       vocalTraceEnabled = false;
     } finally {
-      clearTimeout(timeoutId);
       vocalTraceLoading = false;
-      vocalTraceAbortController = null;
     }
   }
 
