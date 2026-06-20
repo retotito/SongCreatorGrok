@@ -143,6 +143,11 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 # In-memory session store
 sessions: dict = {}
 
+# Shared model cache keyed by model name — prevents loading the same weights multiple times.
+# Used by segment preview, main transcription, and upload preview.
+_whisperx_model_cache: dict = {}  # model_name -> whisperx model
+_whisper_model_cache: dict = {}   # model_name -> whisper model
+
 
 def save_session(session_id: str):
     """Persist a session to disk as JSON."""
@@ -306,9 +311,11 @@ def _transcribe_preview_clip(audio_path: str, language: str = "en") -> tuple[lis
     try:
         import whisperx
 
-        device = "cpu"
-        compute_type = "int8"
-        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        _model_name = "medium"
+        if _model_name not in _whisperx_model_cache:
+            log_step("SEGMENT_PREVIEW", f"Loading WhisperX {_model_name} model (first call — cached for reuse)")
+            _whisperx_model_cache[_model_name] = whisperx.load_model(_model_name, "cpu", compute_type="int8")
+        model = _whisperx_model_cache[_model_name]
         audio = whisperx.load_audio(audio_path)
         result = model.transcribe(audio, batch_size=4, language=whisper_lang)
         segments = result.get("segments", []) or []
@@ -328,7 +335,11 @@ def _transcribe_preview_clip(audio_path: str, language: str = "en") -> tuple[lis
     try:
         import whisper
 
-        model = whisper.load_model("medium")
+        _model_name = "medium"
+        if _model_name not in _whisper_model_cache:
+            log_step("SEGMENT_PREVIEW", f"Loading Whisper {_model_name} model (first call — cached for reuse)")
+            _whisper_model_cache[_model_name] = whisper.load_model(_model_name)
+        model = _whisper_model_cache[_model_name]
         result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=False)
         segments = result.get("segments", []) or []
 
@@ -1911,7 +1922,9 @@ def _transcribe_clip_for_alignment(audio_path: str, language: str = "en") -> tup
 
         device = "cpu"
         compute_type = "int8"
-        model = whisperx.load_model("medium", device, compute_type=compute_type)
+        if "medium" not in _whisperx_model_cache:
+            _whisperx_model_cache["medium"] = whisperx.load_model("medium", device, compute_type=compute_type)
+        model = _whisperx_model_cache["medium"]
         audio = whisperx.load_audio(audio_path)
         result = model.transcribe(audio, batch_size=4, language=whisper_lang)
         segments = result.get("segments", []) or []
@@ -1961,7 +1974,9 @@ def _transcribe_clip_for_alignment(audio_path: str, language: str = "en") -> tup
     try:
         import whisper
 
-        model = whisper.load_model("medium")
+        if "medium" not in _whisper_model_cache:
+            _whisper_model_cache["medium"] = whisper.load_model("medium")
+        model = _whisper_model_cache["medium"]
         result = model.transcribe(audio_path, language=whisper_lang, word_timestamps=True)
         segments = result.get("segments", []) or []
         whisper_words = [
@@ -2518,7 +2533,10 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
                 device = "cpu"
                 compute_type = "int8"
                 log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
-                model = whisperx.load_model(model_name, device, compute_type=compute_type)
+                if model_name not in _whisperx_model_cache:
+                    log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (caching for reuse)")
+                    _whisperx_model_cache[model_name] = whisperx.load_model(model_name, device, compute_type=compute_type)
+                model = _whisperx_model_cache[model_name]
                 log_step("WHISPERX", "Loading audio...")
                 audio = whisperx.load_audio(audio_path)
                 log_step("WHISPERX", "Running transcription...")
@@ -2565,7 +2583,9 @@ async def transcribe_stream(session_id: str, language: str = "en", use_cleaned: 
             try:
                 import whisper
                 log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
-                model = whisper.load_model(model_name)
+                if model_name not in _whisper_model_cache:
+                    _whisper_model_cache[model_name] = whisper.load_model(model_name)
+                model = _whisper_model_cache[model_name]
                 log_step("WHISPER", "Running transcription...")
                 result = model.transcribe(audio_path, language=language, word_timestamps=True)
                 lines = []
@@ -2659,7 +2679,9 @@ def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: 
         device = "cpu"  # MPS has limited WhisperX support
         compute_type = "int8"  # Efficient for CPU
         log_step("WHISPERX", f"Loading WhisperX model '{model_name}' (device={device})...")
-        model = whisperx.load_model(model_name, device, compute_type=compute_type)
+        if model_name not in _whisperx_model_cache:
+            _whisperx_model_cache[model_name] = whisperx.load_model(model_name, device, compute_type=compute_type)
+        model = _whisperx_model_cache[model_name]
         
         # Load audio at WhisperX's expected sample rate
         log_step("WHISPERX", "Loading audio...")
@@ -2789,7 +2811,9 @@ def transcribe_audio(session_id: str, language: str = Form("en"), model_preset: 
         import whisper
         
         log_step("WHISPER", f"Loading Whisper model '{model_name}'...")
-        model = whisper.load_model(model_name)
+        if model_name not in _whisper_model_cache:
+            _whisper_model_cache[model_name] = whisper.load_model(model_name)
+        model = _whisper_model_cache[model_name]
         
         log_step("WHISPER", "Running transcription...")
         result = model.transcribe(
