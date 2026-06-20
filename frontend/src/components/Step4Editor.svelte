@@ -8466,6 +8466,10 @@
     cancelSegmentRecording();
     openSegmentRegenerateFromCleanup(seg);
 
+    // Force audio source to 'edited' — the recording has been spliced in, so the edited
+    // vocal is the correct source to analyze (not the unedited vocal isolation).
+    segRegenAudioSource = 'edited';
+
     // Prefill AI modal state so Generate Notes is immediately available.
     segRegenPreviewLines = prefillLines;
     segRegenPreviewHyphenated = prefillHyphenated;
