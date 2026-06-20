@@ -961,6 +961,7 @@
     traceFrame: null,
   };
   let editingSyllable = '';
+  let syllableInputEl = null; // ref to the syllable <input> in the context menu
   let contextMenuEl;
 
   // Segment local regenerate modal (prototype)
@@ -4322,6 +4323,47 @@
     return Math.round(playbackBeat || 0);
   }
 
+  // Open context menu for the currently selected note(s) via keyboard (F2).
+  // Single note: centers menu on the note, then focuses the syllable input.
+  // Multi-note: centers on the canvas, opens menu without focusing an input.
+  function openContextMenuForSelected(focusInput = true) {
+    if (selectedNote === null && selectedNotes.size === 0) return;
+    const isMulti = selectedNotes.size > 1;
+    const targetId = isMulti ? [...selectedNotes][0] : selectedNote;
+    const note = notes.find(n => n.id === targetId);
+    if (!note || note.type === 'break') return;
+
+    syllableUndoPushed = false;
+    if (!isMulti) editingSyllable = note.syllable;
+
+    // Position menu near the note on canvas
+    const canvasRect = canvasEl?.getBoundingClientRect() ?? { left: window.innerWidth / 2, top: window.innerHeight / 2 };
+    const noteX = canvasRect.left + beatToX(note.startBeat) + (note.duration * zoom) / 2;
+    const noteY = canvasRect.top + pitchToY(note.pitch);
+    const menuW = 220, menuH = 280;
+    const posX = Math.min(Math.max(10, noteX - menuW / 2), window.innerWidth - menuW - 10);
+    const posY = Math.min(Math.max(10, noteY - 30), window.innerHeight - menuH - 10);
+
+    openContextMenu({
+      x: posX, y: posY,
+      noteId: targetId,
+      isBreak: false, isEmpty: false, isFlag: false, isPasteMenu: false,
+      isCleanup: false, isWaveformEmpty: false,
+      flagId: null, cleanupId: null,
+      beat: note.startBeat, ms: null, pitch: note.pitch, traceFrame: null,
+    });
+
+    if (focusInput && !isMulti) {
+      tick().then(() => {
+        if (syllableInputEl) {
+          syllableInputEl.focus();
+          const len = syllableInputEl.value.length;
+          syllableInputEl.setSelectionRange(len, len);
+        }
+      });
+    }
+  }
+
   function openContextMenu(nextMenu) {
     contextMenu = { ...nextMenu, visible: true };
     tick().then(() => {
@@ -5620,11 +5662,17 @@
       insertIdx = notes.indexOf(targetNote);
     }
     notes = [...notes.slice(0, insertIdx), newNote, ...notes.slice(insertIdx)];
-    selectedNote = maxId;
     markUnsaved();
     closeContextMenu();
     computeTotalBeats();
     draw();
+    // Use setTimeout(0) to re-assert selection after all Svelte reactive batching completes
+    // (reactive statements triggered by notes[] mutation clear selectedNote after tick())
+    setTimeout(() => {
+      selectedNote = maxId;
+      selectedNotes = new Set();
+      draw();
+    }, 0);
   }
 
   function mergeWithNext(noteId) {
@@ -6658,6 +6706,17 @@
     if (e.code === 'Period' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       navigateToPosition(1, e.shiftKey);
+      return;
+    }
+
+    // E: open context menu for selected note and focus syllable input (single) or just open (multi)
+    if (e.code === 'KeyE' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      if (contextMenu.visible) {
+        closeContextMenu();
+      } else {
+        openContextMenuForSelected(true);
+      }
       return;
     }
 
@@ -9947,6 +10006,7 @@
     {#if ctxNote}
       <div
         class="context-menu"
+        on:mousedown|stopPropagation
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
@@ -9975,11 +10035,12 @@
             <div class="ctx-syllable-wrapper">
               <div class="ctx-syllable-highlight" aria-hidden="true">{@html editingSyllable.replace(/ /g, '<span class="spc">·</span>')}</div>
               <input
+                bind:this={syllableInputEl}
                 class="ctx-syllable-input"
                 type="text"
                 bind:value={editingSyllable}
                 on:input={() => updateSyllable(ctxNote.id, editingSyllable)}
-                on:keydown|stopPropagation={(e) => { if (e.key === 'Escape') closeContextMenu(); }}
+                on:keydown|stopPropagation={(e) => { if (e.key === 'Escape' || e.key === 'Enter') closeContextMenu(); }}
                 placeholder="syllable"
               />
             </div>
@@ -10046,6 +10107,7 @@
       <!-- Paste mode context menu -->
       <div
         class="context-menu"
+        on:mousedown|stopPropagation
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
@@ -10068,6 +10130,7 @@
       {#if seg}
         <div
           class="context-menu"
+        on:mousedown|stopPropagation
           bind:this={contextMenuEl}
           style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
         >
@@ -10111,6 +10174,7 @@
       {@const joinPair = getJoinableCleanupPairAtMs(contextMenu.ms)}
       <div
         class="context-menu"
+        on:mousedown|stopPropagation
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
@@ -10136,6 +10200,7 @@
       <!-- Flag context menu -->
       <div
         class="context-menu"
+        on:mousedown|stopPropagation
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
@@ -10158,6 +10223,7 @@
       <!-- Empty space context menu -->
       <div
         class="context-menu"
+        on:mousedown|stopPropagation
         bind:this={contextMenuEl}
         style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       >
@@ -10384,6 +10450,7 @@
       <span class="shortcut"><kbd>S</kbd> split</span>
       <span class="shortcut"><kbd>Del</kbd> delete</span>
       <span class="shortcut"><kbd>P</kbd> play pitch</span>
+      <span class="shortcut"><kbd>E</kbd> edit syllable</span>
       <span class="shortcut"><kbd>Ctrl+←→</kbd> resize right edge</span>
       <span class="shortcut"><kbd>Shift+Ctrl+←→</kbd> resize left edge</span>
       <span class="shortcut"><kbd>Ctrl+X/C/V</kbd> cut/copy/paste</span>
