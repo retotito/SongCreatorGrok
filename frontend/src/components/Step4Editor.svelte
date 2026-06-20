@@ -5636,21 +5636,29 @@
     }
     const maxId = Math.max(...notes.map(n => n.id)) + 1;
 
-    const note1 = { ...note, duration: halfDur };
+    const hasWordSpace = note.syllable.endsWith(' ');
+    // Wordspace (trailing space) marks end-of-word; right note inherits it, left loses it
+    const note1 = { ...note, duration: halfDur, syllable: hasWordSpace ? note.syllable.trimEnd() : note.syllable };
     const note2 = {
       ...note,
       id: maxId,
       startBeat: note.startBeat + halfDur,
       duration: note.duration - halfDur,
-      syllable: ' ~',
+      syllable: hasWordSpace ? '~ ' : '~',
       original: { startBeat: note.startBeat + halfDur, duration: note.duration - halfDur, pitch: note.pitch },
     };
 
     notes = [...notes.slice(0, idx), note1, note2, ...notes.slice(idx + 1)];
-    selectedNote = maxId; // select the new second note
     markUnsaved();
     closeContextMenu();
+    computeTotalBeats();
     draw();
+    // Use setTimeout(0) to re-assert selection after all Svelte reactive batching completes
+    setTimeout(() => {
+      selectedNote = maxId;
+      selectedNotes = new Set([maxId]);
+      draw();
+    }, 0);
   }
 
   function setNoteType(noteId, type) {
@@ -6905,7 +6913,7 @@
           deleteNote(selectedNote);
         }
       }
-      if (e.key.toLowerCase() === 's' && !e.shiftKey && contextMenu.visible) {
+      if (e.key.toLowerCase() === 's' && !e.shiftKey) {
         e.preventDefault();
         splitNote(shortcutNoteId);
       }
