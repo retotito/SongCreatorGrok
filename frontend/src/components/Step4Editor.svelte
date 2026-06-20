@@ -10325,6 +10325,10 @@
       <span class="shortcut-label">Navigate</span>
       <span class="shortcut"><kbd>Scroll</kbd> pan</span>
       <span class="shortcut"><kbd>Ctrl+Scroll</kbd> zoom</span>
+      <span class="shortcut"><kbd>,</kbd> prev position</span>
+      <span class="shortcut"><kbd>.</kbd> next position</span>
+      <span class="shortcut"><kbd>Shift+,</kbd> prev marker</span>
+      <span class="shortcut"><kbd>Shift+.</kbd> next marker</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Select</span>
