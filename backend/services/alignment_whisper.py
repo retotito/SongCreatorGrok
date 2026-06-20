@@ -66,10 +66,10 @@ def parse_lyrics(lyrics_text: str) -> List[List[dict]]:
                     "line_index": len(lines)
                 })
         
-        # Add trailing space to last syllable of each word (except last syllable of the line)
+        # Add trailing space to last syllable of each word (including the last syllable of the line)
         for idx, syl in enumerate(syllables):
             is_last_in_word = (idx == len(syllables) - 1) or syllables[idx + 1].get('is_word_start', False)
-            if is_last_in_word and idx < len(syllables) - 1:
+            if is_last_in_word:
                 syl['text'] = syl['text'] + ' '
         if syllables:
             lines.append(syllables)
