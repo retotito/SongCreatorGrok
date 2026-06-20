@@ -231,6 +231,9 @@
   // Set GAP mode (Ctrl/Cmd+S)
   let setGapMode = false;       // user is picking a new GAP position
   let setGapHoverBeat = null;   // beat of the grid line currently hovered
+  let endMs = null;             // #END value in ms (null = not set)
+  let setEndMode = false;       // user is picking a new END position
+  let setEndHoverMs = null;     // ms position currently hovered in setEnd mode
 
   // Downbeat handle drag (replaces Grid Align mode)
   const DOWNBEAT_HANDLE_H = 14; // px height of the top strip reserved for diamonds
@@ -1904,6 +1907,9 @@
 
       // Include downbeat offset in extra headers for persistence
       const headersToSave = [...extraHeaders];
+      if (endMs !== null) {
+        headersToSave.push({ key: 'END', value: String(endMs) });
+      }
       if (downbeatOffsetMs !== 0) {
         headersToSave.push({ key: 'DOWNBEATOFFSET', value: String(Math.round(downbeatOffsetMs)) });
       }
@@ -2024,6 +2030,24 @@
   function cancelSetGapMode() {
     setGapMode = false;
     setGapHoverBeat = null;
+    if (canvasEl) canvasEl.style.cursor = '';
+    draw();
+  }
+
+  function enterSetEndMode() {
+    if (isPlaying) return;
+    clearMetronomePickTarget();
+    clearMarkerSelection();
+    selectedCleanupSegment = null;
+    setEndMode = true;
+    setEndHoverMs = null;
+    if (canvasEl) canvasEl.style.cursor = 'crosshair';
+    draw();
+  }
+
+  function cancelSetEndMode() {
+    setEndMode = false;
+    setEndHoverMs = null;
     if (canvasEl) canvasEl.style.cursor = '';
     draw();
   }
@@ -2477,6 +2501,50 @@
         ctx.lineTo(gapX, pianoH);
         ctx.stroke();
         ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
+    // ── END marker — orange dashed line ──
+    if (endMs !== null) {
+      const endBeat = (endMs - gapMs) * bpm / 15000;
+      const endX = beatToX(endBeat);
+      if (endX >= -1 && endX <= w + 1) {
+        ctx.save();
+        ctx.strokeStyle = '#ff6b35';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(endX, 0);
+        ctx.lineTo(endX, pianoH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#ff6b35';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`END`, endX, 12);
+        ctx.restore();
+      }
+    }
+
+    // ── Set END mode: orange hover line follows mouse ──
+    if (setEndMode && setEndHoverMs !== null) {
+      const endBeat = (setEndHoverMs - gapMs) * bpm / 15000;
+      const hoverX = beatToX(endBeat);
+      if (hoverX >= 0 && hoverX <= w) {
+        ctx.save();
+        ctx.strokeStyle = '#ff6b35';
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.85;
+        ctx.beginPath();
+        ctx.moveTo(hoverX, 0);
+        ctx.lineTo(hoverX, pianoH);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#ff6b35';
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`END ${Math.round(setEndHoverMs)}ms`, hoverX, 12);
         ctx.restore();
       }
     }
@@ -3279,6 +3347,15 @@
       return;
     }
 
+    // ── Set END mode click ──
+    if (setEndMode && setEndHoverMs !== null) {
+      endMs = setEndHoverMs;
+      console.log(`[SetEND] Setting END to ${endMs}ms`);
+      cancelSetEndMode();
+      markUnsaved();
+      return;
+    }
+
     // Close context menu on left-click
     if (contextMenu.visible) closeContextMenu();
 
@@ -3685,6 +3762,15 @@
         setGapHoverBeat = null; // can't set GAP before audio start
       }
       canvasEl.style.cursor = setGapHoverBeat !== null ? 'crosshair' : 'not-allowed';
+      draw();
+      return;
+    }
+
+    // ── Set END mode hover: orange line follows mouse position ──
+    if (setEndMode) {
+      const hoverTimeSec = beatToTime(xToBeat(mx));
+      setEndHoverMs = hoverTimeSec >= 0 ? Math.round(hoverTimeSec * 1000) : null;
+      canvasEl.style.cursor = setEndHoverMs !== null ? 'crosshair' : 'not-allowed';
       draw();
       return;
     }
@@ -5860,6 +5946,10 @@
     lines.push(`#ARTIST:${$lyricsData?.artist || 'Unknown'}`);
     lines.push(`#BPM:${bpm}`);
     lines.push(`#GAP:${gapMs}`);
+    // END marker
+    if (endMs !== null) {
+      lines.push(`#END:${endMs}`);
+    }
     // Downbeat offset
     if (downbeatOffsetMs !== 0) {
       lines.push(`#DOWNBEATOFFSET:${Math.round(downbeatOffsetMs)}`);
@@ -5871,7 +5961,7 @@
       lines.push(`#METRONOMESPEED:${metronomeSpeedFactor}`);
     }
     // Extra headers (YOUTUBE, COVER, LANGUAGE, etc.)
-    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
+    const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'END', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
     for (const h of extraHeaders) {
       if (!standardKeys.has(h.key.toUpperCase())) {
         // Keep #MP3 in sync with current artist/title and original file extension
@@ -5911,6 +6001,7 @@
         const value = m[2];
         if (key.toUpperCase() === 'BPM') bpm = parseFloat(value.replace(',', '.')) || bpm;
         else if (key.toUpperCase() === 'GAP') gapMs = parseInt(value) || gapMs;
+        else if (key.toUpperCase() === 'END') { const v = parseInt(value, 10); endMs = Number.isFinite(v) && v > 0 ? v : null; }
         else if (key.toUpperCase() === 'TITLE') { /* handled by lyricsData */ }
         else if (key.toUpperCase() === 'ARTIST') { /* handled by lyricsData */ }
         else parsedHeaders.push({ key, value });
@@ -6274,6 +6365,11 @@
     // Loop start (if active)
     if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
       positions.add(Math.min(loopStartBeat, loopEndBeat));
+    }
+
+    // END position (if set)
+    if (endMs !== null) {
+      positions.add((endMs - gapMs) * bpm / 15000);
     }
 
     if (extended) {
@@ -6698,6 +6794,17 @@
       return;
     }
 
+    // Ctrl/Cmd+E: Set END mode
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'e') {
+      e.preventDefault();
+      if (setEndMode) {
+        cancelSetEndMode();
+      } else {
+        enterSetEndMode();
+      }
+      return;
+    }
+
     // ── Position navigation: , / . (major) and Shift+, / Shift+. (all markers) ──
     if (e.code === 'Comma' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
@@ -6726,6 +6833,8 @@
       e.preventDefault();
       if (contextMenu.visible) {
         closeContextMenu();
+      } else if (setEndMode) {
+        cancelSetEndMode();
       } else if (beatMarkerMode) {
         exitBeatMarkerMode();
         draw();
@@ -9121,8 +9230,9 @@
       console.log('[Step4] Parsed', notes.length, 'notes/breaks');
 
       // Parse extra headers from ultrastar content
-      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
+      const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'END', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
       extraHeaders = [];
+      endMs = null;
       let foundDownbeatOffset = false;
       let loadedMetronomeAnchorBeat = null;
       let loadedMetronomeIg = null;
@@ -9134,6 +9244,9 @@
           if (key === 'DOWNBEATOFFSET') {
             downbeatOffsetMs = parseFloat(m[2]) || 0;
             foundDownbeatOffset = true;
+          } else if (key === 'END') {
+            const v = parseInt(m[2], 10);
+            endMs = Number.isFinite(v) && v > 0 ? v : null;
           } else if (key === 'METRONOMEANCHOR') {
             loadedMetronomeAnchorBeat = parseFloat(m[2]) || null;
           } else if (key === 'METRONOMEIG') {
@@ -9744,6 +9857,28 @@
             {gapMs} ms
           </span>
         </div>
+        <div id="end-controls" title="Click to set the END position (Cmd+E) — song stops here in UltraStar">
+          <span class="bpm-label gap-label">END</span>
+          {#if endMs !== null}
+            <span class="gap-input gap-display" class:disabled-audio={uiModalGuardActive} role="button" tabindex="0"
+              on:click={() => { if (uiModalGuardActive) return; enterSetEndMode(); }}
+              on:keydown={(e) => { if (uiModalGuardActive) return; e.key === 'Enter' && enterSetEndMode(); }}
+              title={uiModalGuardActive ? 'Disabled while modal is active' : `Click to reposition END (Cmd+E) — ${endMs}ms`}
+              >
+              {endMs} ms
+            </span>
+            <button class="tool-btn sm" style="padding: 0 5px; margin-left: 2px;" title="Remove END marker"
+              on:click={() => { endMs = null; markUnsaved(); draw(); }}>🗑</button>
+          {:else}
+            <span class="gap-input gap-display gap-display-unset" class:disabled-audio={uiModalGuardActive} role="button" tabindex="0"
+              on:click={() => { if (uiModalGuardActive) return; enterSetEndMode(); }}
+              on:keydown={(e) => { if (uiModalGuardActive) return; e.key === 'Enter' && enterSetEndMode(); }}
+              title={uiModalGuardActive ? 'Disabled while modal is active' : 'Click to set END position (Cmd+E)'}
+              >
+              not set
+            </span>
+          {/if}
+        </div>
       </div>
       <div id="edit-controls-wrapper">
           <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; autoFixWordSpaces(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
@@ -9983,6 +10118,15 @@
         SET GAP MODE — Click a grid line to set the GAP position, or press Esc to cancel
       </span>
       <button class="setgap-cancel-btn" on:click={cancelSetGapMode}>✕ Cancel</button>
+    </div>
+  {/if}
+
+  {#if setEndMode}
+    <div class="setgap-mode-bar" style="border-color: #ff6b35; color: #ff6b35;">
+      <span class="setgap-mode-text">
+        SET END MODE — Click to set the END position, or press Esc to cancel
+      </span>
+      <button class="setgap-cancel-btn" on:click={cancelSetEndMode}>✕ Cancel</button>
     </div>
   {/if}
 
@@ -10311,6 +10455,13 @@
       {/each}
       <!-- draggable handle -->
       <div class="scrollbar-handle" style="left: {scrollHandlePct}%"></div>
+      <!-- GAP tick (beat 0) -->
+      <div class="scrollbar-gap-tick" style="left: {((-getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+      <!-- END tick -->
+      {#if endMs !== null}
+        {@const endBeat = (endMs - gapMs) * bpm / 15000}
+        <div class="scrollbar-end-tick" style="left: {((endBeat - getMinBeat()) / scrollBeatRange * 100).toFixed(3)}%"></div>
+      {/if}
     </div>
   </div>
 
@@ -11607,6 +11758,30 @@
     z-index: 2;
   }
 
+  .scrollbar-gap-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #ffd700;
+    transform: translateX(-50%);
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0.75;
+  }
+
+  .scrollbar-end-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #ff6b35;
+    transform: translateX(-50%);
+    pointer-events: none;
+    z-index: 3;
+    opacity: 0.75;
+  }
+
   .scrollbar-cleanup-lane {
     position: absolute;
     left: 0;
@@ -11861,6 +12036,10 @@
   .gap-display:hover {
     color: #81d4fa;
     border-color: #4fc3f7;
+  }
+  .gap-display-unset {
+    opacity: 0.45;
+    font-style: italic;
   }
 
   .bpm-input::-webkit-inner-spin-button,
