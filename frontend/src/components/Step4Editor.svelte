@@ -6202,6 +6202,65 @@
     draw();
   }
 
+  // ── Position navigation (DAW-style , / . and Shift+, / Shift+.) ──
+  // direction: -1 = previous, +1 = next
+  // extended: false = major positions only (song start, gap, loop start)
+  //           true  = all positions (+ breakpoints, flags, cleanup section starts)
+  function navigateToPosition(direction, extended) {
+    const currentBeat = isPlaying ? playbackBeat : playbackBeat;
+
+    // Build sorted list of beat positions
+    const positions = new Set();
+
+    // Always included: song start (beat 0) and gap (first note start / 0)
+    positions.add(0); // time=0 → beat = (0 - gapSec) * bpm / 15 (negative, fine as anchor)
+
+    // GAP position: beat at time 0 is beat 0 by our beatToTime convention (gapMs offset).
+    // "Gap" as a named position = beat 0 corresponds to gapMs offset in audio.
+    // Song start (audio time 0) = beat value at t=0 = -gapMs/1000 * bpm/15
+    const songStartBeat = -(gapMs / 1000) * bpm / 15;
+    positions.add(songStartBeat);
+    positions.add(0); // gap/first-note-start = beat 0
+
+    // Loop start (if active)
+    if (loopEnabled && loopStartBeat !== null && loopEndBeat !== null) {
+      positions.add(Math.min(loopStartBeat, loopEndBeat));
+    }
+
+    if (extended) {
+      // Breakpoints
+      notes.filter(n => n.type === 'break').forEach(n => positions.add(n.startBeat));
+      // Flags
+      flags.forEach(f => positions.add(f.beat));
+      // Cleanup section starts
+      cleanupSegments.forEach(seg => positions.add(timeToBeat(seg.startMs / 1000)));
+    }
+
+    const sorted = [...positions].sort((a, b) => a - b);
+
+    let target = null;
+    const EPSILON = 0.05; // beats tolerance to avoid getting stuck on current position
+
+    if (direction === -1) {
+      // Previous: largest position strictly before currentBeat - epsilon
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        if (sorted[i] < currentBeat - EPSILON) { target = sorted[i]; break; }
+      }
+      if (target === null) target = sorted[0]; // wrap to earliest
+    } else {
+      // Next: smallest position strictly after currentBeat + epsilon
+      for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i] > currentBeat + EPSILON) { target = sorted[i]; break; }
+      }
+      if (target === null) target = sorted[sorted.length - 1]; // wrap to latest
+    }
+
+    if (target !== null) {
+      seekToTime(beatToTime(target));
+      draw();
+    }
+  }
+
   function handleKeydown(e) {
     // Skip all shortcuts when text editor modal is open
     if (showTextEditor) return;
@@ -6255,6 +6314,8 @@
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
       if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (!uiModalGuardActive) { micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); } return; }
       if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); if (!uiModalGuardActive) { vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); } return; }
+      if (e.code === 'Comma' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); navigateToPosition(-1, e.shiftKey); return; }
+      if (e.code === 'Period' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); navigateToPosition(1, e.shiftKey); return; }
       if (e.code === 'Escape') {
         e.preventDefault();
         if (loopStartBeat !== null) clearLoop();
@@ -6584,6 +6645,18 @@
       } else {
         enterSetGapMode();
       }
+      return;
+    }
+
+    // ── Position navigation: , / . (major) and Shift+, / Shift+. (all markers) ──
+    if (e.code === 'Comma' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      navigateToPosition(-1, e.shiftKey);
+      return;
+    }
+    if (e.code === 'Period' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      navigateToPosition(1, e.shiftKey);
       return;
     }
 
