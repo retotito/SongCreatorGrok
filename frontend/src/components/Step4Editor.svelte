@@ -1465,7 +1465,7 @@
   let vocalTraceDecodedBuffer = null;   // decoded AudioBuffer of the vocal file
   let vocalTraceSampleBuf = null;       // reused Float32Array(2048) for pitch detection
   let vocalTraceDetector = null;        // PitchDetector instance
-  let vocalTraceFrames = [];            // [{beat, pitch}] — all voiced frames, flat
+  let vocalTraceFrames = [];            // [{beat, pitch, sungPitch, isHit}] — all voiced frames, flat
   // Smoothing state (parallel to mic)
   let vocalTraceLastPitch = -1;
   let vocalTracePitchConfidence = 0;
@@ -2840,13 +2840,10 @@
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
       const hasDrawableNotes = notes.some(n => n.type !== 'break');
-      // Estimate beat gap between frames (for visual continuity)
-      const vtBeatGap = vocalTraceFrames.length > 1
-        ? Math.abs(vocalTraceFrames[1].beat - vocalTraceFrames[0].beat) * 1.5
-        : 0.15;
+      // Beat gap from the fixed recording step (not from frame deltas)
+      const vtBeatGap = (VOCAL_TRACE_STEP_SEC * bpm) / 15;
 
-      // Lyrics-only / empty-note mode fallback: draw raw trace so users can still
-      // validate short trace runs before any notes exist.
+      // Lyrics-only / empty-note mode fallback: draw raw trace dots
       if (!hasDrawableNotes) {
         ctx.fillStyle = 'rgba(255, 80, 180, 0.7)';
         const dotH = Math.max(2, noteHeight * 0.55);
@@ -2864,13 +2861,10 @@
         const noteEndBeat = note.startBeat + note.duration;
         if (noteEndBeat < visibleStartBeat - 1 || note.startBeat > visibleEndBeat + 1) continue;
 
-        // Binary search: first frame at or after note.startBeat
-        let lo = 0, hi = vocalTraceFrames.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (vocalTraceFrames[mid].beat < note.startBeat) lo = mid + 1;
-          else hi = mid;
-        }
+        const hits = vocalTraceFrames.filter(
+          f => f.beat >= note.startBeat && f.beat <= noteEndBeat
+        );
+        if (hits.length === 0) continue;
 
         const noteY = pitchToY(note.pitch);
         const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
@@ -2878,50 +2872,28 @@
                        :                 'rgba(255, 80, 180, 0.65)';
         const missColor = 'rgba(255, 140, 50, 0.5)';
 
-        let i = lo;
-        let firstHitDrawn = false; // track if we've drawn the first hit block for this note
-        while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
-          const frame = vocalTraceFrames[i];
-          // Octave-correct the frame pitch toward the note (same as mic sing-along)
-          let framePitch = frame.pitch;
-          while (framePitch - note.pitch > 6)  framePitch -= 12;
-          while (framePitch - note.pitch < -6) framePitch += 12;
-          const isHit = Math.abs(framePitch - note.pitch) <= pitchTolerance;
-
-          if (isHit) {
+        let i = 0;
+        while (i < hits.length) {
+          const frame = hits[i];
+          if (frame.isHit) {
             let endBeat = frame.beat;
-            while (i + 1 < vocalTraceFrames.length
-                && vocalTraceFrames[i + 1].beat <= noteEndBeat) {
-              let fp = vocalTraceFrames[i + 1].pitch;
-              while (fp - note.pitch > 6)  fp -= 12;
-              while (fp - note.pitch < -6) fp += 12;
-              if (Math.abs(fp - note.pitch) > pitchTolerance) break;
-              i++; endBeat = vocalTraceFrames[i].beat;
+            while (i + 1 < hits.length && hits[i + 1].isHit) {
+              i++; endBeat = hits[i].beat;
             }
-            firstHitDrawn = true;
             const xStart = beatToX(Math.max(frame.beat, note.startBeat));
             const xEnd   = beatToX(Math.min(endBeat + vtBeatGap, noteEndBeat));
             ctx.fillStyle = hitColor;
             ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           } else {
-            const missPitch = frame.pitch;
+            const missPitch = frame.sungPitch;
             let endBeat = frame.beat;
-            while (i + 1 < vocalTraceFrames.length
-                && vocalTraceFrames[i + 1].beat <= noteEndBeat
-                && vocalTraceFrames[i + 1].pitch === missPitch) {
-              i++; endBeat = vocalTraceFrames[i].beat;
-            }
-            const missDurationBeat = Math.max(0, endBeat - frame.beat);
-            const nearStartEdge = (frame.beat - note.startBeat) <= Math.max(0.5, vtBeatGap);
-            const nearEndEdge = (noteEndBeat - endBeat) <= Math.max(0.5, vtBeatGap);
-            // Ignore tiny edge flicker misses to avoid noisy overlap on otherwise-correct notes.
-            if (missDurationBeat < Math.max(0.7, vtBeatGap) && (nearStartEdge || nearEndEdge)) {
-              i++;
-              continue;
+            while (i + 1 < hits.length && !hits[i + 1].isHit
+                && hits[i + 1].sungPitch === missPitch) {
+              i++; endBeat = hits[i].beat;
             }
             const missY  = pitchToY(missPitch);
             const xStart = beatToX(frame.beat);
-            const xEnd   = beatToX(endBeat);
+            const xEnd   = beatToX(endBeat + vtBeatGap);
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
@@ -8880,8 +8852,26 @@
     const currentBeat = currentBeatForLog;
     // console.log(`[VT:frame] beat=${currentBeat.toFixed(3)} timeSec=${timeSec.toFixed(4)} rawMidi=${Math.round(12 * Math.log2(frequency / 440) + 69)} smoothed=${midiPitch} clarity=${clarity.toFixed(2)} window=[${vocalTraceRecentPitches.join(',')}] windowSize=${vocalTraceRecentPitches.length}`);
 
-    // Always append — frames ahead of playhead are cleared on play start.
-    vocalTraceFrames.push({ beat: currentBeat, pitch: midiPitch });
+    // Find the note that contains this beat (if any) to bake isHit + sungPitch.
+    // Hard tolerance = 1 semitone — vocal trace represents the actual recording,
+    // not live singing, so we always use strict accuracy.
+    const HARD_TOLERANCE = 1;
+    let sungPitch = midiPitch;
+    let isHit = false;
+    for (const n of notes) {
+      if (n.type === 'break') continue;
+      if (currentBeat >= n.startBeat && currentBeat < n.startBeat + n.duration) {
+        // Octave-correct toward note pitch
+        let p = midiPitch;
+        while (p - n.pitch > 6)  p -= 12;
+        while (p - n.pitch < -6) p += 12;
+        sungPitch = p;
+        isHit = Math.abs(p - n.pitch) <= HARD_TOLERANCE;
+        break;
+      }
+    }
+
+    vocalTraceFrames.push({ beat: currentBeat, pitch: midiPitch, sungPitch, isHit });
   }
 
   // ── Pitch line: offline full-song pitch analysis ──
