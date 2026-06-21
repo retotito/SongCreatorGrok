@@ -10709,6 +10709,7 @@
       <span class="shortcut"><kbd>.</kbd> next position</span>
       <span class="shortcut"><kbd>Shift+,</kbd> prev marker</span>
       <span class="shortcut"><kbd>Shift+.</kbd> next marker</span>
+      <span class="shortcut"><kbd>⌘F</kbd> find syllable</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Select</span>
