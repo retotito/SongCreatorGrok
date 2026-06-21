@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
+  import FindWidget from './FindWidget.svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
@@ -1497,41 +1498,19 @@
   let showNotesModal = false;
   let sessionNotes = '';
 
-  // Find widget
+  // Find widget — UI extracted to FindWidget.svelte
   let showFindWidget = false;
-  let findQuery = '';
+  let findMatches = [];
   let findMatchIndex = 0;
   let canvasFocused = false;
-  $: findMatches = (() => {
-    if (!findQuery.trim()) return [];
-    const q = findQuery.trim().toLowerCase();
-    return notes
-      .map((n, i) => ({ note: n, idx: i }))
-      .filter(({ note }) => note.type !== 'break' && note.syllable.trim().toLowerCase().includes(q));
-  })();
-
-  function jumpToFindMatch(index) {
-    if (!findMatches.length) return;
-    findMatchIndex = ((index % findMatches.length) + findMatches.length) % findMatches.length;
-    const match = findMatches[findMatchIndex];
-    const cw = canvasEl?.width || 800;
-    scrollX = Math.max(0, match.note.startBeat * zoom - cw / 2);
-    draw();
-  }
+  let findWidgetRef;
 
   function openFindWidget() {
     showFindWidget = true;
-    findMatchIndex = 0;
-    // Focus the input on next tick
-    tick().then(() => {
-      const input = document.querySelector('.find-widget input');
-      if (input) input.focus();
-    });
   }
 
   function closeFindWidget() {
-    showFindWidget = false;
-    findQuery = '';
+    findWidgetRef?.close();
     draw();
   }
 
@@ -10121,26 +10100,16 @@
              draw();
            }}
            title="Zoom: {zoom.toFixed(1)}x" />
-    {#if showFindWidget}
-      <!-- svelte-ignore a11y-autofocus -->
-      <div class="find-widget">
-        <span class="find-icon">⌕</span>
-        <input
-          type="text"
-          placeholder="Find syllable…"
-          bind:value={findQuery}
-          on:input={() => { findMatchIndex = 0; if (findMatches.length) jumpToFindMatch(0); else draw(); }}
-          on:keydown|stopPropagation={(e) => {
-            if (e.key === 'Enter') { e.preventDefault(); jumpToFindMatch(findMatchIndex + (e.shiftKey ? -1 : 1)); }
-            if (e.key === 'Escape') { e.preventDefault(); closeFindWidget(); }
-          }}
-        />
-        <span class="find-count">{findQuery.trim() ? (findMatches.length ? `${findMatchIndex + 1} / ${findMatches.length}` : 'No results') : ''}</span>
-        <button class="find-nav-btn" on:click={() => jumpToFindMatch(findMatchIndex - 1)} title="Previous (Shift+Enter)" disabled={findMatches.length < 2}>↑</button>
-        <button class="find-nav-btn" on:click={() => jumpToFindMatch(findMatchIndex + 1)} title="Next (Enter)" disabled={findMatches.length < 2}>↓</button>
-        <button class="find-close-btn" on:click={closeFindWidget} title="Close (Escape)">✕</button>
-      </div>
-    {/if}
+    <FindWidget
+      bind:this={findWidgetRef}
+      bind:open={showFindWidget}
+      bind:matches={findMatches}
+      bind:matchIndex={findMatchIndex}
+      {notes}
+      on:jump={({ detail }) => { const cw = canvasEl?.width || 800; scrollX = Math.max(0, detail.note.startBeat * zoom - cw / 2); draw(); }}
+      on:close={draw}
+      on:redraw={draw}
+    />
 
     {#if micStarting}
       <div class="mic-starting-overlay">
@@ -13240,79 +13209,4 @@
     background: #2ea043;
   }
 
-  /* ── Find widget ── */
-  .find-widget {
-    position: absolute;
-    top: 8px;
-    right: 12px;
-    z-index: 200;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: #1e1e1e;
-    border: 1px solid #3a3a3a;
-    border-radius: 4px;
-    padding: 4px 6px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
-    font-size: 13px;
-  }
-  .find-icon {
-    color: #888;
-    font-size: 15px;
-    line-height: 1;
-    user-select: none;
-  }
-  .find-widget input {
-    background: #2d2d2d;
-    border: 1px solid #555;
-    border-radius: 3px;
-    color: #eee;
-    font-size: 13px;
-    padding: 2px 6px;
-    width: 180px;
-    outline: none;
-  }
-  .find-widget input:focus {
-    border-color: #4fc3f7;
-  }
-  .find-count {
-    color: #999;
-    font-size: 11px;
-    min-width: 52px;
-    text-align: center;
-    white-space: nowrap;
-  }
-  .find-nav-btn {
-    background: none;
-    border: none;
-    color: #ccc;
-    cursor: pointer;
-    font-size: 14px;
-    padding: 2px 4px;
-    border-radius: 3px;
-    line-height: 1;
-  }
-  .find-nav-btn:hover:not(:disabled) {
-    background: #333;
-    color: #fff;
-  }
-  .find-nav-btn:disabled {
-    color: #555;
-    cursor: default;
-  }
-  .find-close-btn {
-    background: none;
-    border: none;
-    color: #888;
-    cursor: pointer;
-    font-size: 13px;
-    padding: 2px 5px;
-    border-radius: 3px;
-    line-height: 1;
-    margin-left: 2px;
-  }
-  .find-close-btn:hover {
-    background: #333;
-    color: #fff;
-  }
 </style>
