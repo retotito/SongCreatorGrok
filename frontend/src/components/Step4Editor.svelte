@@ -1,10 +1,12 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import FindWidget from './FindWidget.svelte';
+  import ShortcutBar from './ShortcutBar.svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
+  import { parseUltrastar, notesToUltrastar } from '../lib/ultrastar.js';
 
   // In packaged Tauri there is no Vite proxy — call the backend directly.
   const API_BASE = (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)
@@ -1531,58 +1533,6 @@
   let dataLoadedSession = null;
 
   // Parse Ultrastar content into notes array
-  function parseUltrastar(content) {
-    const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-    const parsed = [];
-    let id = 0;
-
-    for (const line of lines) {
-      const trimmed = line.trimStart(); // trimStart only — trailing space is part of the syllable
-      if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('F:')) {
-        const isGolden = trimmed.startsWith('*');
-        const isRap = trimmed.startsWith('F:');
-        let prefix;
-        if (isRap) prefix = 'F:';
-        else if (isGolden) prefix = '*';
-        else prefix = ':';
-        // Parse 3 numeric fields, then preserve the rest as syllable text
-        // (including any leading space which signals a word boundary in Ultrastar)
-        const rest = trimmed.substring(prefix.length);
-        const match = rest.match(/^\s+(-?\d+)\s+(\d+)\s+(-?\d+) (.*)$/);
-        
-        if (match) {
-          const startBeat = parseInt(match[1]);
-          const duration = parseInt(match[2]);
-          const pitch = parseInt(match[3]);
-          const syllable = match[4];
-
-          parsed.push({
-            id: id++,
-            startBeat,
-            duration,
-            pitch,
-            syllable,
-            isRap,
-            isGolden: isGolden || false,
-            confidence: 1.0,
-            original: { startBeat, duration, pitch },
-          });
-        }
-      } else if (trimmed.startsWith('-')) {
-        // Break line — store for rendering
-        const parts = trimmed.substring(1).trim().split(/\s+/);
-        parsed.push({
-          id: id++,
-          type: 'break',
-          startBeat: parseInt(parts[0]) || 0,
-          endBeat: parseInt(parts[1]) || null,
-        });
-      }
-    }
-
-    return parsed;
-  }
-
   // Calculate pitch range from notes
   function updatePitchRange() {
     const pitchNotes = notes.filter(n => n.pitch !== undefined && n.type !== 'break');
@@ -6038,14 +5988,7 @@
       }
     }
     // Notes
-    for (const note of notes) {
-      if (note.type === 'break') {
-        lines.push(`- ${note.startBeat}`);
-      } else {
-        const prefix = note.type === 'golden' ? '*' : note.type === 'rap' ? 'F:' : ':';
-        lines.push(`${prefix} ${note.startBeat} ${note.duration} ${note.pitch} ${note.syllable}`);
-      }
-    }
+    lines.push(notesToUltrastar(notes));
     lines.push('E');
     return lines.join('\n');
   }
