@@ -44,6 +44,10 @@
   let toastCenter = false;
   let uiBusy = false;
   let editedAudioLoading = false;
+  let pendingPlayheadRestore = null; // beat to seek to once audio is ready
+  // Snapshot session ID reactively — stays valid in onDestroy even after store is cleared
+  let sessionIdSnapshot = null;
+  $: sessionIdSnapshot = $sessionId || sessionIdSnapshot;
   let waveformLoading = false;
   let waveformLoadToken = 0;
 
@@ -1035,7 +1039,7 @@
   let playbackRate = 1.0;
 
   function getEditorUiPrefsKey() {
-    return $sessionId ? `editor_ui_prefs_${$sessionId}` : null;
+    return sessionIdSnapshot ? `editor_ui_prefs_${sessionIdSnapshot}` : null;
   }
 
   function saveEditorUiPrefs(reason = 'unknown') {
@@ -6374,6 +6378,7 @@
 
     currentTimeSec = t;
     playbackBeat = timeToBeat(t);
+    if (!isPlaying) saveEditorUiPrefs('seek');
     // Scroll only if the playhead would be off-screen
     const canvasWidth = canvasEl?.width || 800;
     const px = beatToX(playbackBeat);
@@ -9493,7 +9498,6 @@
         audioEl.preservesPitch = true;
         audioEl.load();
       }
-      saveEditorUiPrefs('loadData');
       computeTotalBeats();
 
       // Position playhead and scroll at GAP (song start) — unless we have a saved scroll position
@@ -9502,11 +9506,23 @@
       playbackBeat = 0; // beat 0 = GAP position
       // Restore saved playhead position (overrides gap default)
       const savedPlaybackBeat = uiPrefs?.playbackBeat;
+      console.log('[Playhead restore] savedPlaybackBeat=', savedPlaybackBeat, 'audioEl.readyState=', audioEl?.readyState);
       if (typeof savedPlaybackBeat === 'number' && Number.isFinite(savedPlaybackBeat) && savedPlaybackBeat > 0) {
         playbackBeat = savedPlaybackBeat;
-        currentTimeSec = Math.max(0, beatToTime(savedPlaybackBeat));
-        if (audioEl) audioEl.currentTime = currentTimeSec;
+        const restoredTime = Math.max(0, beatToTime(savedPlaybackBeat));
+        currentTimeSec = restoredTime;
+        // Audio may not be ready yet on full reload — apply when canplay fires
+        if (audioEl && audioEl.readyState >= 1) {
+          console.log('[Playhead restore] audioEl ready, seeking to', restoredTime);
+          audioEl.currentTime = restoredTime;
+        } else {
+          console.log('[Playhead restore] audio not ready, setting pendingPlayheadRestore=', savedPlaybackBeat);
+          pendingPlayheadRestore = savedPlaybackBeat;
+        }
+      } else {
+        console.log('[Playhead restore] no valid saved beat — staying at gap');
       }
+      saveEditorUiPrefs('loadData');
       const canvasWidth = canvasEl?.width || 800;
       const savedScroll = session ? localStorage.getItem(`editor_scroll_${session}`) : null;
       if (savedScroll) {
@@ -9582,9 +9598,12 @@
     } else {
       console.log('[Step4] onDestroy — nothing to save');
     }
-    // Persist scroll position for this session
-    if ($sessionId) {
-      localStorage.setItem(`editor_scroll_${$sessionId}`, JSON.stringify({ sx: scrollX, z: zoom }));
+    console.log('[Step4] onDestroy — saving playbackBeat=', playbackBeat, 'scrollX=', scrollX, 'sessionIdSnapshot=', sessionIdSnapshot);
+    // Persist scroll position — use snapshot so it survives store being cleared before unmount
+    if (sessionIdSnapshot) {
+      localStorage.setItem(`editor_scroll_${sessionIdSnapshot}`, JSON.stringify({ sx: scrollX, z: zoom }));
+    } else {
+      console.warn('[Step4] onDestroy — no sessionIdSnapshot, scroll NOT saved');
     }
     saveEditorUiPrefs('destroy');
     saveSessionNotes();
@@ -10625,7 +10644,19 @@
 
   <!-- Hidden audio element for playback -->
   <audio bind:this={audioEl} src={currentAudioUrl} preload="auto"
-    on:canplay={() => { editedAudioLoading = false; }}
+    on:canplay={() => {
+      editedAudioLoading = false;
+      console.log('[canplay] fired, pendingPlayheadRestore=', pendingPlayheadRestore);
+      if (pendingPlayheadRestore !== null) {
+        const t = Math.max(0, beatToTime(pendingPlayheadRestore));
+        console.log('[canplay] seeking to', t, 'sec (beat', pendingPlayheadRestore, ')');
+        audioEl.currentTime = t;
+        currentTimeSec = t;
+        playbackBeat = pendingPlayheadRestore;
+        pendingPlayheadRestore = null;
+        draw();
+      }
+    }}
     on:error={() => { editedAudioLoading = false; }}
     on:ended={() => {
       isPlaying = false;
