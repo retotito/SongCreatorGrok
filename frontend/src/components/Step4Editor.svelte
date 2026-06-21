@@ -1060,6 +1060,7 @@
       vibratoModalX,
       vibratoModalY,
       playbackBeat,
+      pitchTolerance,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -1400,7 +1401,7 @@
   let micRecordingStartTime = 0; // playback time when recording started
   let micGain = 1.0;        // mic volume gain (0-2)
   let micGainNode = null;   // GainNode for mic volume control
-  let pitchTolerance = 1;   // semitone hit tolerance: 1=hard, 2=medium, 3=easy
+  let pitchTolerance = 3;   // semitone hit tolerance: 1=hard, 2=medium, 3=easy
   let micLevel = 0;         // current mic input level (0-1) for indicator
   let micPeakLevel = 0;     // peak-hold level for visibility
   let micOversteering = false;
@@ -9398,6 +9399,9 @@
         if (typeof uiPrefs.micDeviceId === 'string') {
           micDeviceId = uiPrefs.micDeviceId;
         }
+        if (typeof uiPrefs.pitchTolerance === 'number' && [1, 2, 3].includes(uiPrefs.pitchTolerance)) {
+          pitchTolerance = uiPrefs.pitchTolerance;
+        }
         if (typeof uiPrefs.vibratoModalX === 'number' && Number.isFinite(uiPrefs.vibratoModalX)) {
           vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, uiPrefs.vibratoModalX));
         }
@@ -9800,7 +9804,7 @@
            value={Math.round(micGain * 100)}
            on:input={handleMicGainInput}
                title="Mic volume: {Math.round(micGain * 100)}%" />
-        <select class="mic-select" bind:value={pitchTolerance} on:change={() => draw()} title="Pitch tolerance (difficulty)">
+        <select class="mic-select" bind:value={pitchTolerance} on:change={() => { draw(); saveEditorUiPrefs('pitch-tolerance'); }} title="Pitch tolerance (difficulty)">
           <option value={1}>Hard (±1)</option>
           <option value={2}>Medium (±2)</option>
           <option value={3}>Easy (±3)</option>
