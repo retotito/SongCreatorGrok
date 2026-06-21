@@ -1677,11 +1677,33 @@
       console.log('[Requantize] No rawTimings, skipping — breaks keep existing timeMs');
       return;
     }
+
+    const currentNotes = notes.filter(n => n.type !== 'break');
+
+    // If notes have been added/split beyond rawTimings count, we cannot safely rebuild
+    // from rawTimings (it would discard user-added notes and misalign syllables).
+    // Instead, directly scale all beat positions proportionally.
+    if (bpmActuallyChanged && currentNotes.length !== rawTimings.length) {
+      const prevBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
+      console.log(`[Requantize:DirectScale] notes(${currentNotes.length}) ≠ rawTimings(${rawTimings.length}) — scaling beats directly prevBpm=${prevBpm} → newBpm=${bpm}`);
+      notes = notes.map(n => {
+        const newStartBeat = Math.round(n.startBeat * bpm / prevBpm);
+        const newDuration = n.type === 'break' ? n.duration : Math.max(1, Math.round((n.duration ?? 1) * bpm / prevBpm));
+        const newEndBeat = n.endBeat == null ? null : Math.round(n.endBeat * bpm / prevBpm);
+        return { ...n, startBeat: newStartBeat, duration: newDuration, endBeat: newEndBeat };
+      });
+      // Sync rawTimings to the new beat positions so subsequent BPM changes stay accurate
+      syncRawTimingsFromNotes();
+      updatePitchRange();
+      computeTotalBeats();
+      draw();
+      return;
+    }
+
     console.log(`[Requantize] bpm=${bpm} gap=${gapMs}ms, ${rawTimings.length} timings`);
 
     // Preserve user edits (syllable, pitch) by capturing current note values indexed by rawTimings position.
     // Notes and rawTimings are in the same order (one note per timing entry), so we match by index.
-    const currentNotes = notes.filter(n => n.type !== 'break');
     const userEdits = {}; // index in rawTimings → { syllable, pitch, isRap }
     let noteIdx = 0;
     for (let i = 0; i < rawTimings.length; i++) {
@@ -1709,6 +1731,7 @@
         };
       });
     const preserveExistingBreaks = preservedBreaks.length > 0;
+
     let id = 0;
     let prevLineIndex = null;
     let lastEndBeat = 0;
@@ -9322,6 +9345,14 @@
       initialGap = data.gap_ms;
       bpmChanged = false;
       rawTimings = data.syllable_timings || [];
+
+      // Backfill beatAtBpm/durationAtBpm/syncedBpm for old sessions that were saved before
+      // these fields existed — without them, BPM changes fall back to seconds-based rescaling
+      // which accumulates rounding drift on each change.
+      if (rawTimings.length > 0 && rawTimings[0].beatAtBpm == null) {
+        syncRawTimingsFromNotes();
+        console.log('[Step4] Backfilled beatAtBpm on', rawTimings.length, 'rawTimings entries (old session)');
+      }
 
       cleanupSegmentIdCounter = 1;
       setCleanupSegmentsFromApi(data.cleanup_segments || []);
