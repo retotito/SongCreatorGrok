@@ -1052,6 +1052,7 @@
       micDeviceId,
       vibratoModalX,
       vibratoModalY,
+      playbackBeat,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -4208,6 +4209,7 @@
       if (midiPlayback) stopAllMidiNotes();
       canvasEl.style.cursor = '';
       console.log(`[Playhead] Drag done at ${currentTimeSec.toFixed(2)}s`);
+      saveEditorUiPrefs('playhead-drag');
       draw();
       return;
     }
@@ -6219,6 +6221,7 @@
       isPlaying = false;
       cancelAnimationFrame(animFrame);
       stopAllMidiNotes();
+      saveEditorUiPrefs('pause');
       draw(); // Redraw to show paused cursor
     } else {
       // Loop start position: play always starts from the current playhead position.
@@ -9469,6 +9472,12 @@
         if (typeof uiPrefs.vibratoModalY === 'number' && Number.isFinite(uiPrefs.vibratoModalY)) {
           vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, uiPrefs.vibratoModalY));
         }
+        if (typeof uiPrefs.playbackBeat === 'number' && Number.isFinite(uiPrefs.playbackBeat)) {
+          playbackBeat = uiPrefs.playbackBeat;
+          const restoredTime = Math.max(0, beatToTime(uiPrefs.playbackBeat));
+          currentTimeSec = restoredTime;
+          if (audioEl) audioEl.currentTime = restoredTime;
+        }
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
@@ -10709,7 +10718,7 @@
       <span class="shortcut"><kbd>.</kbd> next position</span>
       <span class="shortcut"><kbd>Shift+,</kbd> prev marker</span>
       <span class="shortcut"><kbd>Shift+.</kbd> next marker</span>
-      <span class="shortcut"><kbd>⌘F</kbd> find syllable</span>
+      <span class="shortcut"><kbd>Ctrl+F</kbd> find syllable</span>
     </div>
     <div class="shortcut-group">
       <span class="shortcut-label">Select</span>
