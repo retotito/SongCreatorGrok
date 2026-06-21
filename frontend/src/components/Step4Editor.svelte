@@ -2853,7 +2853,6 @@
         for (let i = 0; i < vocalTraceFrames.length; i++) {
           const frame = vocalTraceFrames[i];
           if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
-          if (isPlaying && vocalTraceEnabled && frame.beat > playbackBeat) break;
           const x = beatToX(frame.beat);
           const y = pitchToY(frame.pitch);
           ctx.fillRect(x, y - dotH / 2, 2, dotH);
@@ -2883,9 +2882,6 @@
         let firstHitDrawn = false; // track if we've drawn the first hit block for this note
         while (i < vocalTraceFrames.length && vocalTraceFrames[i].beat <= noteEndBeat) {
           const frame = vocalTraceFrames[i];
-          // Don't draw frames ahead of the playhead during active recording.
-          // When vocal trace is off (view-only) or paused, show all recorded frames.
-          if (isPlaying && vocalTraceEnabled && frame.beat > playbackBeat) break;
           // Octave-correct the frame pitch toward the note (same as mic sing-along)
           let framePitch = frame.pitch;
           while (framePitch - note.pitch > 6)  framePitch -= 12;
@@ -2902,13 +2898,8 @@
               if (Math.abs(fp - note.pitch) > pitchTolerance) break;
               i++; endBeat = vocalTraceFrames[i].beat;
             }
-            // Extend first hit block back to note start if it began within 2 beats
-            // (compensates for rAF warmup jitter — the sampler may miss the first few frames)
-            const hitStart = !firstHitDrawn && (frame.beat - note.startBeat) <= 2.0
-              ? note.startBeat
-              : frame.beat;
             firstHitDrawn = true;
-            const xStart = beatToX(Math.max(hitStart, note.startBeat));
+            const xStart = beatToX(Math.max(frame.beat, note.startBeat));
             const xEnd   = beatToX(Math.min(endBeat + vtBeatGap, noteEndBeat));
             ctx.fillStyle = hitColor;
             ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
@@ -6182,10 +6173,9 @@
         return;
       });
       isPlaying = true;
-      // Clear all existing vocal trace frames when starting a new recording run.
-      // Keeping frames from a previous run would mix stale data with the new trace.
+      // Leave existing vocal trace frames in place — new frames overwrite old
+      // ones beat-by-beat as the playhead advances, same as mic (green) lines.
       if (vocalTraceEnabled) {
-        vocalTraceFrames = [];
         // Align next sample to the nearest grid step at or after current time
         vocalTraceNextSampleSec = Math.ceil(currentTimeSec / VOCAL_TRACE_STEP_SEC) * VOCAL_TRACE_STEP_SEC;
       }
@@ -6970,20 +6960,10 @@
         playbackBeat = loopStartBeat;
         playStartBeat = loopStartBeat; // reset so next wrap also fires
         if (midiPlayback) stopAllMidiNotes();
-        // Clear sung blocks for notes in the loop region so each pass starts fresh
-        if (micEnabled && micNoteHits.size > 0) {
-          for (const note of notes) {
-            if (note.type === 'break') continue;
-            const noteEnd = note.startBeat + note.duration;
-            // Clear if note overlaps the loop region
-            if (noteEnd > loopStartBeat && note.startBeat < loopEndBeat) {
-              micNoteHits.delete(note.id);
-            }
-          }
-        }
-        // Clear vocal trace frames in the loop region so each pass starts fresh
-        if (vocalTraceEnabled && vocalTraceFrames.length > 0) {
-          vocalTraceFrames = vocalTraceFrames.filter(f => f.beat < loopStartBeat || f.beat >= loopEndBeat);
+        // Reset vocal trace rolling state so the new pass starts with a clean
+        // median window. Frames are kept — with WAV sources, beat positions are
+        // sample-exact so old frames are overwritten correctly by the new pass.
+        if (vocalTraceEnabled) {
           vocalTraceRecentPitches = [];
           vocalTraceLastPitch = -1;
           vocalTracePitchConfidence = 0;
