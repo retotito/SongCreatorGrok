@@ -492,9 +492,8 @@
     // For original, derive extension from the uploaded filename.
     let ext;
     if (type === 'vocals') {
-      const vocalsFilename = $uploadData?.vocalsFilename || '';
-      const vocalsExtMatch = vocalsFilename.match(/\.\w+$/);
-      ext = vocalsExtMatch ? vocalsExtMatch[0] : '.mp3';
+      // Vocals are always served as MP3 (backend converts WAV→MP3 on the fly)
+      ext = '.mp3';
     } else if (type === 'instrumental') {
       ext = '.mp3';
     } else if (type === 'cleaned') {
@@ -508,9 +507,8 @@
       };
       ext = mimeToExt[blob.type] || '.mp3';
     } else {
-      const origFilename = $uploadData?.filename || '';
-      const extMatch = origFilename.match(/\.\w+$/);
-      ext = extMatch ? extMatch[0] : '.mp3';
+      // Original audio — always downloaded as MP3 (backend converts WAV→MP3 on the fly)
+      ext = '.mp3';
     }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);

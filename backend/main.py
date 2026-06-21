@@ -1151,6 +1151,51 @@ def _ensure_mp3_for_download(path: str) -> tuple[str, bool]:
     return path, False  # fallback: serve original if conversion failed
 
 
+def _normalize_audio_to_wav(file_path: str, orig_filename: str) -> tuple[str, str]:
+    """Ensure audio file is a 44100 Hz stereo WAV. Converts in-place if needed.
+    Storing as WAV avoids MP3 encoder-delay (~25ms) which causes timing drift between
+    the browser playback and the Demucs-separated vocal WAV, and gives sample-exact
+    seeking in the editor.
+    Returns (final_file_path, final_filename)."""
+    try:
+        orig_ext = os.path.splitext(orig_filename)[1].lower()
+        needs_convert = orig_ext != '.wav'
+
+        if not needs_convert:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_streams", "-print_format", "json", file_path],
+                capture_output=True, text=True, timeout=30
+            )
+            probe_data = json.loads(probe.stdout)
+            sample_rate = int(probe_data["streams"][0].get("sample_rate", 44100))
+            needs_convert = sample_rate != 44100
+            if needs_convert:
+                log_step("UPLOAD", f"WAV at {sample_rate}Hz — re-encoding to 44100Hz")
+
+        if needs_convert:
+            wav_filename = os.path.splitext(orig_filename)[0] + ".wav"
+            wav_path = os.path.join(os.path.dirname(file_path), wav_filename)
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", file_path, "-ar", "44100", "-ac", "2",
+                 "-acodec", "pcm_s16le", wav_path],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0 and os.path.exists(wav_path):
+                if orig_ext != '.wav':
+                    os.remove(file_path)
+                else:
+                    os.replace(wav_path, file_path)
+                    wav_path = file_path
+                    wav_filename = orig_filename
+                log_step("UPLOAD", f"Converted → 44100Hz WAV: {wav_filename}")
+                return wav_path, wav_filename
+            else:
+                log_step("UPLOAD", f"Conversion failed, keeping original: {result.stderr[:200]}")
+    except Exception as _e:
+        log_step("UPLOAD", f"Audio normalization skipped: {_e}")
+    return file_path, orig_filename
+
+
 def _normalize_audio_to_mp3(file_path: str, orig_filename: str) -> tuple[str, str]:
     """Ensure audio file is a 44100 Hz MP3. Converts in-place if needed.
     Returns (final_file_path, final_filename)."""
@@ -1256,7 +1301,7 @@ async def import_ultrastar(
         audio_bytes = await audio_file.read()
         with open(original_path, "wb") as f:
             f.write(audio_bytes)
-        original_path, _ = _normalize_audio_to_mp3(original_path, audio_file.filename)
+        original_path, _ = _normalize_audio_to_wav(original_path, audio_file.filename)
         duration_path = original_path
 
     if vocal_file:
@@ -1264,7 +1309,7 @@ async def import_ultrastar(
         vocal_bytes = await vocal_file.read()
         with open(vocal_path, "wb") as f:
             f.write(vocal_bytes)
-        vocal_path, _ = _normalize_audio_to_mp3(vocal_path, vocal_file.filename)
+        vocal_path, _ = _normalize_audio_to_wav(vocal_path, vocal_file.filename)
         if not duration_path:
             duration_path = vocal_path
 
@@ -1398,7 +1443,7 @@ async def upload_audio(audio: UploadFile = File(...)):
         content = await audio.read()
         f.write(content)
 
-    file_path, orig_filename = _normalize_audio_to_mp3(file_path, orig_filename)
+    file_path, orig_filename = _normalize_audio_to_wav(file_path, orig_filename)
 
     sessions[session_id] = {
         "id": session_id,
@@ -1581,7 +1626,7 @@ async def upload_corrected_vocals(session_id: str, vocals: UploadFile = File(...
         content = await vocals.read()
         f.write(content)
 
-    vocal_path, orig_vocal_filename = _normalize_audio_to_mp3(vocal_path, orig_vocal_filename)
+    vocal_path, orig_vocal_filename = _normalize_audio_to_wav(vocal_path, orig_vocal_filename)
 
     session["vocal_audio"] = vocal_path
     session["status"] = "vocals_extracted"
@@ -1610,7 +1655,7 @@ async def upload_mix_audio(session_id: str, audio: UploadFile = File(...)):
         content = await audio.read()
         f.write(content)
 
-    file_path, orig_filename = _normalize_audio_to_mp3(file_path, orig_filename)
+    file_path, orig_filename = _normalize_audio_to_wav(file_path, orig_filename)
 
     session["original_audio"] = file_path
     session["filename"] = orig_filename
@@ -4946,11 +4991,14 @@ async def download_zip(
             ext = os.path.splitext(instrumental_path)[1]
             zf.write(instrumental_path, f"{base} [Instrumental]{ext}")
 
-        # Original audio
+        # Original audio — convert WAV → MP3 for the download package
         original_path = session.get("original_audio")
         if original_path and os.path.exists(original_path):
-            ext = os.path.splitext(original_path)[1]
-            zf.write(original_path, f"{base}{ext}")
+            serve_original, original_tmp = _ensure_mp3_for_download(original_path)
+            orig_name = session.get("filename") or os.path.basename(original_path)
+            download_base_name = f"{base}{os.path.splitext(orig_name)[1]}" if not serve_original.endswith(".mp3") else f"{base}.mp3"
+            zf.write(serve_original, download_base_name)
+            if original_tmp: _safe_unlink(serve_original)
 
         # Cover image
         cover_path = session.get("cover_file")

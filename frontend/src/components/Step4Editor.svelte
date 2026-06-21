@@ -6165,11 +6165,16 @@
       }
       // Resume from our tracked position
       playStartBeat = playbackBeat;
-      audioEl.currentTime = currentTimeSec;
+      // Only seek if the element isn't already at the right position
+      // (seekToTime already set currentTime when the user clicked; re-seeking here
+      //  triggers a second canplay → unnecessary re-buffer stall).
+      const seekDelta = Math.abs(audioEl.currentTime - currentTimeSec);
+      if (seekDelta > 0.05) {
+        audioEl.currentTime = currentTimeSec;
+      }
       audioEl.playbackRate = playbackRate;
       audioEl.preservesPitch = true;
       audioEl.volume = muteVocal ? 0 : audioVolume;
-      console.log(`[Play] Starting from ${currentTimeSec.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}, rate=${playbackRate}`);
       audioEl.play().catch(err => {
         console.warn('[Play] audioEl.play() rejected (autoplay policy?):', err.message);
         isPlaying = false;
