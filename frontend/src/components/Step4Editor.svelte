@@ -9472,12 +9472,7 @@
         if (typeof uiPrefs.vibratoModalY === 'number' && Number.isFinite(uiPrefs.vibratoModalY)) {
           vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, uiPrefs.vibratoModalY));
         }
-        if (typeof uiPrefs.playbackBeat === 'number' && Number.isFinite(uiPrefs.playbackBeat)) {
-          playbackBeat = uiPrefs.playbackBeat;
-          const restoredTime = Math.max(0, beatToTime(uiPrefs.playbackBeat));
-          currentTimeSec = restoredTime;
-          if (audioEl) audioEl.currentTime = restoredTime;
-        }
+        // playbackBeat is restored later, after the gap-position reset
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
@@ -9505,6 +9500,13 @@
       const gapSec = gapMs / 1000;
       currentTimeSec = gapSec;
       playbackBeat = 0; // beat 0 = GAP position
+      // Restore saved playhead position (overrides gap default)
+      const savedPlaybackBeat = uiPrefs?.playbackBeat;
+      if (typeof savedPlaybackBeat === 'number' && Number.isFinite(savedPlaybackBeat) && savedPlaybackBeat > 0) {
+        playbackBeat = savedPlaybackBeat;
+        currentTimeSec = Math.max(0, beatToTime(savedPlaybackBeat));
+        if (audioEl) audioEl.currentTime = currentTimeSec;
+      }
       const canvasWidth = canvasEl?.width || 800;
       const savedScroll = session ? localStorage.getItem(`editor_scroll_${session}`) : null;
       if (savedScroll) {
