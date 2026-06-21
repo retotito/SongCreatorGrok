@@ -1685,7 +1685,6 @@
     // Instead, directly scale all beat positions proportionally.
     if (bpmActuallyChanged && currentNotes.length !== rawTimings.length) {
       const prevBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
-      console.log(`[Requantize:DirectScale] notes(${currentNotes.length}) ≠ rawTimings(${rawTimings.length}) — scaling beats directly prevBpm=${prevBpm} → newBpm=${bpm}`);
       notes = notes.map(n => {
         const newStartBeat = Math.round(n.startBeat * bpm / prevBpm);
         const newDuration = n.type === 'break' ? n.duration : Math.max(1, Math.round((n.duration ?? 1) * bpm / prevBpm));
