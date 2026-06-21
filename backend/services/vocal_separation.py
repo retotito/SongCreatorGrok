@@ -137,33 +137,13 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
         if vocal_path is None:
             raise RuntimeError(f"Demucs did not produce a vocals file. Files found: {all_files}")
         
-        # Correct the Demucs htdemucs fixed algorithmic delay.
-        # The htdemucs model introduces a constant ~25ms lag (1105 samples at 44100Hz)
-        # due to its convolutional architecture. We remove this by trimming the leading
-        # samples from the vocal and padding the end with zeros, then trim to the exact
-        # original file length so all sources display in sync in the editor.
+        # Trim Demucs output to exactly match the original audio duration.
+        # No lag correction applied — Demucs output is used as-is, length-matched only.
         try:
             import soundfile as sf
             import numpy as np
-            # Fixed algorithmic latency of the htdemucs model at 44100Hz.
-            # This is a constant from the model architecture (not song-dependent).
-            # If you switch Demucs models, verify this value:
-            #   htdemucs (current):  1105 samples = ~25ms
-            #   htdemucs_ft:         1105 samples = ~25ms (same encoder)
-            #   htdemucs_6s:         1105 samples = ~25ms (same encoder)
-            #   future models:       may differ — re-measure with analyze_mic_trail.py
-            DEMUCS_DELAY_SAMPLES = 1105  # htdemucs at 44100Hz
             orig_data, orig_sr = sf.read(audio_path, always_2d=True)
             vocal_data, vocal_sr = sf.read(vocal_path, always_2d=True)
-            # Scale delay to vocal sample rate (usually 44100, but be safe)
-            delay = int(round(DEMUCS_DELAY_SAMPLES * vocal_sr / 44100))
-            # Shift vocal back: drop `delay` leading samples, pad end with zeros
-            vocal_data = np.concatenate([
-                vocal_data[delay:, :],
-                np.zeros((delay, vocal_data.shape[1]), dtype=vocal_data.dtype)
-            ], axis=0)
-            log_step("SEPARATE", f"Applied fixed Demucs delay correction: {delay} samples ({delay/vocal_sr*1000:.1f}ms)")
-            # Trim/pad to exact original length so all sources have identical duration
             orig_samples_at_vocal_sr = int(round(len(orig_data) * vocal_sr / orig_sr))
             if vocal_data.shape[0] > orig_samples_at_vocal_sr:
                 vocal_data = vocal_data[:orig_samples_at_vocal_sr, :]
@@ -173,12 +153,12 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
                     vocal_data,
                     np.zeros((pad, vocal_data.shape[1]), dtype=vocal_data.dtype)
                 ], axis=0)
-            log_step("SEPARATE", f"Vocal trimmed/padded to {orig_samples_at_vocal_sr} samples = {orig_samples_at_vocal_sr/vocal_sr:.4f}s")
-            corrected_path = os.path.join(temp_dir, "vocals_corrected.wav")
-            sf.write(corrected_path, vocal_data, vocal_sr)
-            vocal_path = corrected_path
+            log_step("SEPARATE", f"Vocal trimmed/padded to {orig_samples_at_vocal_sr} samples = {orig_samples_at_vocal_sr/vocal_sr:.4f}s (no lag correction)")
+            trimmed_path = os.path.join(temp_dir, "vocals_trimmed.wav")
+            sf.write(trimmed_path, vocal_data, vocal_sr)
+            vocal_path = trimmed_path
         except Exception as e:
-            log_step("SEPARATE", f"Warning: could not correct vocal timing: {e}")
+            log_step("SEPARATE", f"Warning: could not trim vocal to original duration: {e}")
         
         # Copy vocals to output directory
         ext = os.path.splitext(vocal_path)[1] or ".wav"
