@@ -55,6 +55,7 @@ They share the same coordinate system (`pitchToY(midiNote)`) but differ in audio
 ### Draw pipeline (canvas draw function, line ~2839)
 - Iterate all `vocalTraceFrames`, skip frames outside visible range
 - Per frame: look up which note (if any) covers `frame.beat`
+- **First frame of each note** snaps its left edge to `beatToX(note.startBeat)` — closes the up-to-25ms gap caused by the fixed 25ms sampling grid
 - **Hit** (`abs(frame.sungPitch - note.pitch) <= HARD_TOL` where `HARD_TOL = 1`):
   - Draw at **`pitchToY(note.pitch)`** — snapped to note row (Ultrastar style ✓)
   - Color: pink (normal) / gold (golden note) / orange-amber (rap note)
@@ -75,13 +76,22 @@ Octave correction at draw time was collapsing pitch distance before tolerance ch
 Hit frames were drawn at `pitchToY(frame.sungPitch)` instead of `pitchToY(note.pitch)`, placing them up to 1 semitone above/below the note row.  
 Fixed: hits now snap to `pitchToY(note.pitch)` (Ultrastar style). Misses still draw at `pitchToY(frame.sungPitch)`.
 
+### ✅ Timing offset — PitchLine dots appeared ~23ms early (fixed)
+The blue (and green) pitch line dots were stored at `startSample / sampleRate` — the **start** of the 2048-sample FFT window (~46ms wide). The detected pitch actually represents the **center** of that window (+23ms).  
+Fixed: beats now stored at `(startSample + fftSize/2) / sampleRate` in `_detectPitchFrames`.  
+Applies to both the blue baseline line and the green recorded-patch line.
+
+### ✅ VT first-block gap — pink block started up to 25ms after note start (fixed)
+Because VT samples on a fixed 25ms grid, the first frame inside a note could appear up to 25ms after `note.startBeat`, leaving a visible gap at the note's left edge.  
+Fixed: the first VT frame of each note snaps its draw X to `beatToX(note.startBeat)`.
+
+### ✅ PitchLine Y snapping — dots snapped to integer semitone rows (fixed)
+Stored `pitch` was `Math.round(midiFloat)`, causing dots to staircase on exact semitone rows.  
+Fixed: `_detectPitchFrames` now also stores `pitchRaw` (float MIDI before rounding). Draw loops use `pitchRaw` for Y, giving a smooth continuous curve. Applies to both blue and green lines.
+
 ---
 
 ## Known/Open Issues
-
-### ⚠️ Possible timing offset between pitchLine dots and vocal trace frames
-The blue/green pitch line dots and the pink/orange vocal trace frames may appear ~28px offset on the X axis.  
-**Hypothesis:** Different beat-calculation strategies — `pitchLineFrames` beats are computed from audio offset + `GAP` ms conversion, while `vocalTraceFrames` beats come from `currentBeat` at sample time during playback. Need logging to confirm.
 
 ### Bug 2 — Orange miss blocks flicker (low priority)
 Miss blocks appear for very short durations (single frame) at note boundaries.  
