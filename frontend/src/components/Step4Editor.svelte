@@ -2918,7 +2918,7 @@
         const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
                        : note.isRap ? 'rgba(255, 152, 0, 0.65)'
                        : 'rgba(102, 187, 106, 0.7)';
-        const missColor = 'rgba(255, 140, 50, 0.45)';
+        const missColor = 'rgba(229, 57, 53, 0.55)'; // red — distinct from VT orange misses
 
         // frameW: fallback width for the last sample in a note (when no next sample exists)
         const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) : 0.3;
