@@ -161,9 +161,16 @@ Miss blocks appear for very short durations (single frame) at note boundaries.
 - Moving a note horizontally: frames no longer covered by that note → show orange (no note found)
 
 ### Ultrastar-style hit rendering
-- Hits draw at `pitchToY(frame.sungPitch)` — NOT snapped to note row
-- Since `sungPitch` is within ±1 semitone of the note, it visually appears on the note row
-- This is intentional: shows actual pitch variation without losing note alignment
+- **Hits** draw at `pitchToY(note.pitch)` — snapped to the note row, overlaid on top of the note rectangle at ~45% opacity
+- **Misses** draw at `pitchToY(frame.sungPitch)` — float Y position (exact detected pitch, not snapped)
+- The semi-transparent overlay lets the note color show through while clearly indicating hit/miss
+- This is Ultrastar-style: the hit block sits exactly on the note, miss blocks float above or below it
+
+### Frame positions are fixed at record time — no attachment to notes
+- `frame.beat` and `frame.sungPitch` are written once at record time and never change
+- Moving, resizing, or deleting a note has **no effect** on any frame's X or Y position
+- Only the **color** re-evaluates at draw time (hit vs miss based on current note state)
+- If the note moves away from a frame, the frame stays in place and turns orange (miss/no note)
 
 ### Constants
 - `HARD_TOL = 1` semitone (not user-controlled)
