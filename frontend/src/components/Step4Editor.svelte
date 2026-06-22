@@ -2861,7 +2861,8 @@
           if (n.type !== 'break' && frame.beat >= n.startBeat && frame.beat < n.startBeat + n.duration) {
             const noteEndX = beatToX(n.startBeat + n.duration);
             cappedW = Math.min(frameW, noteEndX - x);
-            if (Math.abs(frame.sungPitch - n.pitch) <= HARD_TOL) {
+            const diff = Math.abs(frame.sungPitch - n.pitch);
+            if (diff <= HARD_TOL) {
               isHit = true;
               hitColor = n.isGolden ? 'rgba(255, 215, 0, 0.45)'
                        : n.isRap   ? 'rgba(255, 152, 0, 0.45)'
