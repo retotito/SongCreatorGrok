@@ -6423,8 +6423,10 @@
       if (e.code === 'ArrowLeft') { e.preventDefault(); seekPlayback(e.shiftKey ? -1 : -5); return; }
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
-      if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (!uiModalGuardActive) { micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); } return; }
-      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); if (!uiModalGuardActive) { vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); } return; }
+      if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) { e.preventDefault(); if (!uiModalGuardActive) { micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); } return; }
+      if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && hasVocalsAudio) { e.preventDefault(); if (!uiModalGuardActive) { vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); } return; }
+      if (e.key === 'M' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (micNoteHits.size > 0) { micShowTrail = !micShowTrail; draw(); } return; }
+      if (e.key === 'V' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) { e.preventDefault(); if (vocalTraceFrames.length > 0) { vocalTraceVisible = !vocalTraceVisible; draw(); } return; }
       if (e.code === 'Comma' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); navigateToPosition(-1, e.shiftKey); return; }
       if (e.code === 'Period' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); navigateToPosition(1, e.shiftKey); return; }
       if (e.code === 'Escape') {
@@ -6491,7 +6493,7 @@
     }
 
     // V: toggle vocal trace
-    if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) {
+    if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && hasVocalsAudio) {
       e.preventDefault();
       if (!uiModalGuardActive) {
         vocalTraceEnabled = !vocalTraceEnabled;
@@ -6501,14 +6503,28 @@
       return;
     }
 
+    // Shift+V: toggle vocal trace visibility (show/hide recorded lines)
+    if (e.key === 'V' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && hasVocalsAudio) {
+      e.preventDefault();
+      if (vocalTraceFrames.length > 0) { vocalTraceVisible = !vocalTraceVisible; draw(); }
+      return;
+    }
+
     // M: toggle mic
-    if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       if (!uiModalGuardActive) {
         micEnabled = !micEnabled;
         if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); }
         toggleMic();
       }
+      return;
+    }
+
+    // Shift+M: toggle mic trail visibility (show/hide recorded lines)
+    if (e.key === 'M' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      if (micNoteHits.size > 0) { micShowTrail = !micShowTrail; draw(); }
       return;
     }
 
