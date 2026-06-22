@@ -1,196 +1,130 @@
 # Vocal Trace (Pink) vs Mic Lines (Green) — Design Reference
 
-## Overview
-
-Both features draw colored overlays on notes in the piano roll to show how well the pitch matches.  
-They share the same coordinate system (`pitchToY(midiNote)`) but differ in audio source, recording strategy, and draw-time logic.
+_Last updated: 2026-06-22. Pink line is fully implemented and working. Green line should be updated to mirror the pink architecture — differences noted in the Green section below._
 
 ---
 
-## Green Lines (Mic / Sing-Along)
+## Pink Line (Vocal Trace) — Implemented ✅
 
-**Audio source:** Live microphone via Web Audio API (`micAnalyser`)  
-**Triggered:** Every rAF tick inside `sampleMicPitch()` while `micEnabled`  
-**Operates:** Only inside a note window (`currentBeat` inside `note.startBeat … startBeat+duration`)
+### What it is
+Colored overlay blocks drawn on the piano roll showing how well the pre-recorded vocal audio matches each note. Pink = hit, orange = miss.
 
-### Record pipeline (`sampleMicPitch`, line ~8616)
-1. Read mic buffer from `micAnalyser`
-2. Pitch detect → frequency → MIDI (`Math.round(12 * log2(f/440) + 69)`)
-3. Rolling median over 5 samples (smoothing)
-4. Sticky prediction: hold pitch if drift ≤ 2 semitones and confidence ≥ 4
-5. Octave-correct toward `targetNote.pitch` (shift ±12 until diff ≤ 6)
-6. Clamp to MIDI 36–84 (C2–C6)
-7. **Apply `pitchTolerance` at record time → bake `isHit: boolean` into frame** _(to be moved to draw time — see Target Architecture below)_
-8. Append to `micNoteHits: Map<noteId, Array<{beat, sungPitch, isHit}>>`
+### Record pipeline (`sampleVocalTrace`, ~line 8846)
 
-### Draw pipeline (current / pre-refactor)
-- Group consecutive same-`isHit` frames into filled rectangles
-- **Hit:** draw at `pitchToY(note.pitch)` (green/gold/orange) — snapped to note row
-- **Miss:** draw at `pitchToY(sungPitch)` — at actual sung pitch (octave-corrected), **red color**
-- `pitchTolerance` NOT re-applied in draw (baked in at record time)
+Called on a fixed 25ms grid (`VOCAL_TRACE_STEP_SEC = 0.025`) during playback. Only fires inside note windows.
 
-### Key properties (current)
-- `isHit` is immutable once recorded; changing `pitchTolerance` or moving a note has no effect until next session
-- Miss blocks appear at the correct pitch because `sungPitch` was already octave-corrected
-- Grouping works well for mic's ~16ms rAF sampling rate — dense frames create smooth long bars
-
-### Target Architecture (to match Pink behavior)
-The green draw loop should be updated to behave like the pink draw loop:
-
-**What changes:**
-1. **Re-evaluate `isHit` at draw time** using `HARD_TOL = 1` (ignore stored `isHit`) — moving a note now updates green colors immediately on next redraw
-2. **Miss color: orange** `rgba(255, 140, 50, 0.45)` — matches pink misses instead of red
-3. **Keep grouping** consecutive same-state frames — mic samples at ~16ms (rAF), grouping keeps smooth long bars. Do NOT switch to frame-by-frame (that causes tiny fragmented overlapping blocks at mic's high sample rate)
-4. **No first-frame snap to `note.startBeat`** — mic fires at ~16ms so the gap is at most one rAF frame (~8px). Snapping at draw time would cause the first green block to shift when a note is moved horizontally
-
-**What stays the same:**
-- X position: `beatToX(sample.beat)` — fixed at record time, no note lookup for X
-- Y position for hits: `pitchToY(note.pitch)` — snapped to note row
-- Y position for misses: `pitchToY(sample.sungPitch)` — float actual pitch
-- Grouping logic: consecutive same-`isHit` frames merged into one rectangle
-
----
-
-## Pink Lines (Vocal Trace)
-
-**Audio source:** Pre-recorded vocal WAV file (`vocalTraceDecodedBuffer`)  
-**Triggered:** Fixed-grid deterministic loop in `updatePlayback()` — `sampleVocalTrace()` called once per `VOCAL_TRACE_STEP_SEC` (25ms) interval  
-**Operates:** Only inside note windows (recording restricted to `note.startBeat … startBeat+duration`)
-
-### Record pipeline (`sampleVocalTrace`, line ~8846)
 1. Copy `channelData[sample window]` into `vocalTraceSampleBuf`
-2. Pitch detect → frequency → MIDI
-3. If unvoiced (low clarity or out of 60–2000 Hz): skip frame
+2. Pitch detect → frequency → MIDI float
+3. If unvoiced (low clarity or out-of-range Hz): skip frame entirely
 4. Rolling median over 5 samples (smoothing)
-5. **Octave-correct toward `note.pitch` (shift ±12 until diff ≤ 6)** — baked into `sungPitch`
+5. **Octave-correct toward `note.pitch`** (shift ±12 until `|pitch - note.pitch| <= 6`) — baked into `sungPitch`
 6. Clamp to MIDI 36–84
-7. **No `isHit` stored** — hit/miss is evaluated at draw time against current note state
-8. Upsert by beat (replace existing frame within `VOCAL_TRACE_STEP_SEC * 0.5` tolerance — no duplicates on re-pass)
-9. Append `{ beat, sungPitch }` to `vocalTraceFrames`
+7. Store `{ beat, sungPitch }` — no `isHit`, no note reference
+8. Upsert by beat (replace any existing frame within ±half-step tolerance — prevents duplicates on re-pass)
 
-### Draw pipeline (canvas draw function, line ~2839)
-- Iterate all `vocalTraceFrames`, skip frames outside visible range
-- Per frame: look up which note (if any) covers `frame.beat`
-- **First frame of each note** snaps its left edge to `beatToX(note.startBeat)` — closes the up-to-25ms gap caused by the fixed 25ms sampling grid
-- **Hit** (`abs(frame.sungPitch - note.pitch) <= HARD_TOL` where `HARD_TOL = 1`):
-  - Draw at **`pitchToY(note.pitch)`** — snapped to note row (Ultrastar style ✓)
-  - Color: pink (normal) / gold (golden note) / orange-amber (rap note)
-- **Miss** (no covering note, or diff > 1 semitone):
-  - Draw at **`pitchToY(frame.sungPitch)`** — actual recorded pitch position
-  - Color: orange `rgba(255, 140, 50, 0.45)`
-- Frame width = `VOCAL_TRACE_STEP_SEC` converted to beats, capped to note right edge
-- **`HARD_TOL` is re-evaluated at draw time** — changing note pitch immediately updates color/position without re-recording
+### Draw pipeline (canvas draw loop, ~line 2839)
 
----
+```
+frameW = max(2px, beatToX(vtBeatGap) - beatToX(0))   // pixel width of one 25ms frame
+frameH = noteHeight
+HARD_TOL = 1  // ±1 semitone, fixed — not user-controlled
 
-## Resolved Issues
+for each frame in vocalTraceFrames:
+    skip if outside visible beat range
 
-### ✅ Bug 1 — Pink hit detection was unreliable (fixed)
-Octave correction at draw time was collapsing pitch distance before tolerance check. Fixed by baking `sungPitch` (octave-corrected) into the frame at record time and using a hard `HARD_TOL = 1` semitone at draw time.
+    x = beatToX(frame.beat)           // FIXED — never changes after recording
+    missY = pitchToY(frame.sungPitch) // FIXED — never changes after recording
 
-### ✅ Bug 3 — Hit frames drawn at wrong Y height (fixed)
-Hit frames were drawn at `pitchToY(frame.sungPitch)` instead of `pitchToY(note.pitch)`, placing them up to 1 semitone above/below the note row.  
-Fixed: hits now snap to `pitchToY(note.pitch)` (Ultrastar style). Misses still draw at `pitchToY(frame.sungPitch)`.
+    // Draw-time hit evaluation: look up which note (if any) covers this beat
+    isHit = false
+    drawY = missY
+    for each note:
+        if note covers frame.beat:
+            isHit = |frame.sungPitch - note.pitch| <= HARD_TOL
+            if isHit: drawY = pitchToY(note.pitch)  // snap to note row (Ultrastar style)
+            break
 
-### ✅ Timing offset — PitchLine dots appeared ~23ms early (fixed)
-The blue (and green) pitch line dots were stored at `startSample / sampleRate` — the **start** of the 2048-sample FFT window (~46ms wide). The detected pitch actually represents the **center** of that window (+23ms).  
-Fixed: beats now stored at `(startSample + fftSize/2) / sampleRate` in `_detectPitchFrames`.  
-Applies to both the blue baseline line and the green recorded-patch line.
+    color = pink/gold/rap-orange (hit) or orange (miss/no note)
+    fillRect(x, drawY - frameH/2, frameW, frameH)
+```
 
-### ✅ VT first-block gap — pink block started up to 25ms after note start (fixed)
-Because VT samples on a fixed 25ms grid, the first frame inside a note could appear up to 25ms after `note.startBeat`, leaving a visible gap at the note's left edge.  
-Fixed: the first VT frame of each note snaps its draw X to `beatToX(note.startBeat)`.
+### Key principles
 
-### ✅ PitchLine Y snapping — dots snapped to integer semitone rows (fixed)
-Stored `pitch` was `Math.round(midiFloat)`, causing dots to staircase on exact semitone rows.  
-Fixed: `_detectPitchFrames` now also stores `pitchRaw` (float MIDI before rounding). Draw loops use `pitchRaw` for Y, giving a smooth continuous curve. Applies to both blue and green lines.
+**X is fixed at record time.** `x = beatToX(frame.beat)` — the beat was computed when the frame was recorded and never changes. Moving, resizing, or deleting a note has no effect on any frame's X position.
 
----
+**Y for misses is fixed at record time.** `missY = pitchToY(frame.sungPitch)` — the octave-corrected sung pitch is stored once and used for miss rendering. Moving a note up/down does not move miss blocks.
 
-## Known/Open Issues
+**Y for hits snaps to the current note row.** `drawY = pitchToY(note.pitch)` — hit blocks sit exactly on the note rectangle (Ultrastar style). If the note moves vertically, hit blocks follow.
 
-### Bug 2 — Orange miss blocks flicker (low priority)
-Miss blocks appear for very short durations (single frame) at note boundaries.  
-**Root cause:** `vtBeatGap` is recomputed each draw call from `VOCAL_TRACE_STEP_SEC * bpm / 15` — may be slightly off at low BPM.  
-**Fix candidate:** Store as a derived constant; add a minimum frame width of 3px.
+**Color is the only draw-time evaluation.** At each draw, we look up whether the current note at `frame.beat` is a hit or miss. This means:
+- Moving a note horizontally → frames no longer covered by it → turn orange immediately
+- Moving a note vertically → hit/miss threshold re-evaluated on every redraw
+- Deleting a note → frames render orange (no note found)
 
----
-
-## Open Issues & Design Decisions
-
-### Issue 1 — Duplicate frames on re-pass (long notes draw twice)
-
-**Root cause:** `sampleVocalTrace()` always `push`es new frames. On a second pass, both old and new frames exist at the same beat positions. The draw loop processes both → visual overlap.
-
-**Fix:** Upsert by beat in `sampleVocalTrace`. Before pushing, binary-search `vocalTraceFrames` for an existing frame within ±half a step and replace it in-place.
-
----
-
-### Issue 2 — Moved note doesn't re-evaluate hit/miss
-
-**Root cause:** `isHit` and `sungPitch` are baked at record time with the note position frozen. Moving a note makes the stored `isHit` stale. `sungPitch` is also octave-corrected toward the OLD note, so a large move (octave) would be wrong.
-
-**Fix:** Stop baking `isHit`/`sungPitch`. Store only `{ beat, pitch }` (raw smoothed MIDI). Recalculate octave-correction and `isHit` at draw time against the **current** note pitch. This makes all evaluation live.
-
----
-
-### Issue 3 — "Lines should stay at position but change color when note moves"
-
-**Behavior requested:** If a note is at C and the trace shows a pink (hit) block, moving the note to D should leave the block visually at C but turn it orange (miss). Moving it back to C makes it pink again.
-
-**Implication:** Hit blocks must NOT be drawn snapped to `noteY`. Both hits and misses draw at the actual detected pitch position (`pitchToY(correctedPitch)`). Color alone encodes hit/miss.
-
----
-
-### Issue 4 — Pausing + editing: should lines persist?
-
-**Requested behavior:** Yes — pink/orange lines should persist when paused and notes are edited. Editing a note changes whether existing frames are hits or misses, but doesn't delete any lines.
-
-**Implementation:** Naturally follows from Issue 2 fix — draw-time recalculation means lines auto-update on every canvas redraw whenever notes change.
-
----
-
-## Final Architecture (agreed 2026-06-22)
-
-### X axis — absolute time, no note attachment
-- Sample every 25ms (`VOCAL_TRACE_STEP_SEC`)
-- **Only record when a note exists at that moment** (like mic — no frames in gaps between notes)
-- Store `frame.beat` = beat number converted from ms timestamp (`timeToBeat(timeSec)`)
-- Beat is equivalent to ms precision — it's just a unit conversion via BPM
-- Draw: `x = beatToX(frame.beat)` — **fixed forever**, no note lookup for X position
-- Moving/resizing/deleting a note after recording has **no effect on frame X positions**
-- Zoom in/out: `beatToX()` scales naturally, all frames scale with the view
-
-### Y axis — octave-corrected at record time, fixed forever
-- At record time: find the note containing the current beat, octave-correct raw MIDI pitch toward that note's pitch (shift ±12 until `|pitch - note.pitch| <= 6`)
-- Store `frame.sungPitch` = octave-corrected MIDI (e.g. C1, C2, C3 all collapse to the same C near the note)
-- Draw: `y = pitchToY(frame.sungPitch)` — **fixed forever**, no note lookup for Y position
-- Moving a note up/down has **no effect on frame Y positions**
-
-### Color — only thing evaluated against current note state at draw time
-- For each frame, find the note currently at `frame.beat` (if any)
-- `isHit = note exists AND |frame.sungPitch - note.pitch| <= 1` (hard tolerance, ±1 semitone)
-- **Hit** → pink (or gold for golden notes, orange for rap notes) — Ultrastar style
-- **Miss** → orange — drawn at `pitchToY(frame.sungPitch)` (actual recorded pitch row)
-- **No note at beat** (note was moved/deleted) → still draw orange — frame always renders
-- Moving a note up/down: color updates on next redraw (sungPitch vs new note.pitch rechecked)
-- Moving a note horizontally: frames no longer covered by that note → show orange (no note found)
-
-### Ultrastar-style hit rendering
-- **Hits** draw at `pitchToY(note.pitch)` — snapped to the note row, overlaid on top of the note rectangle at ~45% opacity
-- **Misses** draw at `pitchToY(frame.sungPitch)` — float Y position (exact detected pitch, not snapped)
-- The semi-transparent overlay lets the note color show through while clearly indicating hit/miss
-- This is Ultrastar-style: the hit block sits exactly on the note, miss blocks float above or below it
-
-### Frame positions are fixed at record time — no attachment to notes
-- `frame.beat` and `frame.sungPitch` are written once at record time and never change
-- Moving, resizing, or deleting a note has **no effect** on any frame's X or Y position
-- Only the **color** re-evaluates at draw time (hit vs miss based on current note state)
-- If the note moves away from a frame, the frame stays in place and turns orange (miss/no note)
+**Frame width is fixed (`frameW`), not capped at note boundaries.** The last frame of a note may extend a few pixels past the note's right edge into the inter-note gap. This is acceptable and avoids any note-position dependency.
 
 ### Constants
-- `HARD_TOL = 1` semitone (not user-controlled)
-- Frame width derived from `VOCAL_TRACE_STEP_SEC * bpm / 15` (beat gap → pixels)
-- Frame height = `noteHeight` (same as note rectangles)
-- Opacity: pink ~0.45, orange ~0.45 (drawn under note text layer)
+- `HARD_TOL = 1` semitone (fixed, not tied to `pitchTolerance` UI)
+- `vtBeatGap = VOCAL_TRACE_STEP_SEC * bpm / 15` — beat-space width of one frame
+- Frame height = `noteHeight`
+- Hit colors: `rgba(255, 80, 180, 0.45)` pink / `rgba(255, 215, 0, 0.45)` gold / `rgba(255, 152, 0, 0.45)` rap
+- Miss color: `rgba(255, 140, 50, 0.45)` orange
 
+---
+
+## Green Line (Mic / Sing-Along) — Target Architecture
+
+The green draw loop should mirror the pink draw loop above. The record pipeline is different (live mic, rAF timing), but the draw principles are identical.
+
+### How green differs from pink
+
+| | Pink | Green |
+|---|---|---|
+| Audio source | Pre-recorded vocal file | Live mic (`micAnalyser`) |
+| Sample rate | Fixed 25ms grid | rAF ~16ms (variable) |
+| Stored per frame | `{ beat, sungPitch }` | `{ beat, sungPitch, isHit }` |
+| `isHit` | Draw-time only (not stored) | Currently baked at record time → **should move to draw time** |
+| `HARD_TOL` | Fixed = 1 | Should use `pitchTolerance` UI setting (1/2/3) |
+| Frame rendering | Frame-by-frame (25ms → ~50px, no overlap) | Group consecutive same-state frames into one rect (16ms rAF → dense frames, grouping avoids tiny fragmented blocks) |
+| First-frame snap | None — X purely from `frame.beat` | None — gap ≤ 1 rAF frame (~8px), acceptable |
+| Miss color | Orange | Orange (same) |
+
+### Target draw pipeline (green)
+
+```
+HARD_TOL = pitchTolerance  // 1=hard, 2=medium, 3=easy — user-controlled
+
+Group consecutive frames by draw-time isHit:
+    for each group of consecutive same-state frames:
+        x_start = beatToX(group[0].beat)
+        x_end   = beatToX(group[-1].beat) + frameW
+
+        note = note covering group[0].beat (if any)
+        isHit = note exists AND |group[0].sungPitch - note.pitch| <= HARD_TOL
+        drawY = isHit ? pitchToY(note.pitch) : pitchToY(group[0].sungPitch)
+        color = green/gold/rap-orange (hit) or orange (miss)
+        fillRect(x_start, drawY - frameH/2, x_end - x_start, frameH)
+```
+
+**What changes from current green:**
+1. Re-evaluate `isHit` at draw time using `pitchTolerance` instead of stored value
+2. Miss color: red → orange `rgba(255, 140, 50, 0.45)`
+3. Keep grouping (don't switch to frame-by-frame)
+
+**What stays the same:**
+- Record pipeline (rAF mic sampling, rolling median, octave correction)
+- `micNoteHits` data structure
+- Grouping logic for consecutive frames
+
+---
+
+## Resolved Bugs
+
+### ✅ PL/green timing offset — dots appeared ~23ms early
+Stored beat used `startSample / sampleRate` (FFT window start). Fixed to `(startSample + fftSize/2) / sampleRate` (center of the 46ms window). Applied in `_detectPitchFrames`.
+
+### ✅ PL/green Y snapping — dots on integer semitone rows
+Stored `pitch = Math.round(midiFloat)` caused staircase. Fixed: `_detectPitchFrames` now also stores `pitchRaw` (float MIDI). Draw loops use `pitchToY(frame.pitchRaw ?? frame.pitch)` for smooth curves.
+
+### ✅ Pink frames moved when notes were moved
+First-frame snap (`x = beatToX(n.startBeat)`) and noteEndX capping (`cappedW = min(frameW, noteEndX - x)`) both depended on current note position. Fixed: both removed. X is now purely `beatToX(frame.beat)`, width is always `frameW`.
