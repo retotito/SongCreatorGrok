@@ -111,21 +111,40 @@ Miss blocks use `pitchToY(frame.pitch)` where `frame.pitch` is the raw un-octave
 
 ---
 
-## Final Proposed Architecture
+## Final Architecture (agreed 2026-06-22)
 
-### Record (sampleVocalTrace)
-- Store: `{ beat, pitch }` only — raw smoothed MIDI, no octave correction, no isHit
-- **Upsert by beat** — replace existing frame at same beat position instead of appending
+### X axis — absolute time, no note attachment
+- Sample every 25ms (`VOCAL_TRACE_STEP_SEC`)
+- **Only record when a note exists at that moment** (like mic — no frames in gaps between notes)
+- Store `frame.beat` = beat number converted from ms timestamp (`timeToBeat(timeSec)`)
+- Beat is equivalent to ms precision — it's just a unit conversion via BPM
+- Draw: `x = beatToX(frame.beat)` — **fixed forever**, no note lookup for X position
+- Moving/resizing/deleting a note after recording has **no effect on frame X positions**
+- Zoom in/out: `beatToX()` scales naturally, all frames scale with the view
 
-### Draw
-- For each note, get frames in `[startBeat, endBeat]`
-- Per frame: octave-correct `pitch` toward **current** `note.pitch` → `correctedPitch`
-- `isHit = Math.abs(correctedPitch - note.pitch) <= HARD_TOLERANCE` (1 semitone)
-- Draw at `pitchToY(correctedPitch)` for BOTH hit and miss (no snap to noteY)
-- Hit → pink/gold/orange; Miss → orange
-- Group consecutive same-color frames for efficiency
+### Y axis — octave-corrected at record time, fixed forever
+- At record time: find the note containing the current beat, octave-correct raw MIDI pitch toward that note's pitch (shift ±12 until `|pitch - note.pitch| <= 6`)
+- Store `frame.sungPitch` = octave-corrected MIDI (e.g. C1, C2, C3 all collapse to the same C near the note)
+- Draw: `y = pitchToY(frame.sungPitch)` — **fixed forever**, no note lookup for Y position
+- Moving a note up/down has **no effect on frame Y positions**
+
+### Color — only thing evaluated against current note state at draw time
+- For each frame, find the note currently at `frame.beat` (if any)
+- `isHit = note exists AND |frame.sungPitch - note.pitch| <= 1` (hard tolerance, ±1 semitone)
+- **Hit** → pink (or gold for golden notes, orange for rap notes) — Ultrastar style
+- **Miss** → orange — drawn at `pitchToY(frame.sungPitch)` (actual recorded pitch row)
+- **No note at beat** (note was moved/deleted) → still draw orange — frame always renders
+- Moving a note up/down: color updates on next redraw (sungPitch vs new note.pitch rechecked)
+- Moving a note horizontally: frames no longer covered by that note → show orange (no note found)
+
+### Ultrastar-style hit rendering
+- Hits draw at `pitchToY(frame.sungPitch)` — NOT snapped to note row
+- Since `sungPitch` is within ±1 semitone of the note, it visually appears on the note row
+- This is intentional: shows actual pitch variation without losing note alignment
 
 ### Constants
-- `HARD_TOLERANCE = 1` semitone (not user-controlled; represents recording accuracy not singing skill)
-- `vtBeatGap` from `VOCAL_TRACE_STEP_SEC * bpm / 15` (not from frame deltas)
+- `HARD_TOL = 1` semitone (not user-controlled)
+- Frame width derived from `VOCAL_TRACE_STEP_SEC * bpm / 15` (beat gap → pixels)
+- Frame height = `noteHeight` (same as note rectangles)
+- Opacity: pink ~0.45, orange ~0.45 (drawn under note text layer)
 
