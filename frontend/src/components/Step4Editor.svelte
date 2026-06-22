@@ -2904,6 +2904,7 @@
     if (micShowTrail && micNoteHits.size > 0) {
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
+      const HARD_TOL = pitchTolerance; // user-controlled: 1=hard, 2=medium, 3=easy
 
       for (const note of notes) {
         if (note.type === 'break') continue;
@@ -2911,48 +2912,50 @@
         if (!hits || hits.length === 0) continue;
 
         const noteEndBeat = note.startBeat + note.duration;
-        // Skip notes fully outside visible area
         if (noteEndBeat < visibleStartBeat - 1 || note.startBeat > visibleEndBeat + 1) continue;
 
         const noteY = pitchToY(note.pitch);
-        // Choose hit color based on note type
         const hitColor = note.isGolden ? 'rgba(255, 215, 0, 0.65)'
                        : note.isRap ? 'rgba(255, 152, 0, 0.65)'
                        : 'rgba(102, 187, 106, 0.7)';
-        const missColor = 'rgba(255, 100, 100, 0.45)';
+        const missColor = 'rgba(255, 140, 50, 0.45)';
 
-        // Estimate beat gap per frame for extending segments
-        const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) * 1.5 : 0.3;
-
-        const noteXStart = beatToX(note.startBeat);
-        const noteXEnd   = beatToX(noteEndBeat);
+        // frameW: pixel width of one mic sample interval — use first two frames or fallback
+        const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) : 0.3;
+        const frameW = Math.max(2, beatToX(beatGap) - beatToX(0));
 
         let i = 0;
         while (i < hits.length) {
           const sample = hits[i];
-          if (sample.isHit) {
-            // Group consecutive hits into one filled segment inside the target note
+          // Draw-time hit evaluation — re-evaluate against current note pitch + pitchTolerance
+          const sampleIsHit = Math.abs(sample.sungPitch - note.pitch) <= HARD_TOL;
+
+          if (sampleIsHit) {
+            // Group consecutive hits into one filled bar
             let endBeat = sample.beat;
-            while (i + 1 < hits.length && hits[i + 1].isHit) {
+            while (i + 1 < hits.length &&
+                   Math.abs(hits[i + 1].sungPitch - note.pitch) <= HARD_TOL) {
               i++;
               endBeat = hits[i].beat;
             }
-            // Extend slightly so consecutive frames connect visually
-            const xStart = beatToX(Math.max(sample.beat, note.startBeat));
-            const xEnd = beatToX(Math.min(endBeat + beatGap, noteEndBeat));
+            // X fixed at record time — no clamping to note boundaries
+            const xStart = beatToX(sample.beat);
+            const xEnd = beatToX(endBeat) + frameW;
             ctx.fillStyle = hitColor;
             ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           } else {
-            // Group consecutive misses at the same pitch
+            // Group consecutive misses at the same sungPitch (different pitch = different Y row)
             const missPitch = sample.sungPitch;
             let endBeat = sample.beat;
-            while (i + 1 < hits.length && !hits[i + 1].isHit && hits[i + 1].sungPitch === missPitch) {
+            while (i + 1 < hits.length &&
+                   Math.abs(hits[i + 1].sungPitch - note.pitch) > HARD_TOL &&
+                   hits[i + 1].sungPitch === missPitch) {
               i++;
               endBeat = hits[i].beat;
             }
             const missY = pitchToY(missPitch);
             const xStart = beatToX(sample.beat);
-            const xEnd = beatToX(endBeat);
+            const xEnd = beatToX(endBeat) + frameW;
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
