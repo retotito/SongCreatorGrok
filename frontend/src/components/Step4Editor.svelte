@@ -1489,6 +1489,8 @@
   let pitchLineFrames = [];         // [{beat, pitch}] — original/baseline vocal (blue)
   let recordedPitchFrames = [];     // [{beat, pitch}] — recorded patches only (green)
   let pitchLineVisible = false;     // default off
+  let _plLogDone = false; // one-shot debug log flag
+  let _vtLogDone = false; // one-shot debug log flag
   let pitchLineLoading = false;
   let recordedPitchLoading = false;
   let pitchLineSourceUrl = null;    // URL used for last computation (for cache invalidation)
@@ -2811,12 +2813,22 @@
       const visibleEndBeat = xToBeat(w);
       ctx.fillStyle = 'rgba(0, 220, 255, 0.55)';
       const dotH = Math.max(2, noteHeight * 0.3);
+      const _plStartBeat = timeToBeat(16.667);
+      const _plEndBeat   = timeToBeat(18.307);
+      const _plLogs = [];
       for (let i = 0; i < pitchLineFrames.length; i++) {
         const { beat, pitch } = pitchLineFrames[i];
         if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
         const x = beatToX(beat);
         const y = pitchToY(pitch);
+        if (!_plLogDone && beat >= _plStartBeat && beat <= _plEndBeat) {
+          _plLogs.push(`[PL] x=${x.toFixed(1)} beat=${beat.toFixed(4)} pitch=${pitch}`);
+        }
         ctx.fillRect(x, y - dotH / 2, 2, dotH);
+      }
+      if (!_plLogDone && _plLogs.length > 0) {
+        _plLogs.forEach(l => console.log(l));
+        _plLogDone = true;
       }
     }
 
@@ -2843,12 +2855,15 @@
       const frameW = Math.max(2, beatToX(vtBeatGap) - beatToX(0));
       const frameH = noteHeight;
       const HARD_TOL = 1; // ±1 semitone
-
+      const _vtStartBeat = timeToBeat(16.667);
+      const _vtEndBeat   = timeToBeat(18.307);
+      const _vtLogs = [];
+      let _vtLastNoteId = null;
       for (const frame of vocalTraceFrames) {
         if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
 
         // X and Y are fixed — derived purely from stored beat and sungPitch.
-        const x = beatToX(frame.beat);
+        let x = beatToX(frame.beat);
         const missY = pitchToY(frame.sungPitch);
 
         // Color: check current note at this beat (if any) for hit/miss.
@@ -2860,6 +2875,12 @@
         let cappedW = frameW;
         for (const n of notes) {
           if (n.type !== 'break' && frame.beat >= n.startBeat && frame.beat < n.startBeat + n.duration) {
+            // Snap first VT block of each note to note's visual start
+            const noteId = n.startBeat;
+            if (_vtLastNoteId !== noteId) {
+              x = beatToX(n.startBeat);
+              _vtLastNoteId = noteId;
+            }
             const noteEndX = beatToX(n.startBeat + n.duration);
             cappedW = Math.min(frameW, noteEndX - x);
             const diff = Math.abs(frame.sungPitch - n.pitch);
@@ -2875,7 +2896,14 @@
         }
 
         ctx.fillStyle = isHit ? hitColor : 'rgba(255, 140, 50, 0.45)';
+        if (!_vtLogDone && frame.beat >= _vtStartBeat && frame.beat <= _vtEndBeat) {
+          _vtLogs.push(`[VT] x=${x.toFixed(1)} beat=${frame.beat.toFixed(4)} sungPitch=${frame.sungPitch} isHit=${isHit}`);
+        }
         ctx.fillRect(x, drawY - frameH / 2, Math.max(2, cappedW), frameH);
+      }
+      if (!_vtLogDone && _vtLogs.length > 0) {
+        _vtLogs.forEach(l => console.log(l));
+        _vtLogDone = true;
       }
     }
 
@@ -8874,7 +8902,7 @@
 
     for (let startSample = 0; startSample + fftSize <= channelData.length; startSample += hopSize) {
       for (let i = 0; i < fftSize; i++) samples[i] = channelData[startSample + i];
-      const timeSec = startSample / sampleRate;
+      const timeSec = (startSample + fftSize / 2) / sampleRate; // center of analysis window
       const [frequency, clarity] = detector.findPitch(samples, sampleRate);
       if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
         let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
