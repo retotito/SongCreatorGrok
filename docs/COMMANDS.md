@@ -165,5 +165,10 @@ cd frontend
 npm install
 ```
 
+**Node config file:**
+```bash
+"files.maxMemoryForLargeFilesMB": 4096
+```
+
 
 

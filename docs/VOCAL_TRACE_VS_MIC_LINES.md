@@ -20,18 +20,34 @@ They share the same coordinate system (`pitchToY(midiNote)`) but differ in audio
 4. Sticky prediction: hold pitch if drift ≤ 2 semitones and confidence ≥ 4
 5. Octave-correct toward `targetNote.pitch` (shift ±12 until diff ≤ 6)
 6. Clamp to MIDI 36–84 (C2–C6)
-7. **Apply `pitchTolerance` at record time → bake `isHit: boolean` into frame**
+7. **Apply `pitchTolerance` at record time → bake `isHit: boolean` into frame** _(to be moved to draw time — see Target Architecture below)_
 8. Append to `micNoteHits: Map<noteId, Array<{beat, sungPitch, isHit}>>`
 
-### Draw pipeline
+### Draw pipeline (current / pre-refactor)
 - Group consecutive same-`isHit` frames into filled rectangles
 - **Hit:** draw at `pitchToY(note.pitch)` (green/gold/orange) — snapped to note row
-- **Miss:** draw at `pitchToY(sungPitch)` — at actual sung pitch (octave-corrected)
+- **Miss:** draw at `pitchToY(sungPitch)` — at actual sung pitch (octave-corrected), **red color**
 - `pitchTolerance` NOT re-applied in draw (baked in at record time)
 
-### Key properties
-- `isHit` is immutable once recorded; changing `pitchTolerance` has no effect until next session
+### Key properties (current)
+- `isHit` is immutable once recorded; changing `pitchTolerance` or moving a note has no effect until next session
 - Miss blocks appear at the correct pitch because `sungPitch` was already octave-corrected
+- Grouping works well for mic's ~16ms rAF sampling rate — dense frames create smooth long bars
+
+### Target Architecture (to match Pink behavior)
+The green draw loop should be updated to behave like the pink draw loop:
+
+**What changes:**
+1. **Re-evaluate `isHit` at draw time** using `HARD_TOL = 1` (ignore stored `isHit`) — moving a note now updates green colors immediately on next redraw
+2. **Miss color: orange** `rgba(255, 140, 50, 0.45)` — matches pink misses instead of red
+3. **Keep grouping** consecutive same-state frames — mic samples at ~16ms (rAF), grouping keeps smooth long bars. Do NOT switch to frame-by-frame (that causes tiny fragmented overlapping blocks at mic's high sample rate)
+4. **No first-frame snap to `note.startBeat`** — mic fires at ~16ms so the gap is at most one rAF frame (~8px). Snapping at draw time would cause the first green block to shift when a note is moved horizontally
+
+**What stays the same:**
+- X position: `beatToX(sample.beat)` — fixed at record time, no note lookup for X
+- Y position for hits: `pitchToY(note.pitch)` — snapped to note row
+- Y position for misses: `pitchToY(sample.sungPitch)` — float actual pitch
+- Grouping logic: consecutive same-`isHit` frames merged into one rectangle
 
 ---
 
