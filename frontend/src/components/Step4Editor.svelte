@@ -2830,7 +2830,7 @@
         const { beat, pitch } = recordedPitchFrames[i];
         if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
         const x = beatToX(beat);
-        const y = pitchToY(pitch);
+        const y = pitchToY(recordedPitchFrames[i].pitchRaw ?? pitch);
         ctx.fillRect(x, y - dotH / 2, 2, dotH);
       }
     }
