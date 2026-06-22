@@ -2853,10 +2853,14 @@
 
         // Color: check current note at this beat (if any) for hit/miss.
         // Frame always draws even if note was moved/deleted.
+        // Also cap frame width to not overshoot the note's right edge.
         let isHit = false;
         let hitColor = 'rgba(255, 80, 180, 0.45)';
+        let cappedW = frameW;
         for (const n of notes) {
           if (n.type !== 'break' && frame.beat >= n.startBeat && frame.beat < n.startBeat + n.duration) {
+            const noteEndX = beatToX(n.startBeat + n.duration);
+            cappedW = Math.min(frameW, noteEndX - x);
             if (Math.abs(frame.sungPitch - n.pitch) <= HARD_TOL) {
               isHit = true;
               hitColor = n.isGolden ? 'rgba(255, 215, 0, 0.45)'
@@ -2868,7 +2872,7 @@
         }
 
         ctx.fillStyle = isHit ? hitColor : 'rgba(255, 140, 50, 0.45)';
-        ctx.fillRect(x, y - frameH / 2, frameW, frameH);
+        ctx.fillRect(x, y - frameH / 2, Math.max(2, cappedW), frameH);
       }
     }
 
