@@ -2849,12 +2849,13 @@
 
         // X and Y are fixed — derived purely from stored beat and sungPitch.
         const x = beatToX(frame.beat);
-        const y = pitchToY(frame.sungPitch);
+        const missY = pitchToY(frame.sungPitch);
 
         // Color: check current note at this beat (if any) for hit/miss.
+        // Hits snap to note row (Ultrastar style); misses draw at actual pitch Y.
         // Frame always draws even if note was moved/deleted.
-        // Also cap frame width to not overshoot the note's right edge.
         let isHit = false;
+        let drawY = missY;
         let hitColor = 'rgba(255, 80, 180, 0.45)';
         let cappedW = frameW;
         for (const n of notes) {
@@ -2864,6 +2865,7 @@
             const diff = Math.abs(frame.sungPitch - n.pitch);
             if (diff <= HARD_TOL) {
               isHit = true;
+              drawY = pitchToY(n.pitch); // snap to note row
               hitColor = n.isGolden ? 'rgba(255, 215, 0, 0.45)'
                        : n.isRap   ? 'rgba(255, 152, 0, 0.45)'
                        :              'rgba(255, 80, 180, 0.45)';
@@ -2873,7 +2875,7 @@
         }
 
         ctx.fillStyle = isHit ? hitColor : 'rgba(255, 140, 50, 0.45)';
-        ctx.fillRect(x, y - frameH / 2, Math.max(2, cappedW), frameH);
+        ctx.fillRect(x, drawY - frameH / 2, Math.max(2, cappedW), frameH);
       }
     }
 

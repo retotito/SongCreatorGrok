@@ -38,42 +38,55 @@ They share the same coordinate system (`pitchToY(midiNote)`) but differ in audio
 ## Pink Lines (Vocal Trace)
 
 **Audio source:** Pre-recorded vocal WAV file (`vocalTraceDecodedBuffer`)  
-**Triggered:** Fixed-grid deterministic loop in `updatePlayback()` — `sampleVocalTrace()` called once per `VOCAL_TRACE_STEP_SEC` interval  
-**Operates:** Any time `vocalTraceEnabled` is true and playback is active (not restricted to note windows)
+**Triggered:** Fixed-grid deterministic loop in `updatePlayback()` — `sampleVocalTrace()` called once per `VOCAL_TRACE_STEP_SEC` (25ms) interval  
+**Operates:** Only inside note windows (recording restricted to `note.startBeat … startBeat+duration`)
 
 ### Record pipeline (`sampleVocalTrace`, line ~8846)
 1. Copy `channelData[sample window]` into `vocalTraceSampleBuf`
 2. Pitch detect → frequency → MIDI
-3. If unvoiced (low clarity or out of 60–2000 Hz): clear rolling window, skip frame
+3. If unvoiced (low clarity or out of 60–2000 Hz): skip frame
 4. Rolling median over 5 samples (smoothing)
-5. Clamp to MIDI 36–84
-6. **No `pitchTolerance` applied — no `isHit` stored**
-7. Append `{ beat, pitch }` to `vocalTraceFrames`
+5. **Octave-correct toward `note.pitch` (shift ±12 until diff ≤ 6)** — baked into `sungPitch`
+6. Clamp to MIDI 36–84
+7. **No `isHit` stored** — hit/miss is evaluated at draw time against current note state
+8. Upsert by beat (replace existing frame within `VOCAL_TRACE_STEP_SEC * 0.5` tolerance — no duplicates on re-pass)
+9. Append `{ beat, sungPitch }` to `vocalTraceFrames`
 
 ### Draw pipeline (canvas draw function, line ~2839)
-- For each note: binary-search `vocalTraceFrames` for frames in `[startBeat, endBeat]`
-- Per frame: octave-correct `framePitch` toward `note.pitch` (same ±12 loop)
-- **Apply `pitchTolerance` at draw time** → recomputed every frame on every draw call
-- **Hit:** draw at `pitchToY(note.pitch)` (pink/gold/orange) — snapped to note row
-- **Miss:** draw at `pitchToY(frame.pitch)` ← BUG: using raw un-octave-corrected pitch
+- Iterate all `vocalTraceFrames`, skip frames outside visible range
+- Per frame: look up which note (if any) covers `frame.beat`
+- **Hit** (`abs(frame.sungPitch - note.pitch) <= HARD_TOL` where `HARD_TOL = 1`):
+  - Draw at **`pitchToY(note.pitch)`** — snapped to note row (Ultrastar style ✓)
+  - Color: pink (normal) / gold (golden note) / orange-amber (rap note)
+- **Miss** (no covering note, or diff > 1 semitone):
+  - Draw at **`pitchToY(frame.sungPitch)`** — actual recorded pitch position
+  - Color: orange `rgba(255, 140, 50, 0.45)`
+- Frame width = `VOCAL_TRACE_STEP_SEC` converted to beats, capped to note right edge
+- **`HARD_TOL` is re-evaluated at draw time** — changing note pitch immediately updates color/position without re-recording
 
 ---
 
-## Current Bugs in Vocal Trace
+## Resolved Issues
 
-### Bug 1 — Pink always shows as hit inside notes
-The octave correction during the hit/miss check normalises the pitch difference to within 6 semitones, so almost any pitch in the vocal file passes `abs(corrected - note.pitch) <= pitchTolerance`.  
-**Root cause:** Octave correction collapses the distance to ≤ 6 semitones before comparing against a tolerance of 1–3. For a voice that is an octave off, the corrected diff is 0 — perfect hit.  
-**Fix candidate:** Only octave-correct if the voice is clearly within one octave (diff ≤ 8); if the voice pitch is genuinely far from the note, record a miss. Or alternatively, clamp octave correction to a single ±12 shift max.
+### ✅ Bug 1 — Pink hit detection was unreliable (fixed)
+Octave correction at draw time was collapsing pitch distance before tolerance check. Fixed by baking `sungPitch` (octave-corrected) into the frame at record time and using a hard `HARD_TOL = 1` semitone at draw time.
 
-### Bug 2 — Orange miss blocks flicker
-Miss blocks appear for very short durations (single frame) at note boundaries, are sometimes suppressed by the edge-flicker filter, sometimes not, causing visible flicker on repeated draws.  
-**Root cause:** `vtBeatGap` is recomputed each draw call from `frames[1].beat - frames[0].beat`, which can be unreliable if frames[0]/[1] are not from the same contiguous run. The threshold `max(0.7, vtBeatGap)` is inconsistent.  
-**Fix candidate:** Store `vtBeatGap` as a constant derived from `VOCAL_TRACE_STEP_SEC` converted to beats, not re-derived from frame data.
+### ✅ Bug 3 — Hit frames drawn at wrong Y height (fixed)
+Hit frames were drawn at `pitchToY(frame.sungPitch)` instead of `pitchToY(note.pitch)`, placing them up to 1 semitone above/below the note row.  
+Fixed: hits now snap to `pitchToY(note.pitch)` (Ultrastar style). Misses still draw at `pitchToY(frame.sungPitch)`.
 
-### Bug 3 — Miss blocks drawn at wrong pitch height
-Miss blocks use `pitchToY(frame.pitch)` where `frame.pitch` is the raw un-octave-corrected MIDI value. This can place miss blocks an octave above or below the note row.  
-**Fix candidate:** Use the same octave-corrected `framePitch` that was computed for the hit/miss check when drawing the miss block position.
+---
+
+## Known/Open Issues
+
+### ⚠️ Possible timing offset between pitchLine dots and vocal trace frames
+The blue/green pitch line dots and the pink/orange vocal trace frames may appear ~28px offset on the X axis.  
+**Hypothesis:** Different beat-calculation strategies — `pitchLineFrames` beats are computed from audio offset + `GAP` ms conversion, while `vocalTraceFrames` beats come from `currentBeat` at sample time during playback. Need logging to confirm.
+
+### Bug 2 — Orange miss blocks flicker (low priority)
+Miss blocks appear for very short durations (single frame) at note boundaries.  
+**Root cause:** `vtBeatGap` is recomputed each draw call from `VOCAL_TRACE_STEP_SEC * bpm / 15` — may be slightly off at low BPM.  
+**Fix candidate:** Store as a derived constant; add a minimum frame width of 3px.
 
 ---
 
