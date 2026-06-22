@@ -1489,8 +1489,6 @@
   let pitchLineFrames = [];         // [{beat, pitch}] — original/baseline vocal (blue)
   let recordedPitchFrames = [];     // [{beat, pitch}] — recorded patches only (green)
   let pitchLineVisible = false;     // default off
-  let _plLogDone = false; // one-shot debug log flag
-  let _vtLogDone = false; // one-shot debug log flag
   let pitchLineLoading = false;
   let recordedPitchLoading = false;
   let pitchLineSourceUrl = null;    // URL used for last computation (for cache invalidation)
@@ -2813,22 +2811,12 @@
       const visibleEndBeat = xToBeat(w);
       ctx.fillStyle = 'rgba(0, 220, 255, 0.55)';
       const dotH = Math.max(2, noteHeight * 0.3);
-      const _plStartBeat = timeToBeat(16.667);
-      const _plEndBeat   = timeToBeat(18.307);
-      const _plLogs = [];
       for (let i = 0; i < pitchLineFrames.length; i++) {
         const { beat, pitch } = pitchLineFrames[i];
         if (beat < visibleStartBeat - 1 || beat > visibleEndBeat + 1) continue;
         const x = beatToX(beat);
-        const y = pitchToY(pitch);
-        if (!_plLogDone && beat >= _plStartBeat && beat <= _plEndBeat) {
-          _plLogs.push(`[PL] x=${x.toFixed(1)} beat=${beat.toFixed(4)} pitch=${pitch}`);
-        }
+        const y = pitchToY(pitchLineFrames[i].pitchRaw ?? pitch);
         ctx.fillRect(x, y - dotH / 2, 2, dotH);
-      }
-      if (!_plLogDone && _plLogs.length > 0) {
-        _plLogs.forEach(l => console.log(l));
-        _plLogDone = true;
       }
     }
 
@@ -2855,9 +2843,6 @@
       const frameW = Math.max(2, beatToX(vtBeatGap) - beatToX(0));
       const frameH = noteHeight;
       const HARD_TOL = 1; // ±1 semitone
-      const _vtStartBeat = timeToBeat(16.667);
-      const _vtEndBeat   = timeToBeat(18.307);
-      const _vtLogs = [];
       let _vtLastNoteId = null;
       for (const frame of vocalTraceFrames) {
         if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
@@ -2896,14 +2881,7 @@
         }
 
         ctx.fillStyle = isHit ? hitColor : 'rgba(255, 140, 50, 0.45)';
-        if (!_vtLogDone && frame.beat >= _vtStartBeat && frame.beat <= _vtEndBeat) {
-          _vtLogs.push(`[VT] x=${x.toFixed(1)} beat=${frame.beat.toFixed(4)} sungPitch=${frame.sungPitch} isHit=${isHit}`);
-        }
         ctx.fillRect(x, drawY - frameH / 2, Math.max(2, cappedW), frameH);
-      }
-      if (!_vtLogDone && _vtLogs.length > 0) {
-        _vtLogs.forEach(l => console.log(l));
-        _vtLogDone = true;
       }
     }
 
@@ -8906,9 +8884,10 @@
       const [frequency, clarity] = detector.findPitch(samples, sampleRate);
       if (clarity >= micClarityThreshold && frequency >= 60 && frequency <= 2000) {
         let midiPitch = Math.round(12 * Math.log2(frequency / 440) + 69);
+        const midiPitchRaw = 12 * Math.log2(frequency / 440) + 69;
         if (midiPitch < 36) midiPitch += 12;
         if (midiPitch > 84) midiPitch -= 12;
-        frames.push({ beat: timeToBeat(timeSec), pitch: midiPitch });
+        frames.push({ beat: timeToBeat(timeSec), pitch: midiPitch, pitchRaw: midiPitchRaw });
       }
       if (frames.length % yieldEvery === 0 && frames.length > 0) {
         await new Promise(r => setTimeout(r, 0));
