@@ -2904,7 +2904,7 @@
     if (micShowTrail && micNoteHits.size > 0) {
       const visibleStartBeat = xToBeat(0);
       const visibleEndBeat = xToBeat(w);
-      const HARD_TOL = pitchTolerance; // user-controlled: 1=hard, 2=medium, 3=easy
+      const HARD_TOL = pitchTolerance;
 
       for (const note of notes) {
         if (note.type === 'break') continue;
@@ -2920,7 +2920,7 @@
                        : 'rgba(102, 187, 106, 0.7)';
         const missColor = 'rgba(255, 140, 50, 0.45)';
 
-        // frameW: pixel width of one mic sample interval — use first two frames or fallback
+        // frameW: fallback width for the last sample in a note (when no next sample exists)
         const beatGap = hits.length > 1 ? Math.abs(hits[1].beat - hits[0].beat) : 0.3;
         const frameW = Math.max(2, beatToX(beatGap) - beatToX(0));
 
@@ -2938,9 +2938,9 @@
               i++;
               endBeat = hits[i].beat;
             }
-            // X fixed at record time — no clamping to note boundaries
             const xStart = beatToX(sample.beat);
-            const xEnd = beatToX(endBeat) + frameW;
+            // Cap right edge at next sample's x to prevent overlap (rAF spacing is variable)
+            const xEnd = i + 1 < hits.length ? beatToX(hits[i + 1].beat) : beatToX(endBeat) + frameW;
             ctx.fillStyle = hitColor;
             ctx.fillRect(xStart, noteY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           } else {
@@ -2955,7 +2955,8 @@
             }
             const missY = pitchToY(missPitch);
             const xStart = beatToX(sample.beat);
-            const xEnd = beatToX(endBeat) + frameW;
+            // Cap right edge at next sample's x to prevent overlap
+            const xEnd = i + 1 < hits.length ? beatToX(hits[i + 1].beat) : beatToX(endBeat) + frameW;
             ctx.fillStyle = missColor;
             ctx.fillRect(xStart, missY - noteHeight / 2, Math.max(xEnd - xStart, 2), noteHeight);
           }
