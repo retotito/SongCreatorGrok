@@ -5,8 +5,8 @@
     <span class="shortcut"><kbd>←→</kbd> seek ±5s</span>
     <span class="shortcut"><kbd>Shift+←→</kbd> ±1s</span>
     <span class="shortcut"><kbd>L</kbd> loop</span>
-    <span class="shortcut"><kbd>M</kbd> mic</span>
-    <span class="shortcut"><kbd>V</kbd> vocal trace</span>
+    <span class="shortcut"><kbd>M</kbd> mic · <kbd>Shift+M</kbd> trail</span>
+    <span class="shortcut"><kbd>V</kbd> vocal trace · <kbd>Shift+V</kbd> show</span>
   </div>
   <div class="shortcut-group">
     <span class="shortcut-label">Navigate</span>
