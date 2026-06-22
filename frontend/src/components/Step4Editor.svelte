@@ -2843,7 +2843,7 @@
       const frameW = Math.max(2, beatToX(vtBeatGap) - beatToX(0));
       const frameH = noteHeight;
       const HARD_TOL = 1; // ±1 semitone
-      let _vtLastNoteId = null;
+
       for (const frame of vocalTraceFrames) {
         if (frame.beat < visibleStartBeat - 1 || frame.beat > visibleEndBeat + 1) continue;
 
@@ -2857,17 +2857,8 @@
         let isHit = false;
         let drawY = missY;
         let hitColor = 'rgba(255, 80, 180, 0.45)';
-        let cappedW = frameW;
         for (const n of notes) {
           if (n.type !== 'break' && frame.beat >= n.startBeat && frame.beat < n.startBeat + n.duration) {
-            // Snap first VT block of each note to note's visual start
-            const noteId = n.startBeat;
-            if (_vtLastNoteId !== noteId) {
-              x = beatToX(n.startBeat);
-              _vtLastNoteId = noteId;
-            }
-            const noteEndX = beatToX(n.startBeat + n.duration);
-            cappedW = Math.min(frameW, noteEndX - x);
             const diff = Math.abs(frame.sungPitch - n.pitch);
             if (diff <= HARD_TOL) {
               isHit = true;
@@ -2881,7 +2872,7 @@
         }
 
         ctx.fillStyle = isHit ? hitColor : 'rgba(255, 140, 50, 0.45)';
-        ctx.fillRect(x, drawY - frameH / 2, Math.max(2, cappedW), frameH);
+        ctx.fillRect(x, drawY - frameH / 2, Math.max(2, frameW), frameH);
       }
     }
 
@@ -6086,7 +6077,6 @@
 
     if (isPlaying) {
       console.log(`[Play] Pausing at ${audioEl.currentTime.toFixed(2)}s, beat=${playbackBeat.toFixed(1)}`);
-      // if (vocalTraceEnabled && vocalTraceFrames.length > 0) logVocalTraceState();
       quickTraceActive = false;
       quickTraceEndSec = null;
       audioEl.pause();
