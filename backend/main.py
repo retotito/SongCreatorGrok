@@ -784,6 +784,9 @@ async def delete_session_endpoint(session_id: str):
     from services.backup_service import delete_all_backups as _delete_all_backups
     _delete_all_backups(SESSIONS_DIR, session_id)
 
+    # Remove pitch line cache files
+    _delete_pitch_lines(session_id)
+
     # Remove generated files tracked in result
     result = session.get("result", {})
     tracked = set()
@@ -3724,6 +3727,71 @@ async def generate_empty(session_id: str):
 # ────────────────────────────────────────────────────────────
 # Step 4: Editor data
 # ────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+# Pitch line helpers (stored as separate JSON files per session)
+# ────────────────────────────────────────────────────────────
+def _pitch_line_path(session_id: str, line_type: str) -> str:
+    """Return absolute path for pitch_<type>.json inside the session subdirectory."""
+    session_dir = os.path.join(SESSIONS_DIR, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    return os.path.join(session_dir, f"pitch_{line_type}.json")
+
+
+def _save_pitch_line(session_id: str, line_type: str, frames: list, source_url: str):
+    path = _pitch_line_path(session_id, line_type)
+    data = {"frames": frames, "source_url": source_url}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        import json as _json
+        _json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _load_pitch_line(session_id: str, line_type: str) -> dict:
+    """Return {frames, source_url} or None if not stored."""
+    path = _pitch_line_path(session_id, line_type)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            import json as _json
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def _delete_pitch_lines(session_id: str):
+    for lt in ("blue", "green"):
+        p = os.path.join(SESSIONS_DIR, session_id, f"pitch_{lt}.json")
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+@app.post("/api/sessions/{session_id}/pitch-line")
+async def save_pitch_line(session_id: str, request: Request):
+    """Persist the computed pitch line (blue or green) for the session."""
+    if not sessions.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    body = await request.json()
+    line_type = body.get("type", "blue")
+    if line_type not in ("blue", "green"):
+        raise HTTPException(status_code=400, detail="type must be 'blue' or 'green'")
+    frames = body.get("frames", [])
+    source_url = body.get("source_url", "")
+    if frames:
+        _save_pitch_line(session_id, line_type, frames, source_url)
+    else:
+        # Empty → clear stored data
+        _delete_pitch_lines(session_id) if line_type == "all" else None
+        p = os.path.join(SESSIONS_DIR, session_id, f"pitch_{line_type}.json")
+        if os.path.exists(p):
+            os.remove(p)
+    return {"status": "ok"}
+
+
 @app.get("/api/editor-data/{session_id}")
 async def get_editor_data(session_id: str):
     """Get note data for the piano roll editor."""
@@ -3770,6 +3838,8 @@ async def get_editor_data(session_id: str):
         ),
         "has_original_demucs": bool(session.get("original_demucs_vocal")),
         "has_edited_vocal": bool(session.get("edited_vocal")) and os.path.isfile(session.get("edited_vocal", "")),
+        "pitch_line_blue": _load_pitch_line(session_id, "blue"),
+        "pitch_line_green": _load_pitch_line(session_id, "green"),
     }
 
 

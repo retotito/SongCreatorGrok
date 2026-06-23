@@ -1064,6 +1064,7 @@
       vibratoModalY,
       playbackBeat,
       pitchTolerance,
+      pitchLineVisible,
     };
     localStorage.setItem(key, JSON.stringify(payload));
     console.log('[Step4] Saved UI prefs', { reason, ...payload });
@@ -8715,6 +8716,12 @@
       console.log('[PitchLine] Analysing baseline vocal', baseUrl);
       pitchLineFrames = await _detectPitchFrames(baseUrl);
       console.log(`[PitchLine] Done: ${pitchLineFrames.length} voiced frames`);
+      // Persist to backend (fire and forget) — strip query string so cache-bust params don't break comparison on restore
+      fetch(`${API_BASE}/sessions/${$sessionId}/pitch-line`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'blue', frames: pitchLineFrames, source_url: baseUrl.split('?')[0] }),
+      }).catch(e => console.warn('[PitchLine] Failed to save blue:', e));
     } catch (err) {
       console.error('[PitchLine] Failed:', err);
     } finally {
@@ -8746,6 +8753,13 @@
         return patchedSegs.some(s => ms >= s.startMs && ms <= s.endMs);
       });
       console.log(`[PitchLine] Recorded: ${recordedPitchFrames.length} voiced frames in patched segments`);
+      // Persist to backend (fire and forget) — strip query string so cache-bust params don't break comparison on restore
+      const greenSourceUrl = ((hasEditedVocal ? editedVocalUrl : null) || vocalUrl || originalVocalUrl).split('?')[0];
+      fetch(`${API_BASE}/sessions/${$sessionId}/pitch-line`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'green', frames: recordedPitchFrames, source_url: greenSourceUrl }),
+      }).catch(e => console.warn('[PitchLine] Failed to save green:', e));
     } catch (err) {
       console.error('[PitchLine] Recorded pitch failed:', err);
     } finally {
@@ -8756,6 +8770,7 @@
 
   async function togglePitchLine() {
     pitchLineVisible = !pitchLineVisible;
+    saveEditorUiPrefs('pitch-toggle');
     if (pitchLineVisible) {
       const baseUrl = originalVocalUrl || vocalUrl;
       if (pitchLineFrames.length === 0 || pitchLineSourceUrl !== baseUrl) {
@@ -9144,6 +9159,37 @@
       }
       originalUrl = hasOriginalAudio ? getAudioUrl($sessionId, 'original') : '';
       console.log(`[Step4] URLs: originalVocalUrl=${originalVocalUrl} | editedVocalUrl=${editedVocalUrl} | originalUrl=${originalUrl}`);
+
+      // Restore persisted pitch lines if source URLs still match (compare without query strings)
+      const currentBlueUrl = (originalVocalUrl || vocalUrl).split('?')[0];
+      const currentGreenUrl = ((hasEditedVocal ? editedVocalUrl : null) || vocalUrl || originalVocalUrl).split('?')[0];
+      const blueData = data.pitch_line_blue;
+      if (blueData && blueData.frames?.length && blueData.source_url) {
+        if (blueData.source_url === currentBlueUrl) {
+          pitchLineFrames = blueData.frames;
+          pitchLineSourceUrl = blueData.source_url;
+          console.log(`[PitchLine] Restored blue from cache: ${pitchLineFrames.length} frames`);
+        } else {
+          console.log(`[PitchLine] Blue cache stale (cached=${blueData.source_url} ≠ current=${currentBlueUrl}), clearing`);
+          fetch(`${API_BASE}/sessions/${$sessionId}/pitch-line`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'blue', frames: [], source_url: '' }),
+          }).catch(() => {});
+        }
+      }
+      const greenData = data.pitch_line_green;
+      if (greenData && greenData.frames?.length && greenData.source_url) {
+        if (greenData.source_url === currentGreenUrl) {
+          recordedPitchFrames = greenData.frames;
+          console.log(`[PitchLine] Restored green from cache: ${recordedPitchFrames.length} frames`);
+        } else {
+          console.log(`[PitchLine] Green cache stale, clearing`);
+          fetch(`${API_BASE}/sessions/${$sessionId}/pitch-line`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'green', frames: [], source_url: '' }),
+          }).catch(() => {});
+        }
+      }
       const defaultSource = hasVocalsAudio ? ((hasEditedVocal || data.has_vocal_splice) ? 'edited' : 'vocals') : (hasOriginalAudio ? 'original' : 'original');
       console.log(`[Step4] segRecPatched.size=${segRecPatched.size} | default audioSource=${defaultSource}`);
       const uiPrefs = restoreEditorUiPrefs();
@@ -9166,6 +9212,9 @@
         if (typeof uiPrefs.pitchTolerance === 'number' && [1, 2, 3].includes(uiPrefs.pitchTolerance)) {
           pitchTolerance = uiPrefs.pitchTolerance;
         }
+        if (typeof uiPrefs.pitchLineVisible === 'boolean') {
+          pitchLineVisible = uiPrefs.pitchLineVisible;
+        }
         if (typeof uiPrefs.vibratoModalX === 'number' && Number.isFinite(uiPrefs.vibratoModalX)) {
           vibratoModalX = Math.max(0, Math.min(window.innerWidth - 410, uiPrefs.vibratoModalX));
         }
@@ -9173,6 +9222,12 @@
           vibratoModalY = Math.max(0, Math.min(window.innerHeight - 300, uiPrefs.vibratoModalY));
         }
         // playbackBeat is restored later, after the gap-position reset
+      }
+      // If pitch was on but there are no frames (vocal deleted, cache stale, or new vocal not yet analysed), turn it off
+      if (pitchLineVisible && pitchLineFrames.length === 0) {
+        pitchLineVisible = false;
+        saveEditorUiPrefs('pitch-auto-off-no-frames');
+        console.log('[PitchLine] Pitch was on but no frames available — toggled off');
       }
       const preferredSource = uiPrefs?.audioSource || defaultSource;
       audioSource = resolvePreferredAudioSource(preferredSource);
