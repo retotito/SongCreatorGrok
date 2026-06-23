@@ -2758,10 +2758,10 @@
 
       if (note.isGolden) {
         ctx.fillStyle = micHollow ? (isSelected ? '#ffd70033' : '#ffd70012') : (isSelected ? '#ffd70088' : (isCut ? '#ffd70022' : '#ffd70044'));
-        ctx.strokeStyle = isCut ? '#ffd70066' : '#ffd700';
+        ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
       } else if (note.isRap) {
         ctx.fillStyle = micHollow ? (isSelected ? '#ff980033' : '#ff980012') : (isSelected ? '#ff980088' : (isCut ? '#ff980022' : '#ff980044'));
-        ctx.strokeStyle = isCut ? '#ff980066' : '#ff9800';
+        ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
       } else {
         ctx.fillStyle = micHollow ? (isSelected ? '#4fc3f733' : '#4fc3f712') : (isSelected ? '#4fc3f788' : (isCut ? '#4fc3f722' : '#4fc3f744'));
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
@@ -2794,11 +2794,15 @@
         }
       }
 
-      // Golden star indicator
+      // Golden star / rap indicator — drawn above the note, outside the note rect
       if (note.isGolden && width > 14) {
         ctx.fillStyle = '#ffd700';
-        ctx.font = 'bold 9px sans-serif';
-        ctx.fillText('★', x + width - 12, y + 3);
+        ctx.font = 'bold 15px sans-serif';
+        ctx.fillText('★', x + width - 16, y - noteHeight / 2 - 5);
+      } else if (note.isRap && width > 14) {
+        ctx.fillStyle = '#ff9800';
+        ctx.font = 'bold 15px sans-serif';
+        ctx.fillText('R', x + width - 13, y - noteHeight / 2 - 5);
       }
 
       // Syllable text — show · after syllable if it has a trailing space (space visualisation)
