@@ -63,6 +63,9 @@
   let zoom = 20;          // pixels per beat (default zoomed in)
   // viewHeight grows with waveformHeight so the note grid stays a fixed size
   $: viewHeight = 533 + DOWNBEAT_HANDLE_H + (showWaveform ? waveformHeight : 0);
+
+  let scrollY = 0;           // vertical pitch scroll in pixels
+  const rowHeight = 20;      // fixed px per semitone — must be >= noteHeight
   let noteHeight = 18;
 
   // Pitch range (MIDI)
@@ -1559,6 +1562,12 @@
       minPitch = Math.floor(mid - 6);
       maxPitch = Math.ceil(mid + 6);
     }
+    // Center the note range vertically on load
+    const midNotePitch = (notesMin + notesMax) / 2;
+    const wt = waveTop();
+    const pianoAreaH = viewHeight - 22 - wt;
+    const midY = wt + (maxPitch - midNotePitch) * rowHeight;
+    scrollY = clampScrollY(midY - pianoAreaH / 2);
   }
 
   // Beat to X pixel
@@ -1578,20 +1587,27 @@
 
   // Pitch to Y pixel (piano area only, excluding time axis at bottom and waveform at top)
   function pitchToY(pitch) {
-    const range = maxPitch - minPitch;
     const wt = waveTop();
-    const pianoH = viewHeight - 22 - wt; // exclude time axis and waveform
-    const ratio = (maxPitch - pitch) / range;
-    return wt + ratio * (pianoH - 40) + 20;
+    return wt + (maxPitch - pitch) * rowHeight - scrollY;
   }
 
   // Y pixel to pitch
   function yToPitch(y) {
-    const range = maxPitch - minPitch;
+    const wt = waveTop();
+    return Math.round(maxPitch - (y - wt + scrollY) / rowHeight);
+  }
+
+  // Total height of the pitch grid in pixels
+  function pitchGridHeight() {
+    return (maxPitch - minPitch + 1) * rowHeight;
+  }
+
+  // Clamp scrollY so pitch grid stays in view
+  function clampScrollY(sy) {
     const wt = waveTop();
     const pianoH = viewHeight - 22 - wt;
-    const ratio = (y - wt - 20) / (pianoH - 40);
-    return Math.round(maxPitch - ratio * range);
+    const gridH = pitchGridHeight();
+    return Math.max(0, Math.min(Math.max(0, gridH - pianoH), sy));
   }
 
   // Note name helper
@@ -2416,9 +2432,13 @@
 
     // Grid lines (pitch)
     const pitchRange = maxPitch - minPitch;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, waveTop(), w, pianoH - waveTop());
+    ctx.clip();
     for (let p = minPitch; p <= maxPitch; p++) {
       const y = pitchToY(p);
-      if (y > pianoH) continue; // don't draw into time axis
+      if (y < waveTop() || y > pianoH) continue;
       const isC = ((p % 12) + 12) % 12 === 0;
       
       ctx.strokeStyle = isC ? '#333' : '#1a1a2e';
@@ -2435,6 +2455,7 @@
         ctx.fillText(noteName(p), 2, y - 2);
       }
     }
+    ctx.restore(); // end pitch grid clip
 
     // Grid lines (beats) — musical subdivisions
     // BEATS_PER_QUARTER = 8 ultrastar beats per real quarter note
@@ -3179,6 +3200,27 @@
       }
     }
 
+    // ── Vertical pitch scrollbar (left edge) ──
+    {
+      const wt = waveTop();
+      const gridH = pitchGridHeight();
+      const pianoAreaH = h - timeAxisHeight - wt;
+      if (gridH > pianoAreaH) {
+        const barW = 6;
+        const trackH = pianoAreaH;
+        const thumbH = Math.max(20, trackH * (pianoAreaH / gridH));
+        const thumbY = wt + (scrollY / (gridH - pianoAreaH)) * (trackH - thumbH);
+        // Track
+        ctx.fillStyle = 'rgba(255,255,255,0.04)';
+        ctx.fillRect(0, wt, barW, trackH);
+        // Thumb
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.beginPath();
+        ctx.roundRect(1, thumbY, barW - 2, thumbH, 3);
+        ctx.fill();
+      }
+    }
+
     syncScrollbar();
   }
 
@@ -3891,7 +3933,7 @@
     // ── Multi-note drag ──
     if (dragMode === 'move' && selectedNotes.size > 1 && selectedNotes.has(note.id)) {
       const rawBeatDelta = Math.round((dx / zoom) + scrollBeatDelta);
-      const pitchDelta = event.shiftKey ? 0 : (yToPitch(dragStart.y + dy) - dragStart.pitch);
+      const pitchDelta = event.shiftKey ? 0 : -Math.round(dy / rowHeight);
       
       if (!dragStart.groupOffsets) {
         // Capture initial positions of all selected notes
@@ -3925,7 +3967,7 @@
       const { minBeat, maxBeat } = getSongBeatBounds();
       const maxStart = Number.isFinite(maxBeat) ? Math.floor(maxBeat - note.duration) : desiredStartBeat;
       note.startBeat = clampValue(desiredStartBeat, Math.ceil(minBeat), maxStart);
-      const nextPitch = event.shiftKey ? dragStart.pitch : yToPitch(dragStart.y + dy);
+      const nextPitch = event.shiftKey ? dragStart.pitch : dragStart.pitch - Math.round(dy / rowHeight);
       note.pitch = Math.max(minPitch, Math.min(maxPitch, nextPitch));
       // Update pitch preview if pitch changed — only for single note
       if (note.pitch !== dragLastPitch) {
@@ -6043,7 +6085,7 @@
     event.preventDefault();
 
     if (event.ctrlKey || event.metaKey) {
-      // Zoom — keep the point under the cursor fixed
+      // Ctrl/Cmd + scroll → zoom (keep point under cursor fixed)
       const oldZoom = zoom;
       zoom = Math.max(0.5, Math.min(100, zoom + event.deltaY * -0.01));
       console.log(`[Wheel] Zoom ${oldZoom.toFixed(1)} → ${zoom.toFixed(1)}`);
@@ -6051,9 +6093,13 @@
       const anchorBeat = (scrollX + mouseX) / oldZoom;
       scrollX = clampScrollX(anchorBeat * zoom - mouseX);
     } else {
-      // Horizontal scroll only
+      // deltaX → horizontal scroll
       if (Math.abs(event.deltaX) > 1) {
         scrollX = clampScrollX(scrollX + event.deltaX);
+      }
+      // deltaY → vertical pitch scroll
+      if (Math.abs(event.deltaY) > 1) {
+        scrollY = clampScrollY(scrollY + event.deltaY);
       }
     }
 
