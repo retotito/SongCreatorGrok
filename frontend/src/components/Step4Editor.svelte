@@ -2809,7 +2809,7 @@
       if (zoom > 1 && width > 10) {
         const hasTrailingSpace = note.syllable.endsWith(' ');
         const displayText = note.syllable.trim() + (hasTrailingSpace ? '·' : '');
-        ctx.fillStyle = hasTrailingSpace ? '#7ecbf7' : '#eee';
+        ctx.fillStyle = hasTrailingSpace ? '#cccccc' : '#ffffff';
         ctx.font = '10px sans-serif';
         ctx.fillText(displayText, x + 2, y + 3);
       }
