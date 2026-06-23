@@ -9270,7 +9270,7 @@
       isEnabled: () => getStoredAutoEnabled(),
       onBackup: async () => {
         if (!$sessionId) return;
-        await fetch(`${API_BASE}/sessions/${$sessionId}/backup`, { method: 'POST' });
+        await fetch(`${API_BASE}/sessions/${$sessionId}/backup?auto=true`, { method: 'POST' });
         console.log('[AutoBackup] auto-backup created');
       },
     });

@@ -189,6 +189,9 @@
           {#each backups as b (b.ts)}
             <div class="backup-row">
               <span class="backup-row-date">{fmtDate(b.ts)}</span>
+              {#if b.is_auto}
+                <span class="backup-row-badge">auto</span>
+              {/if}
               <span class="backup-row-size">{fmtSize(b.size_bytes)}</span>
               <button
                 class="backup-action-btn backup-restore-btn"
@@ -251,7 +254,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    max-height: 80vh;
+    max-height: calc(100vh - 200px);
+    overflow: hidden;
   }
 
   .backup-header {
@@ -340,7 +344,8 @@
     flex-direction: column;
     gap: 0.3rem;
     overflow-y: auto;
-    max-height: 45vh;
+    flex: 1;
+    min-height: 0;
   }
 
   .backup-row {
@@ -364,6 +369,16 @@
     min-width: 4rem;
     text-align: right;
     font-size: 0.78rem;
+  }
+
+  .backup-row-badge {
+    font-size: 0.68rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    background: #1a2e40;
+    color: #4fc3f7;
+    border: 1px solid #1e4060;
+    white-space: nowrap;
   }
 
   .backup-action-btn {

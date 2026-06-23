@@ -3931,7 +3931,7 @@ from services.backup_service import (
 
 
 @app.post("/api/sessions/{session_id}/backup")
-async def backup_create(session_id: str):
+async def backup_create(session_id: str, request: Request):
     """Snapshot the current UltraStar .txt content for this session."""
     session = sessions.get(session_id)
     if not session:
@@ -3939,8 +3939,9 @@ async def backup_create(session_id: str):
     result = session.get("result")
     if not result or not result.get("ultrastar_content"):
         raise HTTPException(status_code=400, detail="No song data to back up")
-    entry = _create_backup(SESSIONS_DIR, session_id, result["ultrastar_content"])
-    log_step("BACKUP", f"Session {session_id}: created backup {entry['filename']}")
+    auto = request.query_params.get("auto", "false").lower() == "true"
+    entry = _create_backup(SESSIONS_DIR, session_id, result["ultrastar_content"], auto=auto)
+    log_step("BACKUP", f"Session {session_id}: created {'auto' if auto else 'manual'} backup {entry['filename']}")
     return {"status": "ok", "backup": entry}
 
 

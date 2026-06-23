@@ -31,31 +31,37 @@ def list_backups(sessions_dir: str, session_id: str) -> list:
     for fname in os.listdir(backup_dir):
         if not fname.startswith("backup_") or not fname.endswith(".txt"):
             continue
+        # Filename formats: backup_<ts>_a.txt (auto), backup_<ts>_m.txt (manual),
+        # or legacy backup_<ts>.txt (treated as manual)
+        stem = fname[len("backup_"):-len(".txt")]  # e.g. "1234567890_a" or "1234567890"
+        parts = stem.rsplit("_", 1)
         try:
-            ts = int(fname[len("backup_"):-len(".txt")])
+            ts = int(parts[0])
         except ValueError:
             continue
+        is_auto = len(parts) == 2 and parts[1] == "a"
         fpath = os.path.join(backup_dir, fname)
         try:
             size = os.path.getsize(fpath)
         except OSError:
             size = 0
-        entries.append({"ts": ts, "filename": fname, "size_bytes": size})
+        entries.append({"ts": ts, "filename": fname, "size_bytes": size, "is_auto": is_auto})
 
     entries.sort(key=lambda e: e["ts"], reverse=True)
     return entries
 
 
-def create_backup(sessions_dir: str, session_id: str, txt_content: str) -> dict:
+def create_backup(sessions_dir: str, session_id: str, txt_content: str, auto: bool = False) -> dict:
     """Write a new backup file and prune if over limit.
 
-    Returns the new entry: {ts, filename, size_bytes}
+    Returns the new entry: {ts, filename, size_bytes, is_auto}
     """
     backup_dir = get_backup_dir(sessions_dir, session_id)
     os.makedirs(backup_dir, exist_ok=True)
 
     ts = int(time.time() * 1000)
-    filename = f"backup_{ts}.txt"
+    suffix = "a" if auto else "m"
+    filename = f"backup_{ts}_{suffix}.txt"
     fpath = os.path.join(backup_dir, filename)
 
     with open(fpath, "w", encoding="utf-8") as f:
@@ -64,29 +70,30 @@ def create_backup(sessions_dir: str, session_id: str, txt_content: str) -> dict:
     size = os.path.getsize(fpath)
     prune_backups(sessions_dir, session_id)
 
-    return {"ts": ts, "filename": filename, "size_bytes": size}
+    return {"ts": ts, "filename": filename, "size_bytes": size, "is_auto": auto}
 
 
 def delete_backup(sessions_dir: str, session_id: str, ts: int) -> bool:
     """Delete a single backup by timestamp. Returns True if deleted."""
     backup_dir = get_backup_dir(sessions_dir, session_id)
-    filename = f"backup_{ts}.txt"
-    fpath = os.path.join(backup_dir, filename)
-    if os.path.exists(fpath):
-        os.remove(fpath)
-        return True
+    # Try both new suffixed formats and legacy format
+    for candidate in (f"backup_{ts}_m.txt", f"backup_{ts}_a.txt", f"backup_{ts}.txt"):
+        fpath = os.path.join(backup_dir, candidate)
+        if os.path.exists(fpath):
+            os.remove(fpath)
+            return True
     return False
 
 
 def restore_backup(sessions_dir: str, session_id: str, ts: int) -> str:
     """Read and return the txt_content of a backup. Raises FileNotFoundError if missing."""
     backup_dir = get_backup_dir(sessions_dir, session_id)
-    filename = f"backup_{ts}.txt"
-    fpath = os.path.join(backup_dir, filename)
-    if not os.path.exists(fpath):
-        raise FileNotFoundError(f"Backup {ts} not found for session {session_id}")
-    with open(fpath, "r", encoding="utf-8") as f:
-        return f.read()
+    for candidate in (f"backup_{ts}_m.txt", f"backup_{ts}_a.txt", f"backup_{ts}.txt"):
+        fpath = os.path.join(backup_dir, candidate)
+        if os.path.exists(fpath):
+            with open(fpath, "r", encoding="utf-8") as f:
+                return f.read()
+    raise FileNotFoundError(f"Backup {ts} not found for session {session_id}")
 
 
 def prune_backups(sessions_dir: str, session_id: str, max_keep: int = MAX_BACKUPS):
