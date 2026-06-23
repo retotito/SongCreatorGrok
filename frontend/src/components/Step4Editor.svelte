@@ -6726,8 +6726,8 @@
             dragOscStopTimer = setTimeout(() => { stopDragOsc(); dragOscStopTimer = null; }, 400);
           }
         }
-        if (isHorizontalMove && selectedNoteObjects.length >= 1) {
-          const movedStart = Math.min(...selectedNoteObjects.map(n => n.startBeat + moveDelta));
+        if (selectedNoteObjects.length >= 1) {
+          const movedStart = Math.min(...selectedNoteObjects.map(n => n.startBeat + (isHorizontalMove ? moveDelta : 0)));
           const w = canvasEl?.width || canvasW || 800;
           scrollX = clampScrollX(movedStart * zoom - w / 2);
         }
