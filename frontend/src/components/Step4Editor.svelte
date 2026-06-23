@@ -2747,11 +2747,6 @@
       // Note rectangle
       const isSelected = selectedNote === note.id || selectedNotes.has(note.id);
       const isCut = cutNoteIds.has(note.id);
-      const hasChanged = note.original && (
-        note.startBeat !== note.original.startBeat ||
-        note.duration !== note.original.duration ||
-        note.pitch !== note.original.pitch
-      );
 
       // Cut notes are semi-transparent
       const cutAlpha = isCut ? '44' : '';
@@ -2765,9 +2760,6 @@
       } else if (note.isRap) {
         ctx.fillStyle = micHollow ? (isSelected ? '#ff980033' : '#ff980012') : (isSelected ? '#ff980088' : (isCut ? '#ff980022' : '#ff980044'));
         ctx.strokeStyle = isCut ? '#ff980066' : '#ff9800';
-      } else if (hasChanged) {
-        ctx.fillStyle = micHollow ? (isSelected ? '#fdd83533' : '#fdd83512') : (isSelected ? '#fdd83588' : (isCut ? '#fdd83522' : '#fdd83544'));
-        ctx.strokeStyle = isCut ? '#fdd83566' : '#fdd835';
       } else {
         ctx.fillStyle = micHollow ? (isSelected ? '#4fc3f733' : '#4fc3f712') : (isSelected ? '#4fc3f788' : (isCut ? '#4fc3f722' : '#4fc3f744'));
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
