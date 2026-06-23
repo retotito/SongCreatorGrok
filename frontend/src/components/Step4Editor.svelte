@@ -6726,10 +6726,10 @@
             dragOscStopTimer = setTimeout(() => { stopDragOsc(); dragOscStopTimer = null; }, 400);
           }
         }
-        if (isHorizontalMove && selectedNoteObjects.length === 1) {
+        if (isHorizontalMove && selectedNoteObjects.length >= 1) {
           const movedStart = Math.min(...selectedNoteObjects.map(n => n.startBeat + moveDelta));
-          const movedEnd = Math.max(...selectedNoteObjects.map(n => n.startBeat + n.duration + moveDelta));
-          ensureBeatVisible(e.code === 'ArrowLeft' ? movedStart : movedEnd, 8);
+          const w = canvasEl?.width || canvasW || 800;
+          scrollX = clampScrollX(movedStart * zoom - w / 2);
         }
         markUnsaved();
         updatePitchRange();
