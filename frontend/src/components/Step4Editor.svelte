@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import FindWidget from './FindWidget.svelte';
   import ShortcutBar from './ShortcutBar.svelte';
+  import SelectionPanel from './SelectionPanel.svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
   import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
@@ -4657,7 +4658,13 @@
     }
   }
 
+  // Tracks whether closeContextMenu was just called (by an action button or
+  // outside-click dismiss). handleGlobalClick uses this to avoid clearing the
+  // note selection after any context-menu interaction.
+  let _menuClosedByAction = false;
+
   function closeContextMenu() {
+    if (contextMenu.visible) _menuClosedByAction = true;
     contextMenu = {
       visible: false,
       x: 0,
@@ -5539,8 +5546,14 @@
   }
 
   function handleGlobalClick(e) {
+    // Close menu if clicking outside it (sets _menuClosedByAction)
     if (contextMenu.visible && contextMenuEl && !contextMenuEl.contains(e.target)) {
       closeContextMenu();
+    }
+    // If the menu was just involved (button action or outside-click dismiss), preserve selection
+    if (_menuClosedByAction) {
+      _menuClosedByAction = false;
+      return;
     }
     if (e.target !== canvasEl && !(contextMenuEl && contextMenuEl.contains(e.target))) {
       clearMarkerSelection();
@@ -10048,16 +10061,17 @@
     </div>
   {/if}
 
-  <!-- Selection count indicator -->
-  {#if selectedNotes.size > 1 && !pasteMode}
-    <div class="selection-info-bar">
-      <span>{selectedNotes.size} notes selected</span>
-      <span class="selection-hint">Ctrl+X cut · Ctrl+C copy · Del delete · Esc deselect</span>
-    </div>
-  {/if}
+  <!-- Fixed draggable selection panel — single or multi note -->
+  <SelectionPanel
+    count={selectedNotes.size > 1 ? selectedNotes.size : (selectedNote !== null ? 1 : 0)}
+    onDeselect={() => { clearMarkerSelection(); draw(); }}
+  />
 
   <!-- Context Menu -->
   {#if contextMenu.visible}
+    <!-- Invisible overlay: captures clicks outside the menu so they close it without
+         hitting the canvas mousedown handler (which would clear note selection) -->
+    <div class="ctx-overlay" on:mousedown|preventDefault|stopPropagation={() => closeContextMenu()} />
     {@const ctxNote = notes.find(n => n.id === contextMenu.noteId)}
     {@const isMultiCtx = selectedNotes.size > 1 && selectedNotes.has(contextMenu.noteId)}
     {@const canMergePrev = ctxNote && !isMultiCtx && canMergeWithPrevious(ctxNote.id)}
@@ -11137,21 +11151,57 @@
   .gridalign-cancel-btn:hover { background: #e53935; }
 
   /* ── Selection info bar ── */
-  .selection-info-bar {
+  .selection-panel {
+    position: fixed;
+    bottom: 18px;
+    left: 18px;
+    z-index: 800;
     display: flex;
-    align-items: center;
-    gap: 1.5rem;
-    background: rgba(33, 150, 243, 0.1);
-    border: 1px solid rgba(33, 150, 243, 0.3);
-    border-radius: 6px;
-    padding: 4px 16px;
-    margin: 4px 0;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(15, 20, 40, 0.92);
+    border: 1px solid rgba(33, 150, 243, 0.45);
+    border-radius: 8px;
+    padding: 8px 38px 8px 12px;
     color: #90caf9;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
+    min-width: 180px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    pointer-events: all;
   }
-  .selection-hint {
-    color: #607d8b;
+  .sel-title {
+    font-weight: 600;
+    color: #64b5f6;
+    font-size: 0.8rem;
+  }
+  .sel-detail {
+    color: #b0bec5;
     font-size: 0.75rem;
+  }
+  .sel-type {
+    color: #ffd54f;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .sel-hint {
+    color: #546e7a;
+    font-size: 0.72rem;
+  }
+  .sel-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    background: none;
+    border: none;
+    color: #546e7a;
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 0 2px;
+  }
+  .sel-close:hover {
+    color: #ef9a9a;
   }
 
   .toolbar {
@@ -12037,6 +12087,14 @@
   .stats-bar span:nth-child(2) { color: #66bb6a; }
 
   /* ── Context Menu ── */
+  .ctx-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999; /* below context-menu (z-index 1000) but above everything else */
+    background: transparent;
+    cursor: default;
+  }
+
   .context-menu {
     position: fixed;
     z-index: 1000;
