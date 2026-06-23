@@ -1,13 +1,10 @@
 <script>
-  import { createEventDispatcher, onMount } from 'svelte';
-  import { BACKUP_INTERVAL_OPTIONS, BACKUP_INTERVAL_DEFAULT, getStoredIntervalMin, setStoredIntervalMin, getStoredAutoEnabled, setStoredAutoEnabled } from '../lib/autoBackup.js';
+  import { BACKUP_INTERVAL_OPTIONS, getStoredIntervalMin, setStoredIntervalMin, getStoredAutoEnabled, setStoredAutoEnabled } from '../lib/autoBackup.js';
 
   export let sessionId = '';
   export let open = false;
-  /** Called with the restored data object when user restores a backup. */
+  /** Called after a successful restore. */
   export let onRestore = null;
-
-  const dispatch = createEventDispatcher();
 
   // ── State ────────────────────────────────────────────────
   let backups = [];
@@ -19,6 +16,9 @@
 
   let autoEnabled = getStoredAutoEnabled();
   let intervalMin = getStoredIntervalMin();
+
+  // Inline confirm dialog state
+  let confirmAction = null; // { label: string, onConfirm: () => void }
 
   // ── Reactive: persist settings to localStorage ───────────
   $: { setStoredAutoEnabled(autoEnabled); }
@@ -73,14 +73,23 @@
   }
 
   // ── Restore ──────────────────────────────────────────────
-  async function restore(ts) {
-    if (!confirm('Restore this backup? Current unsaved changes will be lost.')) return;
+  function askRestore(ts) {
+    confirmAction = {
+      label: 'Restore this backup? Current unsaved changes will be lost.',
+      confirmText: 'Restore',
+      danger: false,
+      onConfirm: () => doRestore(ts),
+    };
+  }
+
+  async function doRestore(ts) {
+    confirmAction = null;
     restoringTs = ts;
     errorMsg = '';
     try {
       const data = await apiFetch('POST', `/sessions/${sessionId}/backup/${ts}/restore`);
       open = false;
-      if (onRestore) onRestore(data);
+      if (onRestore) await onRestore(data);
     } catch (e) {
       errorMsg = `Restore failed: ${e.message}`;
     } finally {
@@ -89,8 +98,17 @@
   }
 
   // ── Delete ───────────────────────────────────────────────
-  async function deleteBackup(ts) {
-    if (!confirm('Delete this backup? This cannot be undone.')) return;
+  function askDelete(ts) {
+    confirmAction = {
+      label: 'Delete this backup? This cannot be undone.',
+      confirmText: 'Delete',
+      danger: true,
+      onConfirm: () => doDelete(ts),
+    };
+  }
+
+  async function doDelete(ts) {
+    confirmAction = null;
     deletingTs = ts;
     errorMsg = '';
     try {
@@ -175,7 +193,7 @@
               <button
                 class="backup-action-btn backup-restore-btn"
                 title="Restore this backup"
-                on:click={() => restore(b.ts)}
+                on:click={() => askRestore(b.ts)}
                 disabled={restoringTs === b.ts || deletingTs === b.ts}
               >
                 {restoringTs === b.ts ? '⏳' : '↩'}
@@ -183,13 +201,27 @@
               <button
                 class="backup-action-btn backup-delete-btn"
                 title="Delete this backup"
-                on:click={() => deleteBackup(b.ts)}
+                on:click={() => askDelete(b.ts)}
                 disabled={restoringTs === b.ts || deletingTs === b.ts}
               >
                 {deletingTs === b.ts ? '⏳' : '🗑'}
               </button>
             </div>
           {/each}
+        </div>
+      {/if}
+
+      {#if confirmAction}
+        <div class="backup-confirm">
+          <p class="backup-confirm-msg">{confirmAction.label}</p>
+          <div class="backup-confirm-btns">
+            <button class="backup-confirm-cancel" on:click={() => confirmAction = null}>Cancel</button>
+            <button
+              class="backup-confirm-ok"
+              class:backup-confirm-danger={confirmAction.danger}
+              on:click={confirmAction.onConfirm}
+            >{confirmAction.confirmText}</button>
+          </div>
         </div>
       {/if}
     </div>
@@ -350,4 +382,56 @@
 
   .backup-delete-btn { color: #e57373; }
   .backup-delete-btn:hover:not(:disabled) { background: #2a1515; border-color: #5a2020; }
+
+  .backup-confirm {
+    background: #0d1420;
+    border: 1px solid #2a3550;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .backup-confirm-msg {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #c8d0e0;
+  }
+
+  .backup-confirm-btns {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+  }
+
+  .backup-confirm-cancel,
+  .backup-confirm-ok {
+    border-radius: 5px;
+    padding: 0.3rem 0.8rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    border: 1px solid;
+  }
+
+  .backup-confirm-cancel {
+    background: #1a2235;
+    border-color: #2a3550;
+    color: #8898b0;
+  }
+  .backup-confirm-cancel:hover { background: #1e293a; }
+
+  .backup-confirm-ok {
+    background: #1e3a5f;
+    border-color: #2e5090;
+    color: #90c4f8;
+  }
+  .backup-confirm-ok:hover { background: #244a7a; }
+
+  .backup-confirm-ok.backup-confirm-danger {
+    background: #4a1515;
+    border-color: #8a2020;
+    color: #f87070;
+  }
+  .backup-confirm-ok.backup-confirm-danger:hover { background: #5a1818; }
 </style>

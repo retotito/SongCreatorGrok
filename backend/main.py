@@ -3980,17 +3980,16 @@ async def backup_restore(session_id: str, ts: int):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Backup not found")
 
-    # Parse the backup .txt to extract notes / BPM / GAP
+    # Parse the backup .txt to extract BPM / GAP
+    from services.reference_comparison import parse_ultrastar_file
     parsed = parse_ultrastar_file(txt_content)
     restored_bpm = float(parsed.get("bpm", result["bpm"]))
     restored_gap = int(float(parsed.get("gap", result["gap_ms"])))
-    restored_notes = parsed.get("notes", [])
 
     # Overwrite session result
     result["ultrastar_content"] = txt_content
     result["bpm"] = restored_bpm
     result["gap_ms"] = restored_gap
-    result["syllable_timings"] = restored_notes
     result["has_edits"] = True
     result["edit_count"] = result.get("edit_count", 0) + 1
     result["last_saved"] = time.time()
@@ -4008,14 +4007,13 @@ async def backup_restore(session_id: str, ts: int):
     result["corrected_txt_file"] = txt_filename
 
     save_session(session_id)
-    log_step("BACKUP", f"Session {session_id}: restored backup_{ts}.txt → BPM={restored_bpm} GAP={restored_gap} notes={len(restored_notes)}")
+    log_step("BACKUP", f"Session {session_id}: restored backup_{ts}.txt → BPM={restored_bpm} GAP={restored_gap}")
 
     return {
         "status": "ok",
         "bpm": restored_bpm,
         "gap_ms": restored_gap,
         "ultrastar_content": txt_content,
-        "notes": restored_notes,
     }
 
 

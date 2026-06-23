@@ -9844,14 +9844,10 @@
     <BackupModal
       bind:open={backupModalOpen}
       sessionId={$sessionId}
-      onRestore={(data) => {
-        if (data.bpm) bpm = data.bpm;
-        if (data.gap_ms != null) gapMs = data.gap_ms;
-        if (data.notes) {
-          notes = data.notes.map(n => ({ ...n, id: n.id ?? noteIdCounter++ }));
-        }
+      onRestore={async () => {
+        // Reload editor state fresh from backend after restore
+        await loadData();
         hasUnsavedChanges = false;
-        draw();
       }}
     />
 
