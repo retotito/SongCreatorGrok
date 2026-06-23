@@ -2766,9 +2766,21 @@
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
       }
 
-      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.lineWidth = 1;
       ctx.fillRect(x, y - noteHeight / 2, width, noteHeight);
-      ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
+
+      if (isSelected) {
+        ctx.save();
+        ctx.strokeStyle = '#ffe082';
+        ctx.lineWidth = 1.5;
+        const r = 3;
+        ctx.beginPath();
+        ctx.roundRect(x - 1, y - noteHeight / 2 - 1, width + 2, noteHeight + 2, r);
+        ctx.stroke();
+        ctx.restore();
+      } else {
+        ctx.strokeRect(x, y - noteHeight / 2, width, noteHeight);
+      }
 
       // Find widget highlight overlay
       if (showFindWidget && findMatches.length) {
@@ -10061,6 +10073,23 @@
   <SelectionPanel
     count={selectedNotes.size > 1 ? selectedNotes.size : (selectedNote !== null ? 1 : 0)}
     onDeselect={() => { clearMarkerSelection(); draw(); }}
+    onGoTo={() => {
+      const targetId = selectedNote ?? (selectedNotes.size > 0 ? [...selectedNotes][0] : null);
+      const note = targetId !== null ? notes.find(n => n.id === targetId) : null;
+      if (note) {
+        // Find leftmost note if multi-select
+        let minBeat = note.startBeat;
+        if (selectedNotes.size > 1) {
+          for (const id of selectedNotes) {
+            const n = notes.find(n => n.id === id);
+            if (n && n.startBeat < minBeat) minBeat = n.startBeat;
+          }
+        }
+        ensureBeatVisible(minBeat, 80);
+        scrollX = clampScrollX(minBeat * zoom - (canvasEl?.width || canvasW || 800) / 2);
+        draw();
+      }
+    }}
   />
 
   <!-- Context Menu -->

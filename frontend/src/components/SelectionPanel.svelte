@@ -3,6 +3,7 @@
 
   export let count = 0; // total selected notes (0 = hidden)
   export let onDeselect = () => {};
+  export let onGoTo = () => {};
 
   const STORAGE_KEY = 'editor_selection_panel_pos';
 
@@ -31,6 +32,7 @@
 
   // Drag logic
   let dragging = false;
+  let dragMoved = false;
   let dragOffX = 0;
   let dragOffY = 0;
 
@@ -40,6 +42,7 @@
     e.preventDefault();
     e.stopPropagation();
     dragging = true;
+    dragMoved = false;
     dragOffX = e.clientX - x;
     dragOffY = e.clientY - y;
     window.addEventListener('mousemove', onMouseMove);
@@ -48,6 +51,9 @@
 
   function onMouseMove(e) {
     if (!dragging) return;
+    const dx = Math.abs(e.clientX - dragOffX - x);
+    const dy = Math.abs(e.clientY - dragOffY - y);
+    if (dx > 4 || dy > 4) dragMoved = true;
     x = e.clientX - dragOffX;
     y = e.clientY - dragOffY;
     // Clamp to viewport
@@ -60,10 +66,16 @@
 
   function onMouseUp() {
     if (!dragging) return;
+    const wasClick = !dragMoved;
     dragging = false;
+    dragMoved = false;
     window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
-    savePos();
+    if (wasClick) {
+      onGoTo();
+    } else {
+      savePos();
+    }
   }
 
   function handleCloseClick(e) {
