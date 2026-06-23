@@ -8,6 +8,8 @@
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
   import { parseUltrastar, notesToUltrastar } from '../lib/ultrastar.js';
   import { medianPitch, groupPitchFrames, mergePlaceholderNotes, trimPlaceholdersAgainstNotes, buildPitchSplitGroups, splitPlaceholderNotesByPitchRuns } from '../lib/pitchUtils.js';
+  import { createAutoBackup, getStoredIntervalMin, getStoredAutoEnabled } from '../lib/autoBackup.js';
+  import BackupModal from './BackupModal.svelte';
 
   // In packaged Tauri there is no Vite proxy — call the backend directly.
   const API_BASE = (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)
@@ -1502,6 +1504,10 @@
   let showNotesModal = false;
   let sessionNotes = '';
 
+  // Backup modal
+  let backupModalOpen = false;
+  let autoBackupInstance = null;
+
   // Find widget — UI extracted to FindWidget.svelte
   let showFindWidget = false;
   let findMatches = [];
@@ -1804,6 +1810,7 @@
   function markUnsaved() {
     hasUnsavedChanges = true;
     editorState.update(s => ({ ...s, hasChanges: true }));
+    autoBackupInstance?.markChanged();
   }
 
   // ──── Undo / Redo ───────────────────────────
@@ -9257,6 +9264,16 @@
 
   onMount(() => {
     console.log('[Step4] onMount');
+    // Start auto-backup timer
+    autoBackupInstance = createAutoBackup({
+      getIntervalMs: () => getStoredIntervalMin() * 60_000,
+      isEnabled: () => getStoredAutoEnabled(),
+      onBackup: async () => {
+        if (!$sessionId) return;
+        await fetch(`${API_BASE}/sessions/${$sessionId}/backup`, { method: 'POST' });
+        console.log('[AutoBackup] auto-backup created');
+      },
+    });
     scrollViewportToTop();
     if (canvasEl) {
       ctx = canvasEl.getContext('2d');
@@ -9314,6 +9331,7 @@
     window.removeEventListener('mousemove', segRegenModalMouseMove);
     window.removeEventListener('mouseup', segRegenModalMouseUp);
     stopMic();
+    autoBackupInstance?.destroy();
   });
 
   // ── Recording modal drag ──
@@ -9707,6 +9725,9 @@
           <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; loadSessionNotes(); showNotesModal = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; backupModalOpen = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Song backups'}>
+           Backups&nbsp;🕐
+        </button>
       </div>
     </div>
     <div class="toolbar-toolset-wrapper">
@@ -9818,6 +9839,20 @@
       on:jump={({ detail }) => { const cw = canvasEl?.width || 800; scrollX = Math.max(0, detail.note.startBeat * zoom - cw / 2); draw(); }}
       on:close={draw}
       on:redraw={draw}
+    />
+
+    <BackupModal
+      bind:open={backupModalOpen}
+      sessionId={$sessionId}
+      onRestore={(data) => {
+        if (data.bpm) bpm = data.bpm;
+        if (data.gap_ms != null) gapMs = data.gap_ms;
+        if (data.notes) {
+          notes = data.notes.map(n => ({ ...n, id: n.id ?? noteIdCounter++ }));
+        }
+        hasUnsavedChanges = false;
+        draw();
+      }}
     />
 
     {#if micStarting}

@@ -140,6 +140,21 @@
                       </div>
                     </details>
                   {/if}
+                  {#if (s.backup_files || []).length > 0}
+                    {@const bkSize = s.backup_files.reduce((acc, f) => acc + f.size, 0)}
+                    <details class="sm-file-details">
+                      <summary>{s.backup_files.length} backup file{s.backup_files.length !== 1 ? 's' : ''} · {fmt(bkSize)}</summary>
+                      <div class="sm-file-list">
+                        {#each s.backup_files as f}
+                          <div class="sm-file-row">
+                            <span class="sm-file-label">backup</span>
+                            <span class="sm-file-name sm-mono">{f.path.split(/[\\/]/).pop()}</span>
+                            <span class="sm-file-size">{fmt(f.size)}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    </details>
+                  {/if}
                 </div>
                 {#if !isCurrent}
                   <button

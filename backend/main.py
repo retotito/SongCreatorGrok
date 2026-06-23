@@ -780,6 +780,10 @@ async def delete_session_endpoint(session_id: str):
     if os.path.isdir(upload_dir):
         shutil.rmtree(upload_dir, ignore_errors=True)
 
+    # Remove backup snapshots
+    from services.backup_service import delete_all_backups as _delete_all_backups
+    _delete_all_backups(SESSIONS_DIR, session_id)
+
     # Remove generated files tracked in result
     result = session.get("result", {})
     tracked = set()
@@ -932,7 +936,11 @@ async def get_storage_info():
                 if os.path.exists(p):
                     files.append({"label": key, "path": p, "size": _file_size(p)})
 
-        total_size = upload_size + sum(f["size"] for f in files)
+        # Backup files
+        from services.backup_service import get_backup_files_for_storage as _backup_files
+        backup_files, backups_size = _backup_files(SESSIONS_DIR, sid)
+
+        total_size = upload_size + sum(f["size"] for f in files) + backups_size
 
         session_rows.append({
             "id": sid,
@@ -942,6 +950,7 @@ async def get_storage_info():
             "created_at": s.get("created_at", 0),
             "total_size_bytes": total_size,
             "files": files,
+            "backup_files": backup_files,
         })
 
     session_rows.sort(key=lambda x: x["created_at"], reverse=True)
@@ -3907,6 +3916,106 @@ async def save_editor_state(session_id: str, request: Request):
         "edit_count": result["edit_count"],
         "last_saved": result["last_saved"],
         "txt_file": txt_filename,
+    }
+
+
+# ────────────────────────────────────────────────────────────
+# Session Backups
+# ────────────────────────────────────────────────────────────
+from services.backup_service import (
+    create_backup as _create_backup,
+    list_backups as _list_backups,
+    delete_backup as _delete_backup,
+    restore_backup as _restore_backup,
+)
+
+
+@app.post("/api/sessions/{session_id}/backup")
+async def backup_create(session_id: str):
+    """Snapshot the current UltraStar .txt content for this session."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    result = session.get("result")
+    if not result or not result.get("ultrastar_content"):
+        raise HTTPException(status_code=400, detail="No song data to back up")
+    entry = _create_backup(SESSIONS_DIR, session_id, result["ultrastar_content"])
+    log_step("BACKUP", f"Session {session_id}: created backup {entry['filename']}")
+    return {"status": "ok", "backup": entry}
+
+
+@app.get("/api/sessions/{session_id}/backups")
+async def backup_list(session_id: str):
+    """List all backups for this session, newest first."""
+    if not sessions.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    backups = _list_backups(SESSIONS_DIR, session_id)
+    return {"status": "ok", "backups": backups}
+
+
+@app.delete("/api/sessions/{session_id}/backup/{ts}")
+async def backup_delete(session_id: str, ts: int):
+    """Delete a single backup by timestamp."""
+    if not sessions.get(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    deleted = _delete_backup(SESSIONS_DIR, session_id, ts)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    log_step("BACKUP", f"Session {session_id}: deleted backup_{ts}.txt")
+    return {"status": "ok"}
+
+
+@app.post("/api/sessions/{session_id}/backup/{ts}/restore")
+async def backup_restore(session_id: str, ts: int):
+    """Restore a backup: overwrite the session's ultrastar_content and persist."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    result = session.get("result")
+    if not result:
+        raise HTTPException(status_code=400, detail="No generation result to restore into")
+
+    try:
+        txt_content = _restore_backup(SESSIONS_DIR, session_id, ts)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Backup not found")
+
+    # Parse the backup .txt to extract notes / BPM / GAP
+    parsed = parse_ultrastar_file(txt_content)
+    restored_bpm = float(parsed.get("bpm", result["bpm"]))
+    restored_gap = int(float(parsed.get("gap", result["gap_ms"])))
+    restored_notes = parsed.get("notes", [])
+
+    # Overwrite session result
+    result["ultrastar_content"] = txt_content
+    result["bpm"] = restored_bpm
+    result["gap_ms"] = restored_gap
+    result["syllable_timings"] = restored_notes
+    result["has_edits"] = True
+    result["edit_count"] = result.get("edit_count", 0) + 1
+    result["last_saved"] = time.time()
+
+    # Write a new .txt file to downloads
+    old_txt = result.get("txt_file")
+    timestamp = int(time.time())
+    txt_filename = f"song_{timestamp}.txt"
+    txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(txt_content)
+    if old_txt and old_txt != txt_filename:
+        _safe_unlink_download_name(old_txt)
+    result["txt_file"] = txt_filename
+    result["corrected_txt_file"] = txt_filename
+
+    save_session(session_id)
+    log_step("BACKUP", f"Session {session_id}: restored backup_{ts}.txt → BPM={restored_bpm} GAP={restored_gap} notes={len(restored_notes)}")
+
+    return {
+        "status": "ok",
+        "bpm": restored_bpm,
+        "gap_ms": restored_gap,
+        "ultrastar_content": txt_content,
+        "notes": restored_notes,
     }
 
 
