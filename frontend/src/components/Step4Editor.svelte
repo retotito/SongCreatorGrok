@@ -63,7 +63,7 @@
   let zoom = 20;          // pixels per beat (default zoomed in)
   // viewHeight grows with waveformHeight so the note grid stays a fixed size
   $: viewHeight = 533 + DOWNBEAT_HANDLE_H + (showWaveform ? waveformHeight : 0);
-  let noteHeight = 11;
+  let noteHeight = 18;
 
   // Pitch range (MIDI)
   let minPitch = 36;     // C2
@@ -2804,9 +2804,14 @@
       if (zoom > 1 && width > 10) {
         const hasTrailingSpace = note.syllable.endsWith(' ');
         const displayText = note.syllable.trim() + (hasTrailingSpace ? '·' : '');
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y - noteHeight / 2, width - 4, noteHeight);
+        ctx.clip();
         ctx.fillStyle = hasTrailingSpace ? '#7ecbf7' : '#eee';
-        ctx.font = '10px sans-serif';
-        ctx.fillText(displayText, x + 2, y + 3);
+        ctx.font = '12px sans-serif';
+        ctx.fillText(displayText, x + 4, y + 4);
+        ctx.restore();
       }
 
       // Red dot indicator: this note has no trailing space (word continues into next note)
