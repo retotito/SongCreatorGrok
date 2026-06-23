@@ -62,8 +62,8 @@
   // View state
   let scrollX = 0;
   let zoom = 20;          // pixels per beat (default zoomed in)
-  // viewHeight grows with waveformHeight so the note grid stays a fixed size
-  $: viewHeight = 533 + DOWNBEAT_HANDLE_H + (showWaveform ? waveformHeight : 0);
+  // viewHeight is driven by the canvas-container's actual clientHeight (set in resizeCanvas)
+  let viewHeight = 600;
   let noteHeight = 11;
 
   // Pitch range (MIDI)
@@ -8956,6 +8956,7 @@
     if (!canvasEl) return;
     canvasEl.width = canvasEl.parentElement.clientWidth;
     canvasW = canvasEl.width;
+    viewHeight = canvasEl.parentElement.clientHeight;
     canvasEl.height = viewHeight;
     //console.log(`[Resize] Canvas ${canvasEl.width}x${canvasEl.height}`);
     draw();
@@ -9439,8 +9440,7 @@
     loadData();
   }
 
-  // Resize canvas whenever viewHeight changes (e.g. waveform height slider)
-  $: if (canvasEl && viewHeight) { resizeCanvas(); draw(); }
+  // (viewHeight is now set inside resizeCanvas from container clientHeight)
 </script>
 
 <div class="step-content">
@@ -9587,7 +9587,7 @@
         Scroll
       </label> -->
       <!-- <label>
-        <input type="checkbox" bind:checked={showWaveform} on:change={() => { console.log('[UI] waveform', showWaveform); draw(); }} />
+        <input type="checkbox" bind:checked={showWaveform} on:change={() => { console.log('[UI] waveform', showWaveform); resizeCanvas(); draw(); }} />
         Wave
       </label> -->
       
@@ -10729,6 +10729,9 @@
   .step-content {
     max-width: 100%;
     margin: 0 auto;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
   }
 
   .editor-busy-shield {
@@ -11574,6 +11577,8 @@
     border-top: none;
     overflow: hidden;
     cursor: crosshair;
+    flex: 1;
+    min-height: 0;
   }
 
   .active-mode-badge {

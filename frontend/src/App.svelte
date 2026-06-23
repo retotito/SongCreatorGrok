@@ -196,6 +196,15 @@
   .app.full-width {
     max-width: 100%;
     padding: 0.5rem;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app.full-width > main {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
   main {
