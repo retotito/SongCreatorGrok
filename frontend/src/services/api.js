@@ -339,6 +339,10 @@ export async function cleanupDebugData() {
   return request('POST', '/cleanup-debug');
 }
 
+export async function deleteModelCache(path) {
+  return request('DELETE', '/model-cache', { path });
+}
+
 // ─── Step 5: Export ────────────────────────────
 export async function exportFiles(sessionId, correctedContent = null) {
   if (correctedContent) {

@@ -1,7 +1,8 @@
 <script>
   import { createEventDispatcher, onMount } from 'svelte';
-  import { getStorageInfo, cleanupOrphans, cleanupDebugData, deleteSession } from '../services/api.js';
+  import { getStorageInfo, cleanupOrphans, cleanupDebugData, deleteSession, deleteModelCache } from '../services/api.js';
   import { sessionId as currentSessionId } from '../stores/appStore.js';
+  import { showConfirm } from '../stores/dialogStore.js';
 
   const dispatch = createEventDispatcher();
 
@@ -13,6 +14,8 @@
   let debugCleanupRunning = false;
   let debugCleanupResult = null;
   let deletingId = null;
+  let deletingModelPath = null;
+  let modelDeleteError = '';
 
   function fmt(bytes) {
     if (bytes == null || bytes < 0) return '0 B';
@@ -73,7 +76,8 @@
   }
 
   async function doDelete(sid) {
-    if (!confirm(`Delete session "${sid}"? This removes all its files.`)) return;
+    const ok = await showConfirm(`Delete session "${sid}"? This removes all its files.`, { confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
     deletingId = sid;
     error = '';
     try {
@@ -83,6 +87,21 @@
       error = e.message;
     } finally {
       deletingId = null;
+    }
+  }
+
+  async function doDeleteModel(m) {
+    const ok = await showConfirm(`Delete "${m.name}" (${fmt(m.size)}) from your system cache? This cannot be undone — you will need to re-download it to use it again.`, { confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    deletingModelPath = m.path;
+    modelDeleteError = '';
+    try {
+      await deleteModelCache(m.path);
+      await load();
+    } catch (e) {
+      modelDeleteError = e.message;
+    } finally {
+      deletingModelPath = null;
     }
   }
 
@@ -247,6 +266,32 @@
           </div>
         {/if}
       </div>
+
+      <!-- AI Models -->
+      {#if (info.models || []).length > 0}
+        {@const totalModelSize = info.models.reduce((acc, m) => acc + (m.size || 0), 0)}
+        <div class="sm-section">
+          <div class="sm-section-title">🤖 AI Models <span class="sm-orphan-badge sm-orphan-clean">{fmt(totalModelSize)}</span></div>
+          <p class="sm-hint">Downloaded model files used for vocal separation, transcription, and alignment. These live in your system cache and are shared across tools.</p>
+          {#if modelDeleteError}<p class="sm-error">❌ {modelDeleteError}</p>{/if}
+          <div class="sm-file-list">
+            {#each info.models as m}
+              {@const inUse = m.name.includes('faster-whisper-medium') || m.name.includes('Demucs') || m.name.includes('Alignment')}
+              <div class="sm-file-row">
+                <span class="sm-file-label">{m.name}{#if inUse} <span class="sm-badge" title="Used by this app">in use</span>{/if}</span>
+                <span class="sm-file-name sm-mono" title={m.path}>{m.path.replace(/.*[\\/]/, '…/')}</span>
+                <span class="sm-file-size">{fmt(m.size)}</span>
+                <button
+                  class="sm-btn sm-btn-danger sm-btn-sm"
+                  on:click={() => doDeleteModel(m)}
+                  disabled={deletingModelPath === m.path}
+                  title="Delete from system cache"
+                >{deletingModelPath === m.path ? '⏳' : '🗑'}</button>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
 
       <!-- Storage paths -->
       <div class="sm-section">

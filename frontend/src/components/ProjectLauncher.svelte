@@ -3,7 +3,9 @@
   import { currentStep, sessionId, uploadData, lyricsData, generationResult, resetSession } from '../stores/appStore.js';
   import { checkHealth, listSessions, deleteSession, importUltrastar, resumeSession, getAudioUrl } from '../services/api.js';
   import { showConfirm } from '../stores/dialogStore.js';
+  import StorageManager from './StorageManager.svelte';
 
+  let showStorage = false;
   let sessions = [];
   let loading = true;
   let backendOnline = false;
@@ -226,6 +228,8 @@
 </script>
 
 <div class="launcher">
+  <button class="launcher-gear" on:click={() => showStorage = !showStorage} title="Storage Manager">⚙️</button>
+  {#if showStorage}<StorageManager on:close={() => showStorage = false} />{/if}
   <div class="hero">
     <h1>🎤 UltrastarCreatorTool</h1>
     <p class="subtitle">Create and edit Ultrastar karaoke songs with AI</p>
@@ -357,6 +361,25 @@
     max-width: 700px;
     margin: 0 auto;
     padding: 2rem 1rem;
+    position: relative;
+  }
+
+  .launcher-gear {
+    position: absolute;
+    top: 0.75rem;
+    right: 0;
+    background: none;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #aaa;
+    font-size: 1.1rem;
+    padding: 0.3rem 0.5rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .launcher-gear:hover {
+    background: #1e2a3a;
+    color: #fff;
   }
 
   .hero {

@@ -870,6 +870,113 @@ async def delete_session_endpoint(session_id: str):
     return {"status": "ok"}
 
 
+def _get_model_info() -> list:
+    """Return a list of known AI model cache entries with name, path, and size."""
+    import glob as _glob
+
+    def _dir_size_fast(path: str) -> int:
+        total = 0
+        try:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
+    # Resolve cache dirs — honour env var overrides used by PyTorch / HuggingFace
+    home = os.path.expanduser("~")
+    _torch_home = os.environ.get("TORCH_HOME") or os.path.join(home, ".cache", "torch")
+    torch_checkpoints = os.path.join(_torch_home, "hub", "checkpoints")
+    _hf_home = (os.environ.get("HF_HOME")
+                or os.environ.get("HUGGINGFACE_HUB_CACHE")
+                or os.path.join(home, ".cache", "huggingface"))
+    hf_hub = os.path.join(_hf_home, "hub") if not os.environ.get("HUGGINGFACE_HUB_CACHE") else _hf_home
+
+    entries = []
+
+    # Demucs htdemucs (~80 MB) — identified by known filename prefix
+    demucs_candidates = _glob.glob(os.path.join(torch_checkpoints, "955717e8*"))
+    for p in demucs_candidates:
+        entries.append({
+            "name": "Demucs (htdemucs vocal separation)",
+            "path": p,
+            "size": os.path.getsize(p) if os.path.isfile(p) else _dir_size_fast(p),
+            "present": os.path.exists(p),
+        })
+
+    # WhisperX Faster-Whisper models (HuggingFace cache)
+    for hf_model_dir in _glob.glob(os.path.join(hf_hub, "models--Systran--faster-whisper-*")):
+        model_variant = hf_model_dir.split("faster-whisper-")[-1]
+        entries.append({
+            "name": f"WhisperX (faster-whisper-{model_variant})",
+            "path": hf_model_dir,
+            "size": _dir_size_fast(hf_model_dir),
+            "present": True,
+        })
+
+    # Wav2vec2 alignment models (~360 MB each)
+    wav2vec_names = {
+        "wav2vec2_fairseq_base_ls960_asr_ls960.pth": "Alignment model — English (wav2vec2)",
+        "wav2vec2_voxpopuli_base_10k_asr_de.pt":    "Alignment model — German (wav2vec2)",
+        "wav2vec2_voxpopuli_base_10k_asr_fr.pt":    "Alignment model — French (wav2vec2)",
+    }
+    for fname, label in wav2vec_names.items():
+        p = os.path.join(torch_checkpoints, fname)
+        if os.path.exists(p):
+            entries.append({
+                "name": label,
+                "path": p,
+                "size": os.path.getsize(p),
+                "present": True,
+            })
+
+    return entries
+
+
+@app.delete("/api/model-cache")
+async def delete_model_cache(request: Request):
+    """Delete a cached AI model directory or file by path.
+
+    Only paths that are inside known model cache directories (~/.cache/torch/hub
+    and ~/.cache/huggingface/hub) are allowed — no arbitrary path deletion.
+    """
+    body = await request.json()
+    path = body.get("path", "")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    abs_path = os.path.abspath(os.path.expanduser(path))
+    home = os.path.expanduser("~")
+    _torch_home = os.environ.get("TORCH_HOME") or os.path.join(home, ".cache", "torch")
+    _hf_home = (os.environ.get("HF_HOME")
+                or os.environ.get("HUGGINGFACE_HUB_CACHE")
+                or os.path.join(home, ".cache", "huggingface"))
+    _hf_hub = os.path.join(_hf_home, "hub") if not os.environ.get("HUGGINGFACE_HUB_CACHE") else _hf_home
+    allowed_roots = [
+        os.path.abspath(os.path.join(_torch_home, "hub", "checkpoints")),
+        os.path.abspath(_hf_hub),
+    ]
+    if not any(abs_path.startswith(root + os.sep) or abs_path == root for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="Path is outside allowed model cache directories")
+
+    if not os.path.exists(abs_path):
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    try:
+        if os.path.isdir(abs_path):
+            shutil.rmtree(abs_path)
+        else:
+            os.remove(abs_path)
+        log_step("MODEL_DELETE", f"Deleted model cache: {abs_path}")
+        return {"status": "ok", "deleted": abs_path}
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/storage-info")
 async def get_storage_info():
     """Return per-session disk usage and data directory paths for the storage manager."""
@@ -1004,6 +1111,7 @@ async def get_storage_info():
         "orphan_size_bytes": orphan_size,
         "debug_files": debug_files,
         "debug_size_bytes": debug_size,
+        "models": _get_model_info(),
     }
 
 
