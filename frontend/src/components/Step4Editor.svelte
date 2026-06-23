@@ -6727,9 +6727,18 @@
           }
         }
         if (selectedNoteObjects.length >= 1) {
-          const movedStart = Math.min(...selectedNoteObjects.map(n => n.startBeat + (isHorizontalMove ? moveDelta : 0)));
           const w = canvasEl?.width || canvasW || 800;
-          scrollX = clampScrollX(movedStart * zoom - w / 2);
+          const movedNotes = selectedNoteObjects.map(n => ({
+            start: (n.startBeat + (isHorizontalMove ? moveDelta : 0)) * zoom,
+            end: (n.startBeat + (isHorizontalMove ? moveDelta : 0) + n.duration) * zoom,
+          }));
+          const anyPartiallyVisible = movedNotes.some(n =>
+            n.start - scrollX < w && n.end - scrollX > 0
+          );
+          if (!anyPartiallyVisible) {
+            const movedStart = Math.min(...movedNotes.map(n => n.start));
+            scrollX = clampScrollX(movedStart - w / 2);
+          }
         }
         markUnsaved();
         updatePitchRange();
