@@ -3357,14 +3357,12 @@
         draw();
         return;
       }
-      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
 
     // Alt+click anywhere → seek playhead
     if (event.altKey) {
-      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
@@ -3372,7 +3370,6 @@
     // ── No note editing during playback ──
     if (isPlaying) {
       // Only allow seeking (handled above) — block note selection/dragging
-      clearMarkerSelection();
       seekToTime(beatToTime(beat));
       return;
     }
@@ -3537,7 +3534,6 @@
         boxSelectEnd = { x: mx, y: my };
         console.log('[Mouse] Start box selection');
       } else {
-        clearMarkerSelection();
         seekToTime(beatToTime(beat));
         console.log(`[Mouse] No note — seek to beat ${beat.toFixed(1)}`);
       }
