@@ -75,7 +75,7 @@
   // ── Restore ──────────────────────────────────────────────
   function askRestore(ts) {
     confirmAction = {
-      label: 'Restore this backup? Current unsaved changes will be lost.',
+      label: `Restore backup from ${fmtDate(ts)}?`,
       confirmText: 'Restore',
       danger: false,
       onConfirm: () => doRestore(ts),
