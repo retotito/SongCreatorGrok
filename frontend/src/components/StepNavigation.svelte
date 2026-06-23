@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentStep, steps, canGoToStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
+  import { currentStep, steps, canGoToStep, uploadData, recordingActive, storageManagerOpen, editorHelpOpen } from '../stores/appStore.js';
   import StorageManager from './StorageManager.svelte';
 
   let showStorage = false;
@@ -103,6 +103,7 @@
       </div>
     {/if}
     <button class="gear-btn" on:click={() => showStorage = !showStorage} title="Storage Manager">⚙️</button>
+    <button class="gear-btn" on:click={() => editorHelpOpen.set(true)} title="Help &amp; Shortcuts">ℹ️</button>
   </div>
 </div>
 

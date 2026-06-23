@@ -110,6 +110,7 @@ export const generationUseCleaned = writable(false);
 
 // Global UI overlays that should suspend editor-wide shortcuts
 export const storageManagerOpen = writable(false);
+export const editorHelpOpen = writable(false);
 
 // Steps definition (Step 3 is a modal overlay, not a tab)
 export const steps = [

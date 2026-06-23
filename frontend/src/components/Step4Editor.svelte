@@ -3,7 +3,8 @@
   import FindWidget from './FindWidget.svelte';
   import ShortcutBar from './ShortcutBar.svelte';
   import SelectionPanel from './SelectionPanel.svelte';
-  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen } from '../stores/appStore.js';
+  import EditorHelpModal from './EditorHelpModal.svelte';
+  import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen, editorHelpOpen } from '../stores/appStore.js';
   import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
   import { SUPPORTED_LANGUAGES } from '../lib/languages';
@@ -6387,6 +6388,7 @@
     if (showTextEditor) return;
     if (showNotesModal) return;
     if ($storageManagerOpen) return;
+    if ($editorHelpOpen) return;
     // Skip shortcuts when typing in a text/number input field (BPM, GAP, context menu, etc.)
     // For range inputs: only block arrow keys (which move the slider); let all other shortcuts through
     if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') {
@@ -10412,32 +10414,6 @@
     </div>
   </div>
 
-  <div class="legend">
-    <span class="legend-item"><span class="dot blue"></span> Normal note</span>
-    <span class="legend-item"><span class="dot yellow"></span> Edited note</span>
-    <span class="legend-item"><span class="dot gold"></span> Golden note</span>
-    <span class="legend-item"><span class="dot orange"></span> Rap note</span>
-    <span class="legend-item"><span class="dot red-line"></span> Break line</span>
-    <span class="legend-item"><span class="dot green-flag"></span> Flag</span>
-    <span class="legend-item"><span class="dot cleanup-range"></span> Cleanup segment</span>
-    <span class="legend-item"><span class="dot recorded-range"></span> Recorded segment</span>
-  </div>
-
-  <!-- Stats bar for debugging timing -->
-  {#if notes.length > 0}
-    {@const realNotes = notes.filter(n => n.type !== 'break')}
-    {@const firstBeat = realNotes.length > 0 ? realNotes[0].startBeat : 0}
-    {@const lastNote = realNotes.length > 0 ? realNotes[realNotes.length - 1] : null}
-    {@const lastBeat = lastNote ? lastNote.startBeat + lastNote.duration : 0}
-    {@const firstTimeSec = gapMs / 1000 + (firstBeat * 60) / bpm}
-    {@const lastTimeSec = gapMs / 1000 + (lastBeat * 60) / bpm}
-    <div class="stats-bar">
-      <span>
-        {bpmChanged ? '⚠ Modified: ' : 'Generated: '}BPM {(bpm ?? 0).toFixed(1)}{bpmChanged ? ` (was ${(initialBpm ?? 0).toFixed(1)})` : ''} | GAP {gapMs ?? 0}ms{bpmChanged ? ` (was ${initialGap ?? 0}ms)` : ''} | Notes {firstBeat}–{lastBeat} beats | {formatTime(firstTimeSec)}–{formatTime(lastTimeSec)} | Audio {formatTime(audioDuration)}
-      </span>
-    </div>
-  {/if}
-
   <!-- Hidden audio element for playback -->
   <audio bind:this={audioEl} src={currentAudioUrl} preload="auto"
     on:canplay={() => {
@@ -10529,7 +10505,9 @@
     </div>
   {/if}
 
-  <ShortcutBar />
+  {#if $editorHelpOpen}
+    <EditorHelpModal onClose={() => editorHelpOpen.set(false)} />
+  {/if}
 
   <!-- Text Editor Modal -->
   {#if showNotesModal}
@@ -11805,56 +11783,6 @@
     z-index: 2;
   }
 
-  .legend {
-    display: flex;
-    gap: 1.5rem;
-    padding: 0.5rem;
-    background: #1a1a2e;
-    border: 1px solid #333;
-    border-top: none;
-    border-radius: 0 0 8px 8px;
-    font-size: 0.8rem;
-    color: #888;
-  }
-
-  .legend-item {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-
-  .dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-  }
-
-  .dot.blue { background: #4fc3f7; }
-  .dot.yellow { background: #fdd835; }
-  .dot.gold { background: #ffd700; }
-  .dot.orange { background: #ff9800; }
-  .dot.red-line {
-    background: repeating-linear-gradient(
-      to bottom,
-      #c62828 0 2px,
-      transparent 2px 5px
-    );
-    width: 2px;
-    height: 12px;
-  }
-  .dot.green-flag {
-    background: repeating-linear-gradient(
-      to bottom,
-      #4ade80 0 2px,
-      transparent 2px 5px
-    );
-    width: 2px;
-    height: 12px;
-  }
-  .dot.cleanup-range { background: #ff6b6b; }
-  .dot.recorded-range { background: #80e080; }
-
   .save-controls {
     display: flex;
     align-items: center;
@@ -12095,21 +12023,6 @@
     padding: 2px 4px 0;
   }
 
-
-  .stats-bar {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.5rem 0.75rem;
-    background: #111122;
-    border: 1px solid #333;
-    border-top: none;
-    font-family: 'Courier New', monospace;
-    font-size: 0.75rem;
-    color: #888;
-  }
-  .stats-bar span:first-child { color: #4fc3f7; }
-  .stats-bar span:nth-child(2) { color: #66bb6a; }
 
   /* ── Context Menu ── */
   .ctx-overlay {
