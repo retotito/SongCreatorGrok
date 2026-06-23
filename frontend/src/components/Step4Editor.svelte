@@ -76,6 +76,8 @@
   let dragMode = null;     // 'move' | 'resize-left' | 'resize-right' | 'resize-shared'
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
+  let _dragHasMoved = false;   // true once mouse moves >3px after mousedown
+  let _multiClickNoteId = null; // note ID if mousedown was on an already-selected note in multi-selection
   // Custom scrollbar state (replaces native <input type="range">)
   let scrollTrackEl;           // ref to the track div
   let scrollHandleDragging = false;
@@ -3512,6 +3514,8 @@
         if (selectedNotes.size > 0 && selectedNotes.has(found.id)) {
           // Clicking a note in the multi-selection
           selectedNote = found.id;
+          _multiClickNoteId = selectedNotes.size > 1 ? found.id : null;
+          _dragHasMoved = false;
           if (found.type !== 'break') {
             // Only force move when multiple notes selected; single note keeps its detected dragMode (resize/move)
             if (selectedNotes.size > 1) dragMode = 'move';
@@ -3581,6 +3585,13 @@
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
+
+    // Track whether the mouse has moved enough to count as a drag
+    if (!_dragHasMoved && isDragging && dragStart) {
+      const dx = mx - dragStart.x;
+      const dy = my - dragStart.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) _dragHasMoved = true;
+    }
 
     // Track live hover beat for keyboard paste (no click needed).
     const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
@@ -4189,9 +4200,18 @@
 
     if (isDragging) {
       console.log('[Mouse] mouseUp, drag ended');
+      // If mousedown was on an already-selected note in a multi-selection and mouse didn't move,
+      // collapse to single selection
+      if (_multiClickNoteId !== null && !_dragHasMoved) {
+        selectedNotes = new Set([_multiClickNoteId]);
+        selectedNote = _multiClickNoteId;
+        draw();
+      }
       // Sync manual note positions back into rawTimings so requantize preserves them
       syncRawTimingsFromNotes();
     }
+    _multiClickNoteId = null;
+    _dragHasMoved = false;
     stopDragOsc();
     isDragging = false;
     dragMode = null;
