@@ -1875,15 +1875,33 @@
 
   function undo() {
     if (undoStack.length === 0) return;
+    const prevSelectedNote = selectedNote;
+    const prevSelectedNotes = new Set(selectedNotes);
     redoStack.push(snapshot());
     restoreSnapshot(undoStack.pop());
+    // Re-apply selection for notes that still exist after undo
+    const restoredIds = new Set(notes.map(n => n.id));
+    selectedNotes = new Set([...prevSelectedNotes].filter(id => restoredIds.has(id)));
+    selectedNote = (prevSelectedNote !== null && restoredIds.has(prevSelectedNote))
+      ? prevSelectedNote
+      : (selectedNotes.size === 1 ? [...selectedNotes][0] : null);
+    draw();
     console.log(`[Undo] Restored (${undoStack.length} left, ${redoStack.length} redo)`);
   }
 
   function redo() {
     if (redoStack.length === 0) return;
+    const prevSelectedNote = selectedNote;
+    const prevSelectedNotes = new Set(selectedNotes);
     undoStack.push(snapshot());
     restoreSnapshot(redoStack.pop());
+    // Re-apply selection for notes that still exist after redo
+    const restoredIds = new Set(notes.map(n => n.id));
+    selectedNotes = new Set([...prevSelectedNotes].filter(id => restoredIds.has(id)));
+    selectedNote = (prevSelectedNote !== null && restoredIds.has(prevSelectedNote))
+      ? prevSelectedNote
+      : (selectedNotes.size === 1 ? [...selectedNotes][0] : null);
+    draw();
     console.log(`[Redo] Restored (${undoStack.length} undo, ${redoStack.length} left)`);
   }
 
