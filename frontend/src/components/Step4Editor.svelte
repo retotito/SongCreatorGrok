@@ -9845,7 +9845,8 @@
       bind:open={backupModalOpen}
       sessionId={$sessionId}
       onRestore={async () => {
-        // Reload editor state fresh from backend after restore
+        // Reset load guard so loadData() actually re-fetches from backend
+        dataLoadedSession = null;
         await loadData();
         hasUnsavedChanges = false;
       }}
