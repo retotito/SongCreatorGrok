@@ -3116,9 +3116,27 @@
         ctx.closePath();
         ctx.fill();
       }
-    }
 
-    // ── Paste ghost preview ──
+      // Pitch dot on playhead — only when pitch line is active
+      if (pitchLineVisible && pitchLineFrames.length > 0) {
+        let closest = null, minDist = Infinity;
+        for (let i = 0; i < pitchLineFrames.length; i++) {
+          const d = Math.abs(pitchLineFrames[i].beat - playbackBeat);
+          if (d < minDist) { minDist = d; closest = pitchLineFrames[i]; }
+        }
+        if (closest && minDist < 2) {
+          const py = pitchToY(closest.pitchRaw ?? closest.pitch);
+          const r = 6;
+          ctx.beginPath();
+          ctx.arc(cx, py, r, 0, Math.PI * 2);
+          ctx.fillStyle = isPlaying ? '#ff5252' : '#ff8a80';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+    }
     if (pasteMode && clipboard && pastePreviewBeat !== null) {
       ctx.globalAlpha = 0.4;
       for (const cn of clipboard.notes) {
