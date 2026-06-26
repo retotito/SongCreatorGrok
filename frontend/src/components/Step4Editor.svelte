@@ -8235,12 +8235,12 @@
     segRecCountdownProgress = 0;
     segRecCountdown = Math.max(1, Math.ceil(prerollSec));
     const countdownStartMs = Date.now();
-    const countdownDurationMs = prerollSec * 1000;
-    const countdownEndMs = countdownStartMs + countdownDurationMs;
+    const totalWallPrerollMs = (clippedLeadSec + runningPrerollWallSec) * 1000;
+    const countdownEndMs = countdownStartMs + totalWallPrerollMs;
     segRecCountdownTimer = setInterval(() => {
       const remainingMs = Math.max(0, countdownEndMs - Date.now());
-      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
-      segRecCountdownProgress = Math.min(1, 1 - (remainingMs / countdownDurationMs));
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000 * effectivePlaybackRate));
+      segRecCountdownProgress = Math.min(1, 1 - (remainingMs / totalWallPrerollMs));
       if (remainingMs > 0) {
         segRecCountdown = remainingSeconds;
       } else {
@@ -8257,7 +8257,7 @@
 
     if (!isPlaying) togglePlayback();
 
-    await new Promise(resolve => setTimeout(resolve, runningPrerollSec * 1000));
+    await new Promise(resolve => setTimeout(resolve, runningPrerollWallSec * 1000));
 
     if (segRecPhase !== 'preroll') return; // was cancelled
 
