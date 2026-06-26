@@ -3129,7 +3129,27 @@
           const r = 6;
           ctx.beginPath();
           ctx.arc(cx, py, r, 0, Math.PI * 2);
-          ctx.fillStyle = isPlaying ? '#ff5252' : '#ff8a80';
+          ctx.fillStyle = isPlaying ? '#4fc3f7' : '#81d4fa';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+
+      // Green pitch dot on playhead — recorded patch pitch (when pitch line is active)
+      if (pitchLineVisible && recordedPitchFrames.length > 0) {
+        let closest = null, minDist = Infinity;
+        for (let i = 0; i < recordedPitchFrames.length; i++) {
+          const d = Math.abs(recordedPitchFrames[i].beat - playbackBeat);
+          if (d < minDist) { minDist = d; closest = recordedPitchFrames[i]; }
+        }
+        if (closest && minDist < 2) {
+          const py = pitchToY(closest.pitchRaw ?? closest.pitch);
+          const r = 6;
+          ctx.beginPath();
+          ctx.arc(cx, py, r, 0, Math.PI * 2);
+          ctx.fillStyle = '#4ade80';
           ctx.fill();
           ctx.strokeStyle = '#fff';
           ctx.lineWidth = 1.5;
