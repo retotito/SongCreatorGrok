@@ -77,6 +77,8 @@
   let dragStart = { x: 0, y: 0 };
   let isDragging = false;
   let _dragHasMoved = false;   // true once mouse moves >3px after mousedown
+  let _suppressNextDblClick = false; // set on mouseup after a drag, consumed by dblclick
+  let _mouseDownPos = null;          // {x, y} at last mousedown, for dblclick distance check
   let _multiClickNoteId = null; // note ID if mousedown was on an already-selected note in multi-selection
   // Custom scrollbar state (replaces native <input type="range">)
   let scrollTrackEl;           // ref to the track div
@@ -3117,45 +3119,45 @@
         ctx.fill();
       }
 
-      // Pitch dot on playhead — only when pitch line is active
-      if (pitchLineVisible && pitchLineFrames.length > 0) {
-        let closest = null, minDist = Infinity;
-        for (let i = 0; i < pitchLineFrames.length; i++) {
-          const d = Math.abs(pitchLineFrames[i].beat - playbackBeat);
-          if (d < minDist) { minDist = d; closest = pitchLineFrames[i]; }
-        }
-        if (closest && minDist < 2) {
-          const py = pitchToY(closest.pitchRaw ?? closest.pitch);
-          const r = 6;
-          ctx.beginPath();
-          ctx.arc(cx, py, r, 0, Math.PI * 2);
-          ctx.fillStyle = isPlaying ? '#4fc3f7' : '#81d4fa';
-          ctx.fill();
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
-      }
+      // Pitch dot on playhead — disabled (can be noisy when pitch detection is imperfect)
+      // if (pitchLineVisible && pitchLineFrames.length > 0) {
+      //   let closest = null, minDist = Infinity;
+      //   for (let i = 0; i < pitchLineFrames.length; i++) {
+      //     const d = Math.abs(pitchLineFrames[i].beat - playbackBeat);
+      //     if (d < minDist) { minDist = d; closest = pitchLineFrames[i]; }
+      //   }
+      //   if (closest && minDist < 2) {
+      //     const py = pitchToY(closest.pitchRaw ?? closest.pitch);
+      //     const r = 6;
+      //     ctx.beginPath();
+      //     ctx.arc(cx, py, r, 0, Math.PI * 2);
+      //     ctx.fillStyle = isPlaying ? '#4fc3f7' : '#81d4fa';
+      //     ctx.fill();
+      //     ctx.strokeStyle = '#fff';
+      //     ctx.lineWidth = 1.5;
+      //     ctx.stroke();
+      //   }
+      // }
 
-      // Green pitch dot on playhead — recorded patch pitch (when pitch line is active)
-      if (pitchLineVisible && recordedPitchFrames.length > 0) {
-        let closest = null, minDist = Infinity;
-        for (let i = 0; i < recordedPitchFrames.length; i++) {
-          const d = Math.abs(recordedPitchFrames[i].beat - playbackBeat);
-          if (d < minDist) { minDist = d; closest = recordedPitchFrames[i]; }
-        }
-        if (closest && minDist < 2) {
-          const py = pitchToY(closest.pitchRaw ?? closest.pitch);
-          const r = 6;
-          ctx.beginPath();
-          ctx.arc(cx, py, r, 0, Math.PI * 2);
-          ctx.fillStyle = '#4ade80';
-          ctx.fill();
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        }
-      }
+      // Green pitch dot on playhead — disabled (can be noisy when pitch detection is imperfect)
+      // if (pitchLineVisible && recordedPitchFrames.length > 0) {
+      //   let closest = null, minDist = Infinity;
+      //   for (let i = 0; i < recordedPitchFrames.length; i++) {
+      //     const d = Math.abs(recordedPitchFrames[i].beat - playbackBeat);
+      //     if (d < minDist) { minDist = d; closest = recordedPitchFrames[i]; }
+      //   }
+      //   if (closest && minDist < 2) {
+      //     const py = pitchToY(closest.pitchRaw ?? closest.pitch);
+      //     const r = 6;
+      //     ctx.beginPath();
+      //     ctx.arc(cx, py, r, 0, Math.PI * 2);
+      //     ctx.fillStyle = '#4ade80';
+      //     ctx.fill();
+      //     ctx.strokeStyle = '#fff';
+      //     ctx.lineWidth = 1.5;
+      //     ctx.stroke();
+      //   }
+      // }
     }
     if (pasteMode && clipboard && pastePreviewBeat !== null) {
       ctx.globalAlpha = 0.4;
@@ -3245,6 +3247,7 @@
     const rect = canvasEl.getBoundingClientRect();
     const mx = event.clientX - rect.left;
     const my = event.clientY - rect.top;
+    _mouseDownPos = { x: event.clientX, y: event.clientY };
 
     const beat = xToBeat(mx);
     const pitch = yToPitch(my);
@@ -4249,6 +4252,7 @@
       syncRawTimingsFromNotes();
     }
     _multiClickNoteId = null;
+    if (_dragHasMoved) _suppressNextDblClick = true;
     _dragHasMoved = false;
     stopDragOsc();
     isDragging = false;
@@ -6403,6 +6407,24 @@
   // direction: -1 = previous, +1 = next
   // extended: false = major positions only (song start, gap, loop start)
   //           true  = all positions (+ breakpoints, flags, cleanup section starts)
+  function selectNoteAtPlayhead() {
+    const realNotes = notes.filter(n => n.type !== 'break');
+    // Prefer a note whose range contains the playhead; otherwise pick nearest by start
+    let found = realNotes.find(n => playbackBeat >= n.startBeat && playbackBeat < n.startBeat + n.duration);
+    if (!found) {
+      let minDist = Infinity;
+      for (const n of realNotes) {
+        const d = Math.abs(n.startBeat - playbackBeat);
+        if (d < minDist) { minDist = d; found = n; }
+      }
+    }
+    if (found) {
+      selectedNote = found.id;
+      selectedNotes = new Set([found.id]);
+      draw();
+    }
+  }
+
   function navigateToPosition(direction, extended) {
     const currentBeat = isPlaying ? playbackBeat : playbackBeat;
 
@@ -6527,6 +6549,7 @@
       if (e.code === 'ArrowLeft') { e.preventDefault(); seekPlayback(e.shiftKey ? -1 : -5); return; }
       if (e.code === 'ArrowRight') { e.preventDefault(); seekPlayback(e.shiftKey ? 1 : 5); return; }
       if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleLoop(); return; }
+      if (e.key.toLowerCase() === 'y' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); selectNoteAtPlayhead(); return; }
       if (e.key.toLowerCase() === 'm' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) { e.preventDefault(); if (!uiModalGuardActive) { micEnabled = !micEnabled; if (micEnabled && vocalTraceEnabled) { vocalTraceEnabled = false; stopVocalTrace(); } toggleMic(); } return; }
       if (e.key.toLowerCase() === 'v' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && hasVocalsAudio) { e.preventDefault(); if (!uiModalGuardActive) { vocalTraceEnabled = !vocalTraceEnabled; if (vocalTraceEnabled && micEnabled) { micEnabled = false; stopMic(); } toggleVocalTrace(); } return; }
       if (e.key === 'M' && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); if (micNoteHits.size > 0) { micShowTrail = !micShowTrail; draw(); } return; }
@@ -6539,6 +6562,13 @@
         return;
       }
       // Block everything else during playback
+      return;
+    }
+
+    // Y key — select note at playhead
+    if (e.key.toLowerCase() === 'y' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      selectNoteAtPlayhead();
       return;
     }
 
@@ -7002,7 +7032,9 @@
       }
       if (e.key.toLowerCase() === 's' && !e.shiftKey) {
         e.preventDefault();
-        splitNote(shortcutNoteId);
+        const splitTargetNote = notes.find(n => n.id === shortcutNoteId);
+        const playheadOnNote = splitTargetNote && playbackBeat > splitTargetNote.startBeat && playbackBeat < splitTargetNote.startBeat + splitTargetNote.duration;
+        splitNote(shortcutNoteId, playheadOnNote ? playbackBeat : undefined);
       }
       if (e.key.toLowerCase() === 'j' && e.shiftKey) {
         e.preventDefault();
@@ -9962,6 +9994,16 @@
     <canvas
       bind:this={canvasEl}
       on:mousedown={handleMouseDown}
+      on:dblclick={(e) => {
+        if (_suppressNextDblClick) { _suppressNextDblClick = false; return; }
+        // Also guard by actual pointer travel since last mousedown
+        if (_mouseDownPos) {
+          const dx = e.clientX - _mouseDownPos.x;
+          const dy = e.clientY - _mouseDownPos.y;
+          if (Math.abs(dx) > 5 || Math.abs(dy) > 5) return;
+        }
+        selectNoteAtPlayhead();
+      }}
       on:wheel|nonpassive={handleWheel}
       on:contextmenu={handleContextMenu}
     ></canvas>
@@ -10250,7 +10292,10 @@
           <button class="ctx-item" on:click={() => playNotePitch(ctxNote.id)}>
             🔊 Play Pitch <span class="ctx-shortcut">P</span>
           </button>
-          <button class="ctx-item" on:click={() => splitNote(ctxNote.id, contextMenu.beat)}>
+          <button class="ctx-item" on:click={() => {
+            const playheadOnCtxNote = ctxNote && playbackBeat > ctxNote.startBeat && playbackBeat < ctxNote.startBeat + ctxNote.duration;
+            splitNote(ctxNote.id, playheadOnCtxNote ? playbackBeat : contextMenu.beat);
+          }}>
             ✂️ Split Note <span class="ctx-shortcut">S</span>
           </button>
           <button class="ctx-item" on:click={() => openVibratoModal(ctxNote.id)}>
