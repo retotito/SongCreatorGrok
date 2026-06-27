@@ -110,6 +110,7 @@
             <div class="row"><kbd>Ctrl+←→</kbd> resize right edge</div>
             <div class="row"><kbd>Shift+Ctrl+←→</kbd> resize left edge</div>
             <div class="row"><kbd>S</kbd> split &nbsp;·&nbsp; <kbd>Del</kbd> delete</div>
+            <div class="row"><kbd>N</kbd> new note at cursor &nbsp;·&nbsp; <kbd>Y</kbd> select at playhead</div>
             <div class="row"><kbd>P</kbd> play pitch &nbsp;·&nbsp; <kbd>E</kbd> edit syllable</div>
           </div>
 

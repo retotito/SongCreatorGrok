@@ -1135,6 +1135,7 @@
   let loopDragStartBeat = null; // beat where loop drag began
   let loopHandleDrag = null; // 'start' or 'end' when dragging a loop handle
   let hoverPasteBeat = null; // live beat under mouse cursor (used by Cmd+V target)
+  let hoverPitch = null;      // live pitch under mouse cursor (used by N key add-note)
 
   // Playhead drag / scrub
   let playheadDrag = false;
@@ -3637,6 +3638,7 @@
     // Track live hover beat for keyboard paste (no click needed).
     const insideCanvas = mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height;
     hoverPasteBeat = insideCanvas ? Math.round(xToBeat(mx)) : null;
+    hoverPitch = insideCanvas ? yToPitch(my) : null;
 
     if (metronomePickTarget === 1 || metronomePickTarget === 2) {
       metronomePickHoverBeat = insideCanvas ? nearestGridBeat(mx) : null;
@@ -7036,6 +7038,11 @@
         const playheadOnNote = splitTargetNote && playbackBeat > splitTargetNote.startBeat && playbackBeat < splitTargetNote.startBeat + splitTargetNote.duration;
         splitNote(shortcutNoteId, playheadOnNote ? playbackBeat : undefined);
       }
+      if (e.key.toLowerCase() === 'n' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        console.log(`[N] hoverPasteBeat=${hoverPasteBeat} hoverPitch=${hoverPitch}`);
+        // N key moved outside — handled below
+      }
       if (e.key.toLowerCase() === 'j' && e.shiftKey) {
         e.preventDefault();
         mergeWithPrevious(shortcutNoteId);
@@ -7046,6 +7053,18 @@
         mergeWithNext(shortcutNoteId);
         return;
       }
+    }
+
+    // N — add new note at cursor position (works regardless of selection)
+    if (e.key.toLowerCase() === 'n' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      console.log(`[N key] hoverPasteBeat=${hoverPasteBeat} hoverPitch=${hoverPitch}`);
+      if (hoverPasteBeat !== null && hoverPitch !== null) {
+        addNoteAt(hoverPasteBeat, hoverPitch);
+      } else {
+        console.warn('[N key] No hover position — move mouse over canvas first');
+      }
+      return;
     }
   }
 
