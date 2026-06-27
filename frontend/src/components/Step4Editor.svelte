@@ -5821,7 +5821,7 @@
     // (reactive statements triggered by notes[] mutation clear selectedNote after tick())
     setTimeout(() => {
       selectedNote = maxId;
-      selectedNotes = new Set();
+      selectedNotes = new Set([maxId]);
       draw();
     }, 0);
   }
