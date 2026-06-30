@@ -1214,6 +1214,11 @@ async def resume_specific_session(session_id: str):
     instrumental = session.get("instrumental_audio")
     has_instrumental = instrumental is not None and os.path.exists(instrumental)
 
+    # Patch headers (fixes .wav→.mp3 in #MP3/#VOCALS for sessions saved before fix)
+    if session.get("result"):
+        _update_txt_asset_headers(session)
+        save_session(session_id)
+
     lyrics = session.get("lyrics", "")
     syllable_count = 0
     line_count = 0
@@ -3085,10 +3090,9 @@ async def submit_lyrics(
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
                 _orig = session.get('original_audio') or session.get('vocal_audio') or ''
-                _ext = os.path.splitext(_orig)[1] or '.mp3'
                 content = _re.sub(r"^#TITLE:.*$", f"#TITLE:{title}", content, count=1, flags=_re.MULTILINE)
                 content = _re.sub(r"^#ARTIST:.*$", f"#ARTIST:{artist}", content, count=1, flags=_re.MULTILINE)
-                content = _re.sub(r"^#MP3:.*$", f"#MP3:{artist} - {title}{_ext}", content, count=1, flags=_re.MULTILINE)
+                content = _re.sub(r"^#MP3:.*$", f"#MP3:{artist} - {title}.mp3", content, count=1, flags=_re.MULTILINE)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
                 log_step("LYRICS", f"Updated headers in {fname}")
@@ -3788,8 +3792,8 @@ async def generate_empty(session_id: str):
         except Exception:
             pass
 
-    mp3_filename = os.path.basename(original or vocal or "audio.mp3")
-    vocals_filename = os.path.basename(vocal or "")
+    mp3_filename = os.path.splitext(os.path.basename(original or vocal or "audio.mp3"))[0] + ".mp3"
+    vocals_filename = os.path.splitext(os.path.basename(vocal or ""))[0] + ".mp3" if vocal else ""
 
     header = (
         f"#TITLE:{info.get('title', 'Unknown')}\n"
@@ -4020,7 +4024,9 @@ async def save_editor_state(session_id: str, request: Request):
                  "ko": "Korean", "zh": "Chinese"}.get(lang, lang.title())
     lines.append(f"#LANGUAGE:{lang_name}")
     _mp3_path = session.get('original_audio') or 'song.mp3'
-    lines.append(f"#MP3:{os.path.basename(_mp3_path)}")
+    _mp3_header_value = f"{os.path.splitext(os.path.basename(_mp3_path))[0]}.mp3"
+    log_step("SAVE-EDITOR", f"DEBUG #MP3 header: original_audio={_mp3_path!r} → #MP3:{_mp3_header_value}")
+    lines.append(f"#MP3:{_mp3_header_value}")
 
     # Extra headers from the editor (e.g. YOUTUBE, COVER, etc.)
     standard_keys = {'TITLE', 'ARTIST', 'BPM', 'GAP', 'LANGUAGE', 'MP3'}
@@ -4752,6 +4758,11 @@ async def download_file(
             content = f.read()
         import re as _re_dl
         content = _re_dl.sub(r'^(- \d+) \d+$', r'\1', content, flags=_re_dl.MULTILINE)
+        # Force .mp3 extension in #MP3 and #VOCALS headers regardless of internal storage format
+        def _force_mp3_ext(m):
+            return m.group(1) + _re_dl.sub(r'\.[^.]+$', '.mp3', m.group(2))
+        content = _re_dl.sub(r'^(#MP3:)(.+)$', _force_mp3_ext, content, flags=_re_dl.MULTILINE)
+        content = _re_dl.sub(r'^(#VOCALS:)(.+)$', _force_mp3_ext, content, flags=_re_dl.MULTILINE)
         if include_vocals != "1":
             content = _remove_header(content, "VOCALS")
         if include_instrumental != "1":
@@ -5189,6 +5200,12 @@ async def download_zip(
                 # Normalize linebreaks to YASS-style (single number) for old sessions
                 import re as _re_zip
                 txt_content = _re_zip.sub(r'^(- \d+) \d+$', r'\1', txt_content, flags=_re_zip.MULTILINE)
+
+                # Force .mp3 extension in #MP3 and #VOCALS headers
+                def _force_mp3_ext_zip(m):
+                    return m.group(1) + _re_zip.sub(r'\.[^.]+$', '.mp3', m.group(2))
+                txt_content = _re_zip.sub(r'^(#MP3:)(.+)$', _force_mp3_ext_zip, txt_content, flags=_re_zip.MULTILINE)
+                txt_content = _re_zip.sub(r'^(#VOCALS:)(.+)$', _force_mp3_ext_zip, txt_content, flags=_re_zip.MULTILINE)
 
                 # Helper: insert/replace a header line
                 def _set_header(content, key, value):

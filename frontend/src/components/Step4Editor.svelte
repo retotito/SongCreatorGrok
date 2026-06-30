@@ -6041,11 +6041,8 @@
     const standardKeys = new Set(['TITLE', 'ARTIST', 'BPM', 'GAP', 'END', 'DOWNBEATOFFSET', 'METRONOMEANCHOR', 'METRONOMEIG', 'METRONOMESPEED']);
     for (const h of extraHeaders) {
       if (!standardKeys.has(h.key.toUpperCase())) {
-        // Keep #MP3 in sync with current artist/title and original file extension
-        const origFilename = $uploadData?.filename || '';
-        const origExt = (origFilename.match(/\.\w+$/) || ['.mp3'])[0];
         const value = h.key.toUpperCase() === 'MP3'
-          ? `${$lyricsData?.artist || 'Unknown'} - ${$lyricsData?.title || 'Unknown'}${origExt}`
+          ? `${$lyricsData?.artist || 'Unknown'} - ${$lyricsData?.title || 'Unknown'}.mp3`
           : h.value;
         lines.push(`#${h.key}:${value}`);
       }

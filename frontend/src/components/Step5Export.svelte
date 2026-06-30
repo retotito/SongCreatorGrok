@@ -722,8 +722,7 @@
           <span class="asset-label">Full Mix</span>
           <div class="video-inputs" style="padding-top: 10px;">
             {#if $uploadData?.hasOriginal}
-              {@const origExt = ($uploadData.filename || '').match(/\.[^.]+$/)?.[0] || '.mp3'}
-              <span class="asset-value">{baseFilename}{origExt}</span>
+              <span class="asset-value">{baseFilename}.mp3</span>
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No audio uploaded yet. Go to
@@ -739,8 +738,7 @@
           <span class="asset-label">Vocals</span>
           <div class="video-inputs" style="padding-top: 10px;">
             {#if $uploadData?.hasVocals}
-              {@const vocExt = ($uploadData?.vocalsFilename || '').match(/\.[^.]+$/)?.[0] || '.mp3'}
-              <span class="asset-value">{baseFilename} [Vocals]{vocExt}</span>
+              <span class="asset-value">{baseFilename} [Vocals].mp3</span>
             {:else}
               <small style="color:#f0a500;font-size:0.72rem">
                 💡 No vocals yet. Go to
