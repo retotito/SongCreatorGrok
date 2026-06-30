@@ -4850,8 +4850,7 @@ def _update_txt_asset_headers(session: dict) -> None:
         # --- #MP3: use Artist - Title + original extension, or remove if no original ---
         original_audio = session.get("original_audio")
         if original_audio:
-            ext = os.path.splitext(original_audio)[1] or '.mp3'
-            mp3_name = f"{base}{ext}"
+            mp3_name = f"{base}.mp3"
             content = _set_header(content, "MP3", mp3_name)
             log_step("TXT-HEADERS", f"Set #MP3 to {mp3_name}")
         else:
@@ -4914,8 +4913,7 @@ def _update_txt_asset_headers(session: dict) -> None:
 
         vocal_audio = session.get("vocal_audio")
         if vocal_audio:
-            ext = os.path.splitext(vocal_audio)[1]
-            vocals_header = f"{base} [Vocals]{ext}"
+            vocals_header = f"{base} [Vocals].mp3"
             content = _set_header(content, "VOCALS", vocals_header)
             log_step("TXT-HEADERS", f"Set #VOCALS to {vocals_header}")
         else:
