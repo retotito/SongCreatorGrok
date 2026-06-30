@@ -2801,7 +2801,17 @@
         ctx.lineWidth = 1.5;
         const r = 3;
         ctx.beginPath();
-        ctx.roundRect(x - 1, y - noteHeight / 2 - 1, width + 2, noteHeight + 2, r);
+        const rx = x - 1, ry = y - noteHeight / 2 - 1, rw = width + 2, rh = noteHeight + 2;
+        ctx.moveTo(rx + r, ry);
+        ctx.lineTo(rx + rw - r, ry);
+        ctx.arcTo(rx + rw, ry, rx + rw, ry + r, r);
+        ctx.lineTo(rx + rw, ry + rh - r);
+        ctx.arcTo(rx + rw, ry + rh, rx + rw - r, ry + rh, r);
+        ctx.lineTo(rx + r, ry + rh);
+        ctx.arcTo(rx, ry + rh, rx, ry + rh - r, r);
+        ctx.lineTo(rx, ry + r);
+        ctx.arcTo(rx, ry, rx + r, ry, r);
+        ctx.closePath();
         ctx.stroke();
         ctx.restore();
       } else {
