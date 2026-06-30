@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v3.1.0** — App renamed to UltrastarCreatorTool, backend killed on window close, WhisperX fallback warning, Windows model integrity fixes. See [Changelog](#changelog) below.
+> **Latest release: v4.0.0** — Cleanup sections, segment recording & AI re-generation, vibrato tool, metronome with draggable downbeat, song backup, CodeMirror lyrics editor, pitch lines, and many editor UX improvements. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -31,6 +31,20 @@ Because the app is not yet code-signed, macOS will block it on first launch. To 
 4. Confirm by clicking **Open** in the dialog that appears.
 
 You only need to do this once.
+
+### Upgrading from v3.1.0 or earlier to v4.0.0
+
+> ⚠️ **If you are upgrading from v3.1.0 or an older version**, follow these steps before installing:
+
+1. **Close the app.** Since v3.1.0 the backend is killed automatically when the window closes. If you are on an older version (v3.0.x or below), the backend may still be running — kill it manually:
+   - **macOS:** `pkill -f backend`
+   - **Windows:** `taskkill /IM backend.exe /F`
+2. **Uninstall the old app first** before installing the new version.
+   - macOS: drag **UltrastarCreatorTool** out of Applications to Trash, then empty Trash.
+   - Windows: uninstall via Settings → Apps before running the new installer.
+3. **Sessions from v3.0.x or earlier** may have compatibility issues. Export your songs as ZIP before upgrading if you want to be safe.
+
+Sessions created in **v3.1.0** should be compatible with v4.0.0
 
 ### Troubleshooting / Debug Logs
 
@@ -221,7 +235,79 @@ Open **http://localhost:5173** in your browser. The Vite proxy automatically for
 
 ## Changelog
 
+### v4.0.0
+
+#### ⚙️ Storage Manager
+- New **Storage Manager** modal (gear icon) — lists all sessions with size, lets you delete orphaned sessions and debug data, and remove downloaded AI models to free up disk space
+
+#### ✂️ Vocal Audio Cleanup Sections
+- Draw, drag, resize, split, and join **cleanup segments** directly on the waveform
+- Segments define regions to silencr or  replace witch voice recording
+- Waveform context menu shortcut to add a cleanup section at the cursor
+
+#### 🎙️ Record Over Sections
+- **Segment recording** — record a replacement vocal take over any cleanup section
+- Review recorded take with loop playback; hand off directly to AI note generation
+- Source switching (original / vocals / edited) inside the recording modal
+
+#### 🤖 AI Re-generation Over Section or Loop
+- Generate new Ultrastar notes for any loop region or cleanup section using the AI pipeline
+- Use edited-vocal or original-vocal as source
+
+#### 🎛️ Metronome & BPM Tools
+- **Draggable diamond handle** in the canvas top strip — drag to set the downbeat anchor visually without opening a modal
+- Metronome modal: time signature, speed factor, persist settings across sessions
+- **BPM guard** — orange warning below 200 BPM, red/disabled below 100 with confirm dialog
+
+#### 🎵 Pitch Lines
+- **Blue pitch line** — precomputed full-song vocal pitch displayed as continuous dots across the canvas
+- **Green pitch line** — recorded/patched section pitch, independent of blue line
+
+#### 🎸 Vibrato Tool
+- Auto generate Vibrato on a long notes
+
+#### 💾 .txt Backup
+- **Auto backup** — configurable timer saves a snapshot of the session at regular intervals
+- **Manual backup** — save a named snapshot at any time
+
+
+#### 📝 Lyrics Editor (Step 2)
+- **CodeMirror** editor replaces the plain textarea — zebra stripes, line numbers, syntax highlighting, proper selection colors
+- **Comparison field** — second text field side-by-side for comparing against an alternative lyrics source
+
+#### 🎹 Editor Keyboard & UX
+- **Y key** — select the note at the current playhead position (also on double-click)
+- **N key** — add a new note at the cursor position (beat + pitch from mouse)
+- **S key** — splits at playhead position when playhead is inside the selected note; otherwise splits at midpoint
+- Right-click split also prefers playhead position when inside the note
+- **Fix Spaces modal** — explains old vs. new word-space convention with before/after example before applying
+- **Help modal** (ℹ️ button) — keyboard shortcut reference accessible at any time
+- Escape correctly deselects newly added notes
+- Selection preserved through undo/redo
+- Multi-select: clicking an already-selected note collapses to single selection
+- Viewport auto-centers on selected note after arrow key moves (only when note not visible)
+- Unified blue note borders; golden ★ and rap R indicators drawn above notes
+- White syllable text; trailing-space syllables shown in grey with · marker
+- Editor fills full viewport height dynamically
+- Find widget (Cmd+F) — search syllables, jump to match, highlight
+- `#END` marker — canvas line, toolbar controls, scrollbar tick, navigation support
+- Tab/Shift+Tab plays the note's MIDI pitch while navigating
+- Playhead position persisted across navigation and session reopen
+- Loop region shown as a tinted band in the scrollbar track
+- Tauri app opens maximized on launch
+
+#### 🐛 Bug Fixes
+- BPM change corruption fixed — direct beat scaling prevents gaps between adjacent notes
+- encode uploads to WAV — eliminates encoder delay and frame-quantized seeking
+- Precount countdown timing corrected for non-1× playback speeds
+- Vocal trace hit detection applies same octave-correction as mic mode
+- Vocal trace fixed-X position, no note-tracking gaps, correct timing center
+- Cleanup segment drag auto-scroll; keyboard nudge in viewport
+- Backup restore: reset data guard before reload; custom confirm dialog (no browser `confirm()`)
+- Canvas find widget, ShortcutBar, pitch utilities extracted to separate files (smaller editor bundle)
+
 ### v3.1.0
+
 - **App renamed** — product name and window title changed from "Ultrastar Creator" to `UltrastarCreatorTool` for consistency with the GitHub repo name
 - **Kill backend on close** — closing the Tauri window now cleanly kills the backend sidecar process (and releases port 8001) on both macOS and Windows
 - **WhisperX fallback warning** — if WhisperX is unavailable and vanilla Whisper was used instead, a dismissable amber modal warns the user that timestamps are less precise
