@@ -4,6 +4,7 @@
   import ShortcutBar from './ShortcutBar.svelte';
   import SelectionPanel from './SelectionPanel.svelte';
   import EditorHelpModal from './EditorHelpModal.svelte';
+  import FixSpacesModal from './FixSpacesModal.svelte';
   import { sessionId, generationResult, editorState, errorMessage, lyricsData, currentStep, uploadData, recordingActive, storageManagerOpen, editorHelpOpen } from '../stores/appStore.js';
   import { waveformPeaksCache } from '../stores/appStore.js';
   import { getEditorData, getAudioUrl, saveEditorState, generateCleanedAudio, suggestVibrato, getLiveWordsWindow } from '../services/api.js';
@@ -1507,6 +1508,7 @@
   // Text editor modal
   let showTextEditor = false;
   let textEditorContent = '';
+  let fixSpacesModalOpen = false;
 
   // Session notes modal
   let showNotesModal = false;
@@ -9926,17 +9928,17 @@
         </div>
       </div>
       <div id="edit-controls-wrapper">
-          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; autoFixWordSpaces(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
-           Fix Spaces&nbsp;🔤
+          <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; fixSpacesModalOpen = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Convert old-style leading spaces to trailing (for imported songs)'}>
+           Fix&nbsp;🔤
         </button>
           <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; openTextEditor(); }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Edit raw Ultrastar .txt'}>
-           Text&nbsp;📝 
+           .txt&nbsp;📝 
         </button>
           <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; loadSessionNotes(); showNotesModal = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Session notes'}>
            Notes&nbsp;🗒️
         </button>
           <button class="tool-btn" class:disabled-audio={uiModalGuardActive} on:click={() => { if (uiModalGuardActive) return; backupModalOpen = true; }} disabled={uiModalGuardActive} title={uiModalGuardActive ? 'Disabled while modal is active' : 'Song backups'}>
-           Backups&nbsp;🕐
+           Backup&nbsp;🕐
         </button>
       </div>
     </div>
@@ -10661,6 +10663,8 @@
   {#if $editorHelpOpen}
     <EditorHelpModal onClose={() => editorHelpOpen.set(false)} />
   {/if}
+
+  <FixSpacesModal bind:open={fixSpacesModalOpen} on:fix={autoFixWordSpaces} />
 
   <!-- Text Editor Modal -->
   {#if showNotesModal}
