@@ -10246,7 +10246,7 @@
   <!-- Fixed draggable selection panel — single or multi note -->
   <SelectionPanel
     count={selectedNotes.size > 1 ? selectedNotes.size : (selectedNote !== null ? 1 : 0)}
-    onDeselect={() => { clearMarkerSelection(); draw(); }}
+    onDeselect={() => { selectedNote = null; selectedNotes = new Set(); clearMarkerSelection(); draw(); }}
     onGoTo={() => {
       const targetId = selectedNote ?? (selectedNotes.size > 0 ? [...selectedNotes][0] : null);
       const note = targetId !== null ? notes.find(n => n.id === targetId) : null;

@@ -128,15 +128,15 @@
   .sel-close {
     position: absolute;
     top: 50%;
-    right: 8px;
+    right: 6px;
     transform: translateY(-50%);
     background: none;
     border: none;
     color: #a08040;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 1.1rem;
     line-height: 1;
-    padding: 0 2px;
+    padding: 4px 6px;
   }
   .sel-close:hover {
     color: #ef9a9a;
