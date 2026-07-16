@@ -1169,9 +1169,10 @@
   let metronomeSpeedFactor = 1;
   const METRONOME_SIGNATURE_NUM_OPTIONS = [2, 3, 4, 5, 6, 7, 9, 12];
   const METRONOME_SIGNATURE_DEN_OPTIONS = [2, 4, 5, 8, 16];
-  // BEATS_PER_QUARTER: US-BPM / 30 = quarter note duration in US beats (Bohning ×4 convention)
-  // e.g. BPM=480 → 16, BPM=400 → ~13.3, BPM=200 → ~6.7. Recalculated reactively when bpm changes.
-  $: BEATS_PER_QUARTER = bpm > 0 ? Math.round(bpm / 30) : 8;
+  // BEATS_PER_QUARTER: round to nearest power of 2 to avoid rounding errors at BPMs like 464
+  // Math.round(464/30)=15 (wrong), nearest-power-of-2 gives 16 (correct).
+  // 232→8 ✓, 464→16 ✓, 120→4 ✓, 200→8 ✓
+  $: BEATS_PER_QUARTER = bpm > 0 ? Math.pow(2, Math.round(Math.log2(bpm / 30))) : 8;
   $: BEATS_PER_MEASURE = BEATS_PER_QUARTER * 4;
 
   function getMetronomeSignatureIntervalBeats() {
@@ -1251,7 +1252,8 @@
     // Compute BEATS_PER_QUARTER directly from current bpm — do NOT use the reactive
     // $: variable because inside an async load function Svelte may not have re-evaluated
     // it yet, producing stale (wrong) intervals.
-    const currentBpq = bpm > 0 ? Math.round(bpm / 30) : 8;
+    // Round to nearest power of 2 to avoid rounding errors at BPMs like 464 (464/30=15.47→15 wrong, should be 16).
+    const currentBpq = bpm > 0 ? Math.pow(2, Math.round(Math.log2(bpm / 30))) : 8;
     const beatUnitInterval = (currentBpq * 4) / denominator;
     const downbeatInterval = beatUnitInterval * numerator;
     if (!Number.isFinite(beatUnitInterval) || !Number.isFinite(downbeatInterval) || beatUnitInterval <= 0 || downbeatInterval <= 0) {
