@@ -103,7 +103,7 @@
       </div>
     {/if}
     <button class="gear-btn" on:click={() => showStorage = !showStorage} title="Storage Manager">⚙️</button>
-    <button class="gear-btn" on:click={() => editorHelpOpen.set(true)} title="Help &amp; Shortcuts">ℹ️</button>
+    {#if $currentStep === 4}<button class="gear-btn" on:click={() => editorHelpOpen.set(true)} title="Help &amp; Shortcuts">ℹ️</button>{/if}
   </div>
 </div>
 

@@ -4019,9 +4019,33 @@ async def save_editor_state(session_id: str, request: Request):
     lines.append(f"#BPM:{editor_bpm:.2f}")
     lines.append(f"#GAP:{int(editor_gap)}")
     lang = session.get("language", "en")
-    lang_name = {"en": "English", "de": "German", "fr": "French", "es": "Spanish",
-                 "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ja": "Japanese",
-                 "ko": "Korean", "zh": "Chinese"}.get(lang, lang.title())
+    lang_name = {
+        "af": "Afrikaans", "sq": "Albanian", "am": "Amharic", "ar": "Arabic",
+        "hy": "Armenian", "az": "Azerbaijani", "ba": "Bashkir", "eu": "Basque",
+        "be": "Belarusian", "bn": "Bengali", "bs": "Bosnian", "br": "Breton",
+        "bg": "Bulgarian", "ca": "Catalan", "zh": "Chinese", "hr": "Croatian",
+        "cs": "Czech", "da": "Danish", "nl": "Dutch", "en": "English",
+        "et": "Estonian", "fo": "Faroese", "fi": "Finnish", "fr": "French",
+        "gl": "Galician", "ka": "Georgian", "de": "German", "el": "Greek",
+        "gu": "Gujarati", "ht": "Haitian Creole", "ha": "Hausa", "haw": "Hawaiian",
+        "he": "Hebrew", "hi": "Hindi", "hu": "Hungarian", "is": "Icelandic",
+        "id": "Indonesian", "it": "Italian", "ja": "Japanese", "jw": "Javanese",
+        "kn": "Kannada", "kk": "Kazakh", "km": "Khmer", "ko": "Korean",
+        "lo": "Lao", "la": "Latin", "lv": "Latvian", "ln": "Lingala",
+        "lt": "Lithuanian", "lb": "Luxembourgish", "mk": "Macedonian",
+        "mg": "Malagasy", "ms": "Malay", "ml": "Malayalam", "mt": "Maltese",
+        "mi": "Maori", "mr": "Marathi", "mn": "Mongolian", "my": "Myanmar",
+        "ne": "Nepali", "no": "Norwegian", "nn": "Nynorsk", "oc": "Occitan",
+        "ps": "Pashto", "fa": "Persian", "pl": "Polish", "pt": "Portuguese",
+        "pa": "Punjabi", "ro": "Romanian", "ru": "Russian", "sa": "Sanskrit",
+        "sr": "Serbian", "sn": "Shona", "sd": "Sindhi", "si": "Sinhala",
+        "sk": "Slovak", "sl": "Slovenian", "so": "Somali", "es": "Spanish",
+        "su": "Sundanese", "sw": "Swahili", "sv": "Swedish", "tl": "Tagalog",
+        "tg": "Tajik", "ta": "Tamil", "tt": "Tatar", "te": "Telugu",
+        "th": "Thai", "bo": "Tibetan", "tr": "Turkish", "tk": "Turkmen",
+        "uk": "Ukrainian", "ur": "Urdu", "uz": "Uzbek", "vi": "Vietnamese",
+        "cy": "Welsh", "yi": "Yiddish", "yo": "Yoruba",
+    }.get(lang, lang.title())
     lines.append(f"#LANGUAGE:{lang_name}")
     _mp3_path = session.get('original_audio') or 'song.mp3'
     _mp3_header_value = f"{os.path.splitext(os.path.basename(_mp3_path))[0]}.mp3"
