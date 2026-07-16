@@ -140,7 +140,7 @@ Output goes to `frontend/dist/`.
 ## Full App Build (Tauri + Sidecar)
 
 ```bash
-./build_local.sh
+cd /Users/retokupfer/projects/SongCreatorGrok && ./build_local.sh
 ```
 
 Output: `frontend/src-tauri/target/release/bundle/` — produces `.app` + `.dmg` on Mac.
