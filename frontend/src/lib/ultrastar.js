@@ -13,12 +13,14 @@ export function parseUltrastar(content) {
 
   for (const line of lines) {
     const trimmed = line.trimStart(); // trimStart only — trailing space is part of the syllable
-    if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('F:') || trimmed.startsWith('F ') || trimmed === 'F') {
+    if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('R ') || trimmed.startsWith('R:') || trimmed.startsWith('F:') || trimmed.startsWith('F ') || trimmed === 'F') {
       const isGolden = trimmed.startsWith('*');
-      const isRap = trimmed.startsWith('F:');
+      // R is the standard rap prefix; F: is accepted as legacy
+      const isRap = trimmed.startsWith('R ') || trimmed.startsWith('R:') || trimmed.startsWith('F:');
       const isFreestyle = !isRap && trimmed.startsWith('F');
       let prefix;
-      if (isRap) prefix = 'F:';
+      if (isRap && (trimmed.startsWith('R ') || trimmed.startsWith('R:'))) prefix = trimmed.startsWith('R:') ? 'R:' : 'R';
+      else if (isRap) prefix = 'F:'; // legacy
       else if (isFreestyle) prefix = 'F';
       else if (isGolden) prefix = '*';
       else prefix = ':';
@@ -78,7 +80,7 @@ export function notesToUltrastar(notes) {
       const isGolden = note.isGolden || note.type === 'golden';
       const isRap = note.isRap || note.type === 'rap';
       const isFreestyle = note.isFreestyle || note.type === 'freestyle';
-      const prefix = isRap ? 'F:' : isFreestyle ? 'F' : isGolden ? '*' : ':';
+      const prefix = isRap ? 'R' : isFreestyle ? 'F' : isGolden ? '*' : ':';
       lines.push(`${prefix} ${note.startBeat} ${note.duration} ${note.pitch} ${note.syllable}`);
     }
   }

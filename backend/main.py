@@ -4068,7 +4068,7 @@ async def save_editor_state(session_id: str, request: Request):
             if note.get("isGolden"):
                 prefix = "*"
             elif note.get("isRap"):
-                prefix = "F:"
+                prefix = "R"
             elif note.get("isFreestyle"):
                 prefix = "F"
             else:

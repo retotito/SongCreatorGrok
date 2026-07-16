@@ -98,7 +98,7 @@ def generate_ultrastar(
         # Get pitch for this syllable's time window
         if is_rap:
             midi_pitch = 0
-            prefix = "F:"
+            prefix = "R"
         else:
             midi_pitch = get_pitch_for_segment(pitch_data, start_sec, end_sec)
             if midi_pitch == 0:
