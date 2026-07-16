@@ -4069,6 +4069,8 @@ async def save_editor_state(session_id: str, request: Request):
                 prefix = "*"
             elif note.get("isRap"):
                 prefix = "F:"
+            elif note.get("isFreestyle"):
+                prefix = "F"
             else:
                 prefix = ":"
             lines.append(f"{prefix} {note['startBeat']} {note['duration']} {note['pitch']} {note['syllable']}")

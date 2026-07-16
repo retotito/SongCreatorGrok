@@ -2,7 +2,7 @@
  * Parse an Ultrastar .txt content string into an array of note objects.
  *
  * Each note object has:
- *   { id, startBeat, duration, pitch, syllable, isRap, isGolden, confidence, original }
+ *   { id, startBeat, duration, pitch, syllable, isRap, isGolden, isFreestyle, confidence, original }
  * Break lines produce:
  *   { id, type: 'break', startBeat, endBeat }
  */
@@ -13,11 +13,13 @@ export function parseUltrastar(content) {
 
   for (const line of lines) {
     const trimmed = line.trimStart(); // trimStart only — trailing space is part of the syllable
-    if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('F:')) {
+    if (trimmed.startsWith('*') || trimmed.startsWith(':') || trimmed.startsWith('F:') || trimmed.startsWith('F ') || trimmed === 'F') {
       const isGolden = trimmed.startsWith('*');
       const isRap = trimmed.startsWith('F:');
+      const isFreestyle = !isRap && trimmed.startsWith('F');
       let prefix;
       if (isRap) prefix = 'F:';
+      else if (isFreestyle) prefix = 'F';
       else if (isGolden) prefix = '*';
       else prefix = ':';
       // Parse 3 numeric fields, then preserve the rest as syllable text
@@ -39,6 +41,7 @@ export function parseUltrastar(content) {
           syllable,
           isRap,
           isGolden: isGolden || false,
+          isFreestyle: isFreestyle || false,
           confidence: 1.0,
           original: { startBeat, duration, pitch },
         });
@@ -62,8 +65,8 @@ export function parseUltrastar(content) {
  * Serialize an array of note objects (as produced by parseUltrastar) into
  * Ultrastar note lines (no headers, no trailing "E").
  *
- * Supports both the `isGolden`/`isRap` boolean style (from parseUltrastar) and
- * the `type` string style ('golden', 'rap', 'break') used internally by the editor.
+ * Supports both the `isGolden`/`isRap`/`isFreestyle` boolean style (from parseUltrastar) and
+ * the `type` string style ('golden', 'rap', 'freestyle', 'break') used internally by the editor.
  */
 export function notesToUltrastar(notes) {
   const lines = [];
@@ -74,7 +77,8 @@ export function notesToUltrastar(notes) {
     } else {
       const isGolden = note.isGolden || note.type === 'golden';
       const isRap = note.isRap || note.type === 'rap';
-      const prefix = isRap ? 'F:' : isGolden ? '*' : ':';
+      const isFreestyle = note.isFreestyle || note.type === 'freestyle';
+      const prefix = isRap ? 'F:' : isFreestyle ? 'F' : isGolden ? '*' : ':';
       lines.push(`${prefix} ${note.startBeat} ${note.duration} ${note.pitch} ${note.syllable}`);
     }
   }

@@ -1935,6 +1935,7 @@
           syllable: n.syllable,
           isRap: n.isRap || false,
           isGolden: n.isGolden || false,
+          isFreestyle: n.isFreestyle || false,
         };
       });
 
@@ -2789,6 +2790,9 @@
       } else if (note.isRap) {
         ctx.fillStyle = micHollow ? (isSelected ? '#ff980033' : '#ff980012') : (isSelected ? '#ff980088' : (isCut ? '#ff980022' : '#ff980044'));
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
+      } else if (note.isFreestyle) {
+        ctx.fillStyle = micHollow ? (isSelected ? '#b39ddb33' : '#b39ddb12') : (isSelected ? '#b39ddb88' : (isCut ? '#b39ddb22' : '#b39ddb44'));
+        ctx.strokeStyle = isCut ? '#4fc3f766' : '#ce93d8';
       } else {
         ctx.fillStyle = micHollow ? (isSelected ? '#4fc3f733' : '#4fc3f712') : (isSelected ? '#4fc3f788' : (isCut ? '#4fc3f722' : '#4fc3f744'));
         ctx.strokeStyle = isCut ? '#4fc3f766' : '#4fc3f7';
@@ -2831,7 +2835,7 @@
         }
       }
 
-      // Golden star / rap indicator — drawn above the note, outside the note rect
+      // Golden star / rap / freestyle indicator — drawn above the note, outside the note rect
       if (note.isGolden && width > 14) {
         ctx.fillStyle = '#ffd700';
         ctx.font = 'bold 15px sans-serif';
@@ -2840,6 +2844,10 @@
         ctx.fillStyle = '#ff9800';
         ctx.font = 'bold 15px sans-serif';
         ctx.fillText('R', x + width - 13, y - noteHeight / 2 - 5);
+      } else if (note.isFreestyle && width > 14) {
+        ctx.fillStyle = '#ce93d8';
+        ctx.font = 'bold 13px sans-serif';
+        ctx.fillText('F', x + width - 12, y - noteHeight / 2 - 5);
       }
 
       // Syllable text — show · after syllable if it has a trailing space (space visualisation)
@@ -5241,6 +5249,7 @@
         syllable: i === 0 ? note.syllable : ' ~',
         isRap: false,
         isGolden: !!note.isGolden,
+        isFreestyle: !!note.isFreestyle,
         confidence: note.confidence ?? 1.0,
         original: { startBeat: segStart, duration: dur, pitch: Math.round(useSegments[i].pitch) },
       });
@@ -5744,14 +5753,13 @@
       const note = notes.find(n => n.id === id);
       if (!note || note.type === 'break') continue;
       if (type === 'golden') {
-        note.isRap = false;
-        note.isGolden = true;
+        note.isRap = false; note.isGolden = true; note.isFreestyle = false;
       } else if (type === 'rap') {
-        note.isRap = true;
-        note.isGolden = false;
+        note.isRap = true; note.isGolden = false; note.isFreestyle = false;
+      } else if (type === 'freestyle') {
+        note.isRap = false; note.isGolden = false; note.isFreestyle = true;
       } else {
-        note.isRap = false;
-        note.isGolden = false;
+        note.isRap = false; note.isGolden = false; note.isFreestyle = false;
       }
     }
 
@@ -5813,6 +5821,7 @@
       syllable: 'word ',
       isRap: false,
       isGolden: false,
+      isFreestyle: false,
       confidence: 1.0,
       original: { startBeat: beat, duration, pitch },
     };
@@ -7567,6 +7576,7 @@
           type: ':',
           isRap: false,
           isGolden: false,
+          isFreestyle: false,
           analyzeWordIndex: note.analyzeWordIndex,
         });
         console.log('[Analyze5s] word note', {
@@ -7606,6 +7616,7 @@
         type: ':',
         isRap: false,
         isGolden: false,
+        isFreestyle: false,
       });
     }
 
@@ -10352,7 +10363,11 @@
             <button
               class="ctx-type-btn rap" class:active={ctxNote.isRap}
               on:click={() => setNoteType(ctxNote.id, 'rap')}
-            >F Rap</button>
+            >R Rap</button>
+            <button
+              class="ctx-type-btn freestyle" class:active={ctxNote.isFreestyle}
+              on:click={() => setNoteType(ctxNote.id, 'freestyle')}
+            >F Freestyle</button>
           </div>
           <div class="ctx-divider"></div>
           <button class="ctx-item" on:click={clipboardCut}>
@@ -12396,6 +12411,12 @@
   .ctx-type-btn.rap.active {
     background: #ff9800;
     border-color: #ff9800;
+  }
+
+  .ctx-type-btn.freestyle.active {
+    background: #ce93d8;
+    border-color: #ce93d8;
+    color: #1a1a1a;
   }
 
   .ctx-break-label {
