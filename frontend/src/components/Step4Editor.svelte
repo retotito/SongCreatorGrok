@@ -460,9 +460,9 @@
   }
 
   function clearMarkerSelection() {
+    // Only clear non-note selections (flags, cleanup segments).
+    // Note selection is cleared only by canvas clicks, not toolbar button clicks.
     selectedFlag = null;
-    selectedNote = null;
-    selectedNotes = new Set();
   }
 
   function clearCleanupKeyboardSaveTimer() {
@@ -6904,8 +6904,8 @@
       return;
     }
 
-    // L: toggle loop on/off
-    if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey && selectedNote === null) {
+    // L: toggle loop on/off (works regardless of note selection)
+    if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       toggleLoop();
     }
