@@ -238,7 +238,7 @@ Open **http://localhost:5173** in your browser. The Vite proxy automatically for
 The app supports lyrics transcription and Ultrastar song generation in **97 languages** via Whisper:
 
 <details>
-<summary>Show all supported languages</summary>
+<summary><strong>🌍 Show all 97 supported languages</strong></summary>
 
 | Code | Language | Code | Language | Code | Language |
 |------|----------|------|----------|------|----------|
