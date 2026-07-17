@@ -75,6 +75,10 @@ This shows all processing steps — vocal separation progress, transcription, pi
 |:-------------------:|:---------------:|
 | [![Looping & Scrubbing](https://img.youtube.com/vi/WwAZQlhqSwE/hqdefault.jpg)](https://www.youtube.com/watch?v=WwAZQlhqSwE&t=2s) | [![BPM & Metronome](https://img.youtube.com/vi/L8jnov5M-XY/hqdefault.jpg)](https://www.youtube.com/watch?v=L8jnov5M-XY) |
 
+| Latest Tutorial |
+|:---------------:|
+| [![Latest Tutorial](https://img.youtube.com/vi/WOKcdjpthh0/hqdefault.jpg)](https://www.youtube.com/watch?v=WOKcdjpthh0) |
+
 ## Screenshots
 
 ### Home — Project Launcher
