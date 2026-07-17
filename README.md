@@ -4,7 +4,7 @@
   <img src="frontend/src-tauri/icons/icon.png" alt="Ultrastar Creator Icon" width="128" />
 </p>
 
-> **Latest release: v4.0.0** — Cleanup sections, segment recording & AI re-generation, vibrato tool, metronome with draggable downbeat, song backup, CodeMirror lyrics editor, pitch lines, and many editor UX improvements. See [Changelog](#changelog) below.
+> **Latest release: v4.1.0** — Freestyle note support, editor bug fixes, and [97 supported languages](#supported-languages) for lyrics & Ultrastar song generation. See [Changelog](#changelog) below.
 
 A tool to create **Ultrastar karaoke songs** with the help of AI. It guides you through 4 steps — from uploading audio to exporting a ready-to-play Ultrastar .txt file — using automatic vocal separation, pitch detection, and lyrics alignment to do the heavy lifting, while you fine-tune the result in a built-in piano roll editor.
 
@@ -233,7 +233,63 @@ npm run dev
 
 Open **http://localhost:5173** in your browser. The Vite proxy automatically forwards `/api/*` requests to the backend on port 8001.
 
+## Supported Languages
+
+The app supports lyrics transcription and Ultrastar song generation in **97 languages** via Whisper:
+
+<details>
+<summary>Show all supported languages</summary>
+
+| Code | Language | Code | Language | Code | Language |
+|------|----------|------|----------|------|----------|
+| `af` | Afrikaans | `sq` | Albanian | `am` | Amharic |
+| `ar` | Arabic | `hy` | Armenian | `az` | Azerbaijani |
+| `ba` | Bashkir | `eu` | Basque | `be` | Belarusian |
+| `bn` | Bengali | `bs` | Bosnian | `br` | Breton |
+| `bg` | Bulgarian | `ca` | Catalan | `zh` | Chinese |
+| `hr` | Croatian | `cs` | Czech | `da` | Danish |
+| `nl` | Dutch | `en` | English | `et` | Estonian |
+| `fo` | Faroese | `fi` | Finnish | `fr` | French |
+| `gl` | Galician | `ka` | Georgian | `de` | German |
+| `el` | Greek | `gu` | Gujarati | `ht` | Haitian Creole |
+| `ha` | Hausa | `haw` | Hawaiian | `he` | Hebrew |
+| `hi` | Hindi | `hu` | Hungarian | `is` | Icelandic |
+| `id` | Indonesian | `it` | Italian | `ja` | Japanese |
+| `jw` | Javanese | `kn` | Kannada | `kk` | Kazakh |
+| `km` | Khmer | `ko` | Korean | `lo` | Lao |
+| `la` | Latin | `lv` | Latvian | `ln` | Lingala |
+| `lt` | Lithuanian | `lb` | Luxembourgish | `mk` | Macedonian |
+| `mg` | Malagasy | `ms` | Malay | `ml` | Malayalam |
+| `mt` | Maltese | `mi` | Maori | `mr` | Marathi |
+| `mn` | Mongolian | `my` | Myanmar | `ne` | Nepali |
+| `no` | Norwegian | `nn` | Nynorsk | `oc` | Occitan |
+| `ps` | Pashto | `fa` | Persian | `pl` | Polish |
+| `pt` | Portuguese | `pa` | Punjabi | `ro` | Romanian |
+| `ru` | Russian | `sa` | Sanskrit | `sr` | Serbian |
+| `sn` | Shona | `sd` | Sindhi | `si` | Sinhala |
+| `sk` | Slovak | `sl` | Slovenian | `so` | Somali |
+| `es` | Spanish | `su` | Sundanese | `sw` | Swahili |
+| `sv` | Swedish | `tl` | Tagalog | `tg` | Tajik |
+| `ta` | Tamil | `tt` | Tatar | `te` | Telugu |
+| `th` | Thai | `bo` | Tibetan | `tr` | Turkish |
+| `tk` | Turkmen | `uk` | Ukrainian | `ur` | Urdu |
+| `uz` | Uzbek | `vi` | Vietnamese | `cy` | Welsh |
+| `yi` | Yiddish | `yo` | Yoruba | | |
+
+</details>
+
 ## Changelog
+
+### v4.1.0
+
+#### 🎵 Freestyle Note Support
+- New **freestyle note type** (`F` prefix) — parsed, rendered in purple, available via context menu, and supported in the backend pipeline
+- Standard `R` prefix used for rap notes (legacy `F:` prefix accepted as input for compatibility)
+
+#### 🐛 Bug Fixes
+- **Selection panel** — deselect button now works correctly; close button made larger for easier clicking
+- **L key** — works correctly with notes selected; toolbar buttons no longer accidentally deselect notes
+- **Metronome grid** — uses nearest power-of-2 for `BEATS_PER_QUARTER` to fix grid alignment at unusual BPMs (e.g. 464)
 
 ### v4.0.0
 
