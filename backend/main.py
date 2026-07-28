@@ -4793,6 +4793,10 @@ async def download_file(
         def _round_gap(m):
             return f"#GAP:{round(int(m.group(1)), -1)}"
         content = _re_dl.sub(r'^#GAP:(\d+)$', _round_gap, content, flags=_re_dl.MULTILINE)
+        # Normalize apostrophes in note lines to typographic apostrophe (U+2019)
+        def _fix_apostrophes(m):
+            return _re_dl.sub(r"['\u0060\u00b4\u02bc\u2018\u201a]", "\u2019", m.group(0))
+        content = _re_dl.sub(r'^[^#].*$', _fix_apostrophes, content, flags=_re_dl.MULTILINE)
         if include_vocals != "1":
             content = _remove_header(content, "VOCALS")
         if include_instrumental != "1":
