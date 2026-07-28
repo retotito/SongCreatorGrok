@@ -1463,7 +1463,7 @@ async def import_ultrastar(
     timestamp = int(time.time())
     txt_filename = f"song_{timestamp}.txt"
     txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
-    with open(txt_path, "w", encoding="utf-8") as f:
+    with open(txt_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(txt_content)
 
     # Create session with result — store None for missing files, not aliases
@@ -3346,7 +3346,7 @@ def generate_lyrics_only(session_id: str):
         timestamp = int(time.time())
         txt_filename = f"song_{timestamp}.txt"
         txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
-        with open(txt_path, "w", encoding="utf-8") as f:
+        with open(txt_path, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(txt_content)
 
         elapsed = time.time() - generation_start
@@ -3564,7 +3564,7 @@ def generate_ultrastar_files(session_id: str):
         midi_path = os.path.join(DOWNLOADS_DIR, midi_filename)
         summary_path = os.path.join(DOWNLOADS_DIR, summary_filename)
         
-        with open(txt_path, "w", encoding="utf-8") as f:
+        with open(txt_path, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(txt_content)
         
         generate_midi(syllable_timings, pitch_data, bpm, midi_path)
@@ -4100,7 +4100,7 @@ async def save_editor_state(session_id: str, request: Request):
     timestamp = int(time.time())
     txt_filename = f"song_{timestamp}.txt"
     txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
-    with open(txt_path, "w", encoding="utf-8") as f:
+    with open(txt_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(ultrastar_content)
 
     if old_txt and old_txt != txt_filename:
@@ -4210,7 +4210,7 @@ async def backup_restore(session_id: str, ts: int):
     timestamp = int(time.time())
     txt_filename = f"song_{timestamp}.txt"
     txt_path = os.path.join(DOWNLOADS_DIR, txt_filename)
-    with open(txt_path, "w", encoding="utf-8") as f:
+    with open(txt_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(txt_content)
     if old_txt and old_txt != txt_filename:
         _safe_unlink_download_name(old_txt)
@@ -4793,6 +4793,28 @@ async def download_file(
             content = _remove_header(content, "VOCALS")
         if include_instrumental != "1":
             content = _remove_header(content, "INSTRUMENTAL")
+        # Strip non-standard headers not recognised by USDB/animux.de and deduplicate
+        _USDB_KNOWN_HEADERS = {
+            'TITLE', 'ARTIST', 'BPM', 'GAP', 'LANGUAGE', 'MP3', 'VOCALS',
+            'INSTRUMENTAL', 'COVER', 'BACKGROUND', 'VIDEO', 'VIDEOGAP',
+            'GENRE', 'YEAR', 'EDITION', 'CREATOR', 'COMMENT', 'YOUTUBE',
+            'END', 'PREVIEWSTART', 'MEDLEYSTARTBEAT', 'MEDLEYENDBEAT',
+            'RELATIVE', 'ENCODING', 'TAGS',
+        }
+        seen_keys = set()
+        filtered_lines = []
+        for ln in content.splitlines():
+            if ln.startswith('#'):
+                key_part = ln[1:].split(':')[0].upper()
+                if key_part not in _USDB_KNOWN_HEADERS:
+                    continue  # drop non-standard header
+                if key_part in seen_keys:
+                    continue  # drop duplicate
+                seen_keys.add(key_part)
+            filtered_lines.append(ln)
+        content = '\r\n'.join(filtered_lines)
+        if not content.endswith('\r\n'):
+            content += '\r\n'
         # Build a user-friendly download name from artist/title
         artist = session.get("artist", "").strip()
         title = session.get("title", "").strip()

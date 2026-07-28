@@ -114,6 +114,7 @@ def generate_ultrastar(
             break_start = last_end_beat + 2  # 2 beat padding after last note
             note_lines.append(f"- {break_start}")
         
+        syllable = syllable.replace("\u00a0", " ")
         note_lines.append(f"{prefix} {start_beat} {duration_beats} {midi_pitch} {syllable}")
         
         last_end_beat = start_beat + duration_beats
@@ -123,6 +124,8 @@ def generate_ultrastar(
     note_lines.append("E")
     
     content = header + "\n".join(note_lines)
+    # Normalize any non-breaking spaces that may have come from lyrics/metadata
+    content = content.replace("\u00a0", " ")
     
     log_step("ULTRASTAR", f"Generated {len(note_lines) - 1} note lines")
     

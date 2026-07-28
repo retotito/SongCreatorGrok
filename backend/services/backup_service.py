@@ -64,7 +64,7 @@ def create_backup(sessions_dir: str, session_id: str, txt_content: str, auto: bo
     filename = f"backup_{ts}_{suffix}.txt"
     fpath = os.path.join(backup_dir, filename)
 
-    with open(fpath, "w", encoding="utf-8") as f:
+    with open(fpath, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(txt_content)
 
     size = os.path.getsize(fpath)
