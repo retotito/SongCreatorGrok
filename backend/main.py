@@ -4797,6 +4797,16 @@ async def download_file(
         def _fix_apostrophes(m):
             return _re_dl.sub(r"['\u0060\u00b4\u02bc\u2018\u201a]", "\u2019", m.group(0))
         content = _re_dl.sub(r'^[^#].*$', _fix_apostrophes, content, flags=_re_dl.MULTILINE)
+        # Convert mid-word syllables to use trailing '-' instead of no trailing space
+        # Note lines: ": beat dur pitch syllable" — no trailing space = word continues
+        def _fix_hyphens(m):
+            line = m.group(0)
+            # Note lines have format: PREFIX BEAT DUR PITCH SYLLABLE
+            # If syllable does NOT end with a space, it's mid-word → append '-'
+            if not line.endswith(' '):
+                line = line + '-'
+            return line
+        content = _re_dl.sub(r'^[:*RF] \d+ \d+ \d+ .*$', _fix_hyphens, content, flags=_re_dl.MULTILINE)
         if include_vocals != "1":
             content = _remove_header(content, "VOCALS")
         if include_instrumental != "1":
