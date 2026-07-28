@@ -1675,15 +1675,33 @@
     // If notes have been added/split beyond rawTimings count, we cannot safely rebuild
     // from rawTimings (it would discard user-added notes and misalign syllables).
     // Instead, directly scale all beat positions proportionally.
-    if (bpmActuallyChanged && currentNotes.length !== rawTimings.length) {
+    // This applies to both BPM changes AND GAP-only changes when note counts differ.
+    if (currentNotes.length !== rawTimings.length) {
       const prevBpm = Math.max(1, Number(previousTimingRef?.bpm) || bpm);
-      notes = notes.map(n => {
-        const newStartBeat = Math.round(n.startBeat * bpm / prevBpm);
-        const newDuration = n.type === 'break' ? n.duration : Math.max(1, Math.round((n.duration ?? 1) * bpm / prevBpm));
-        const newEndBeat = n.endBeat == null ? null : Math.round(n.endBeat * bpm / prevBpm);
-        return { ...n, startBeat: newStartBeat, duration: newDuration, endBeat: newEndBeat };
-      });
-      // Sync rawTimings to the new beat positions so subsequent BPM changes stay accurate
+      if (bpmActuallyChanged) {
+        // BPM change: scale beats proportionally
+        notes = notes.map(n => {
+          const newStartBeat = Math.round(n.startBeat * bpm / prevBpm);
+          const newDuration = n.type === 'break' ? n.duration : Math.max(1, Math.round((n.duration ?? 1) * bpm / prevBpm));
+          const newEndBeat = n.endBeat == null ? null : Math.round(n.endBeat * bpm / prevBpm);
+          return { ...n, startBeat: newStartBeat, duration: newDuration, endBeat: newEndBeat };
+        });
+      } else {
+        // GAP-only change: preserve absolute audio positions by converting via old GAP
+        const prevGapMs = Number.isFinite(previousTimingRef?.gapMs) ? Number(previousTimingRef.gapMs) : gapMs;
+        notes = notes.map(n => {
+          if (n.type === 'break') {
+            const startMs = prevGapMs + n.startBeat * 15000 / prevBpm;
+            const newStart = Math.round((startMs - gapMs) * bpm / 15000);
+            const newEnd = n.endBeat == null ? null : Math.max(newStart + 1, Math.round(((prevGapMs + n.endBeat * 15000 / prevBpm) - gapMs) * bpm / 15000));
+            return { ...n, startBeat: newStart, endBeat: newEnd };
+          }
+          const startMs = prevGapMs + n.startBeat * 15000 / prevBpm;
+          const newStart = Math.round((startMs - gapMs) * bpm / 15000);
+          return { ...n, startBeat: newStart };
+        });
+      }
+      // Sync rawTimings to the new beat positions so subsequent changes stay accurate
       syncRawTimingsFromNotes();
       updatePitchRange();
       computeTotalBeats();
