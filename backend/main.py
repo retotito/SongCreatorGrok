@@ -4789,6 +4789,10 @@ async def download_file(
             return m.group(1) + _re_dl.sub(r'\.[^.]+$', '.mp3', m.group(2))
         content = _re_dl.sub(r'^(#MP3:)(.+)$', _force_mp3_ext, content, flags=_re_dl.MULTILINE)
         content = _re_dl.sub(r'^(#VOCALS:)(.+)$', _force_mp3_ext, content, flags=_re_dl.MULTILINE)
+        # Round GAP to nearest 10 ms (USDX editor only supports 10 ms steps)
+        def _round_gap(m):
+            return f"#GAP:{round(int(m.group(1)), -1)}"
+        content = _re_dl.sub(r'^#GAP:(\d+)$', _round_gap, content, flags=_re_dl.MULTILINE)
         if include_vocals != "1":
             content = _remove_header(content, "VOCALS")
         if include_instrumental != "1":
