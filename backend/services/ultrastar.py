@@ -3,6 +3,12 @@
 from typing import List, Optional
 from utils.logger import log_step
 
+
+def _fmt_bpm(bpm: float) -> str:
+    """Format BPM without unnecessary trailing zeros (e.g. 612.0 → '612', 612.35 → '612.35')."""
+    s = f"{bpm:.2f}".rstrip('0').rstrip('.')
+    return s
+
 # ISO 639-1 code → full English language name for #LANGUAGE header
 _ISO_TO_LANGUAGE_NAME = {
     "af": "Afrikaans", "sq": "Albanian", "ar": "Arabic", "hy": "Armenian",
@@ -63,7 +69,7 @@ def generate_ultrastar(
     header = (
         f"#ARTIST:{artist}\n"
         f"#TITLE:{title}\n"
-        f"#BPM:{bpm:.2f}\n"
+        f"#BPM:{_fmt_bpm(bpm)}\n"
         f"#GAP:{gap_ms}\n"
         f"#LANGUAGE:{language_name}\n"
         f"#MP3:{mp3_filename}\n"
@@ -150,7 +156,7 @@ def generate_lyrics_only_txt(
     header = (
         f"#ARTIST:{artist}\n"
         f"#TITLE:{title}\n"
-        f"#BPM:{bpm:.2f}\n"
+        f"#BPM:{_fmt_bpm(bpm)}\n"
         f"#GAP:{gap_ms}\n"
         f"#LANGUAGE:{language_name}\n"
         f"#MP3:{mp3_filename}\n"

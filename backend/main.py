@@ -3801,7 +3801,7 @@ async def generate_empty(session_id: str):
         f"#LANGUAGE:{info.get('language', '')}\n"
         f"#MP3:{mp3_filename}\n"
         f"#VOCALS:{vocals_filename}\n"
-        f"#BPM:{bpm:.2f}\n"
+        f"#BPM:{float(bpm):.2f}".rstrip('0').rstrip('.') + "\n"
         f"#GAP:{gap_ms}\n"
         f"#YEAR:{info.get('year', '')}\n"
     )
@@ -4016,7 +4016,7 @@ async def save_editor_state(session_id: str, request: Request):
     lines = []
     lines.append(f"#TITLE:{session.get('title', 'Unknown Song')}")
     lines.append(f"#ARTIST:{session.get('artist', 'Unknown Artist')}")
-    lines.append(f"#BPM:{editor_bpm:.2f}")
+    lines.append(f"#BPM:{float(editor_bpm):.2f}".rstrip('0').rstrip('.'))
     lines.append(f"#GAP:{int(editor_gap)}")
     lang = session.get("language", "en")
     lang_name = {
